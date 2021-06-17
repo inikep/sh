@@ -1,0 +1,6 @@
+To use this:
+1) copy the sysbench binary into this directoy
+2) copy the test files (oltp*.lua) into this directory
+3) run.sh assume that root/pw is a valid login and the database is at 127.0.0.1:3306
+
+Use all.sh to run all tests.

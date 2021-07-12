@@ -1,5 +1,10 @@
+#!/bin/bash -x
+
 # init   - copy binaries from $BUILDDIR to $ROOTDIR if required, initialize mysqld database
 # start  - start sysbench
+
+killall -9 mysqld && sleep 3
+killall -9 vmstat
 
 COMMAND_TYPE=$1
 SERVER_BUILD=$2
@@ -9,7 +14,8 @@ if [ "$ENGINE" == "zenfs" ]; then
   DEV=nvme1n2
   ZENFS_PATH=/data/zenfs_sysbench_$DEV
   rm -rf $ZENFS_PATH
-  /data/sh/zenfs mkfs --zbd=$DEV --aux_path=$ZENFS_PATH --finish_threshold=0 --force
+  # zbd reset /dev/nvme1n2
+  /data/sh/zenfs mkfs --zbd=$DEV --aux_path=$ZENFS_PATH --finish_threshold=0 --force || exit
 else
   SUBENGINE=$ENGINE
 fi
@@ -17,12 +23,9 @@ CONFIG_FILE=$4
 CFG_FILE=${CONFIG_FILE##*/}
 STARTPATH=$PWD
 
-if [[ "$SERVER_BUILD" == *"percona"* ]] || [[ "$SERVER_BUILD" == *"wdc"* ]]; then
-  IS_PERCONA_SERVER=1
-fi
 
 # params for creating tables
-NTABS=1
+NTABS=8
 NROWS=8000000
 CT_MEMORY=4
 
@@ -33,8 +36,6 @@ CONCURRENCY="8 16 32"
 #MEMORY="4 8 16"
 MEMORY="16"
 SECS="${5:-300}"
-killall -9 mysqld
-killall -9 vmstat
 printf "\nSERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE CFG_FILE=$CFG_FILE SECS=$SECS\n"
 
 DISKNAME=nvme1n1
@@ -159,8 +160,20 @@ if [ "${COMMAND_TYPE}" == "init" ]; then
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "ALTER USER 'root'@'localhost' IDENTIFIED BY 'pw'"
   CLIENT_OPT="$CLIENT_OPT -ppw"
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "CREATE DATABASE test"
-  free -m
 
+NTHREADS=16
+RANGE_SIZE=10000
+
+SYSBENCH="/usr/local/bin/sysbench --db-driver=mysql --mysql-user=root --mysql-password=pw --mysql-host=127.0.0.1 --mysql-db=test --mysql-storage-engine=$SUBENGINE "
+SYSBENCH+="--table-size=$NROWS --tables=$NTABS --threads=$NTHREADS --events=0 --report-interval=5"
+
+$SYSBENCH /usr/local/share/sysbench/oltp_read_only.lua prepare --rand-type=uniform --range-size=$RANGE_SIZE
+$SYSBENCH /usr/local/share/sysbench/oltp_insert.lua run --time=$SECS --range-size=$RANGE_SIZE
+
+#$MYSQLDIR/bin/mysql $CLIENT_OPT -Bse "SELECT COUNT(*) FROM test.sbtest1" mysql
+shutdownmysql
+exit
+  free -m
   echo "- Load data from file"
   $MYSQLDIR/bin/mysql $CLIENT_OPT -Bse "CREATE TABLE test.sbtest1 (id int NOT NULL AUTO_INCREMENT, k int NOT NULL DEFAULT '0', c char(120) COLLATE latin1_bin NOT NULL DEFAULT '', pad char(60) COLLATE latin1_bin NOT NULL DEFAULT '', PRIMARY KEY (id)) ENGINE=RocksDB AUTO_INCREMENT=1 DEFAULT CHARSET=latin1 COLLATE=latin1_bin" mysql
   $MYSQLDIR/bin/mysql $CLIENT_OPT -Bse "LOAD DATA INFILE '/data/txt/sql/sysbench_8Mb.txt' INTO TABLE test.sbtest1" mysql

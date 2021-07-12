@@ -181,7 +181,7 @@ fi
 rm -f sb.r.trx.$sfx sb.r.qps.$sfx sb.r.rtavg.$sfx sb.r.rtmax.$sfx sb.r.rt95.$sfx
 
 for nt in "$@"; do
-echo Run for $nt threads
+echo Run for $nt threads and $nr rows
 
 echo Run for nt $nt at $( date )
 killall vmstat >& /dev/null

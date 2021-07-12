@@ -20,12 +20,27 @@ echo >$OUTCSV "Date;Author;fbshipit-source-id;Commit title;FB Tag;Commit;Link;Di
 for COMMIT in $(git rev-list --first-parent --topo-order --reverse $COMMIT2 ^$COMMIT1)
 do
   TAGS=""
+  git-check-files "mysql-test-run\.pl" mysql-test-run
+  git-check-files "\.gitignore" gitignore
+  git-check-files "\.pem" cert
+  git-check-files "\.cmake" cmake
+  git-check-files "CMakeLists\.txt" cmake
+  git-check-files rocks rocks
+  git-check-files innobase innobase
   git-check-files valgrind valgrind
   git-check-files jemalloc jemalloc
   git-check-files clang clang
   git-check-files raft raft
+  git-check-files "client/" client
+  git-check-files "components/" components
+  git-check-files "libmysql/" libmysql
+  git-check-files "mysys/" mysys
+  git-check-files "plugin/" plugin
   git-check-files "sql/" sql
-  git-check-files rocks rocks
+  git-check-files "sql-common/" sql-common
+  git-check-files "mysql-test/" mtr
+  git-check-files "vio/" vio
+  git-check-files "unittest/" unittest
   if [[ "$TAGS" != "" ]]; then TAGS=${TAGS::-1}; fi
 
   MTR_FILES=$(git diff --name-only $COMMIT~..$COMMIT | grep -P ."\.(result|test)" | cut -f 1 -d '.' | rev | cut -f 1 -d '/' | rev | sort | uniq | tr '\n' ',')

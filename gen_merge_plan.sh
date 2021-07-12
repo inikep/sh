@@ -42,12 +42,15 @@ do
   TITLE=$(git show -s --format=%s $COMMIT)
   ROCKS_FILES=`git diff --name-only $COMMIT~..$COMMIT | grep rocksdb`
   if [[ "$ROCKS_FILES" != "" ]]; then
+     MTR_FILES=$(git diff --name-only $COMMIT~..$COMMIT | grep -P ."\.(result|test)" | cut -f 1 -d '.' | rev | cut -f 1 -d '/' | rev | sort | uniq | tr '\n' ' ')
+     if [[ "$MTR_FILES" != "" ]]; then MTR_FILES=${MTR_FILES::-1}; fi
      ROCKS_FILES=`git diff --name-only $COMMIT~..$COMMIT`
      printf >>$OUTNAME "\nCOMMIT $i: $COMMIT $TITLE\n"
      printf >>$OUTNAME -- "------------------------------------------------------\n"
      printf >>$OUTNAME "Upstream commit ID : fb-mysql-5.6.35/$COMMIT\n"
      printf >>$OUTNAME "$PS_JIRA : Merge $FBPROD2\n\n"
-     echo >>$OUTNAME "$ROCKS_FILES";
+     printf >>$OUTNAME "Modified MTR files: $MTR_FILES\n\n"
+     echo >>$OUTNAME "$ROCKS_FILES"
      echo >>$OUTNAME-jira "- [$COMMIT $TITLE|https://github.com/facebook/mysql-5.6/commit/$COMMIT]"
      ((i=i+1))
   fi

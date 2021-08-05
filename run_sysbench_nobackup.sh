@@ -1,4 +1,4 @@
-#!/bin/bash -x
+#!/bin/bash
 
 # init   - copy binaries from $BUILDDIR to $ROOTDIR if required, initialize mysqld database
 # start  - start sysbench
@@ -25,9 +25,16 @@ STARTPATH=$PWD
 
 
 # params for creating tables
-NTABS=8
-NROWS=8000000
+NTABS=16
+NROWS=200000000
 CT_MEMORY=4
+
+# sysbench
+NTHREADS=16
+RANGE_SIZE=10000
+
+SYSBENCH="/usr/local/bin/sysbench --db-driver=mysql --mysql-user=root --mysql-password=pw --mysql-host=127.0.0.1 --mysql-db=test --mysql-storage-engine=$SUBENGINE "
+SYSBENCH+="--table-size=$NROWS --tables=$NTABS --threads=$NTHREADS --events=0 --report-interval=5 --create_secondary=off"
 
 
 # params for benchmarking
@@ -74,12 +81,12 @@ fi
 
 # trap "trap - SIGTERM && kill -- -$$" SIGINT SIGTERM EXIT
 
-# startmysql $CFG_FILE $MEMORY
+# startmysql $CFG_FILE $MEMORY $ADDITIONAL_OPTIONS
 startmysql(){
   MEM="${2:-8}"
   ADDITIONAL_PARAMS=""
   if [ "$SUBENGINE" == "rocksdb" ]; then
-      ADDITIONAL_PARAMS="--rocksdb_block_cache_size=${MEM}G --rocksdb_merge_buf_size=1G"
+      ADDITIONAL_PARAMS="--rocksdb_block_cache_size=${MEM}G --rocksdb_merge_buf_size=1G $3"
   else 
       ADDITIONAL_PARAMS="--innodb_buffer_pool_size=${MEM}G"
   fi
@@ -142,7 +149,7 @@ if [ "${COMMAND_TYPE}" == "verify" ]; then
   startmysql $CFG_FILE $CT_MEMORY
   CLIENT_OPT="$CLIENT_OPT -ppw"
   waitmysql
-  $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; SELECT COUNT(*) FROM sbtest1; SHOW CREATE TABLE sbtest1; SHOW ENGINE ROCKSDB STATUS\G"
+  $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; SELECT COUNT(*) FROM sbtest1; SHOW CREATE TABLE sbtest1; SHOW ENGINE ROCKSDB STATUS\G;SELECT COUNT(*) FROM sbtest1;"
   shutdownmysql
   exit
 fi
@@ -154,23 +161,18 @@ if [ "${COMMAND_TYPE}" == "init" ]; then
   cp $MYSQLDIR/bin/mysqld-debug $MYSQLDIR/bin/mysqld
   $MYSQLDIR/bin/mysqld --initialize-insecure --basedir=$MYSQLDIR --datadir=$DATADIR --log-error-verbosity=2
 
-  startmysql $CFG_FILE $CT_MEMORY
+  startmysql $CFG_FILE $CT_MEMORY "--disable-log-bin --rocksdb_bulk_load=1"
   waitmysql
   echo "- Create 'test' database" 
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "ALTER USER 'root'@'localhost' IDENTIFIED BY 'pw'"
   CLIENT_OPT="$CLIENT_OPT -ppw"
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "CREATE DATABASE test"
 
-NTHREADS=16
-RANGE_SIZE=10000
-
-SYSBENCH="/usr/local/bin/sysbench --db-driver=mysql --mysql-user=root --mysql-password=pw --mysql-host=127.0.0.1 --mysql-db=test --mysql-storage-engine=$SUBENGINE "
-SYSBENCH+="--table-size=$NROWS --tables=$NTABS --threads=$NTHREADS --events=0 --report-interval=5"
-
+free -m
 $SYSBENCH /usr/local/share/sysbench/oltp_read_only.lua prepare --rand-type=uniform --range-size=$RANGE_SIZE
-$SYSBENCH /usr/local/share/sysbench/oltp_insert.lua run --time=$SECS --range-size=$RANGE_SIZE
-
 #$MYSQLDIR/bin/mysql $CLIENT_OPT -Bse "SELECT COUNT(*) FROM test.sbtest1" mysql
+free -m
+
 shutdownmysql
 exit
   free -m
@@ -189,8 +191,12 @@ do
 free -m
 
 startmysql $CFG_FILE $MEM
+CLIENT_OPT="$CLIENT_OPT -ppw"
 waitmysql
-run_sysbench
+#run_sysbench
+$SYSBENCH /usr/local/share/sysbench/oltp_read_write.lua run --time=$SECS --range-size=$RANGE_SIZE
+$SYSBENCH /usr/local/share/sysbench/oltp_write_only.lua run --time=$SECS --range-size=$RANGE_SIZE
+$SYSBENCH /usr/local/share/sysbench/oltp_insert.lua run --time=$SECS --range-size=$RANGE_SIZE
 shutdownmysql
 sleep 30
 

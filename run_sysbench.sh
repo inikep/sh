@@ -1,9 +1,5 @@
 #!/bin/bash 
 
-sudo sh -c 'echo - root privilleges acquired'
-sudo killall -9 mysqld && sleep 3
-sudo killall -9 vmstat
-
 SERVER_BUILD=$1
 BENCH_PATH=${BENCH_PATH:-/data/bench}
 BUILDDIR=${BUILDDIR:-/data/mysql-server}/$SERVER_BUILD
@@ -13,17 +9,7 @@ CFG_FILE=${CONFIG_FILE##*/}
 ENGINE=$3
 COMMAND_TYPE=$4
 
-if [ "$ENGINE" == "zenfs" ]; then
-  SUBENGINE=rocksdb
-  ZENFS_DEV=${ZENFS_DEV:-nvme1n2}
-  if [ "$COMMAND_TYPE" == "init" ]; then
-    ZENFS_PATH=$BENCH_PATH/zenfs_sysbench_$ZENFS_DEV
-    rm -rf $ZENFS_PATH
-    zenfs mkfs --zbd=$ZENFS_DEV --aux_path=$ZENFS_PATH --finish_threshold=0 --force || exit
-  fi
-else
-  SUBENGINE=$ENGINE
-fi
+if [ "$ENGINE" == "zenfs" ]; then SUBENGINE=rocksdb; else SUBENGINE=$ENGINE; fi
 
 if ([ "$COMMAND_TYPE" != "verify" ] && [ "$COMMAND_TYPE" != "init" ]) && [ "$COMMAND_TYPE" != "start" ] || ([ "$SUBENGINE" != "innodb" ] && [ "$SUBENGINE" != "rocksdb" ]) || [ $# -lt 3 ]; then
   echo "usage: $0 [server_build] [my.cnf] [innodb/rocksdb/zenfs] [init/start/verify]"
@@ -42,6 +28,19 @@ if [ ! -f "$CONFIG_FILE" ]; then
   echo "error: config file $CONFIG_FILE doesn't exist"
   exit
 fi
+
+sudo sh -c 'echo - root privilleges acquired'
+sudo killall -9 mysqld && sleep 3
+sudo killall -9 vmstat
+sudo rm -rf /tmp/mysqlx.sock.lock
+
+if [ "$ENGINE" == "zenfs" ] && [ "$COMMAND_TYPE" == "init" ]; then
+  ZENFS_DEV=${ZENFS_DEV:-nvme1n2}
+  ZENFS_PATH=$BENCH_PATH/zenfs_sysbench_$ZENFS_DEV
+  rm -rf $ZENFS_PATH
+  zenfs mkfs --zbd=$ZENFS_DEV --aux_path=$ZENFS_PATH --finish_threshold=0 --force || exit
+fi
+
 
 # params for creating tables
 NTABS=${NTABS:-16}
@@ -118,6 +117,15 @@ shutdownmysql(){
   $MYSQLDIR/bin/mysqladmin shutdown $CLIENT_OPT
 }
 
+print_database_size(){
+  if [ "$ENGINE" == "zenfs" ]; then
+    DATA_SIZE=`zenfs list --zbd=$ZENFS_DEV --path=./.rocksdb | awk '{sum+=$1;} END {print sum/1024/1024;}'`
+    echo "Size of RocksDB database is $DATA_SIZE MB"
+  else
+    du -ch $DATADIR
+  fi
+}
+
 waitmysql(){
   set +e
 
@@ -154,7 +162,7 @@ if [ "${COMMAND_TYPE}" == "verify" ]; then
   startmysql $CFG_FILE $CT_MEMORY
   CLIENT_OPT="$CLIENT_OPT -ppw"
   waitmysql
-  $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; SELECT COUNT(*) FROM sbtest1; SHOW CREATE TABLE sbtest1; SHOW ENGINE ROCKSDB STATUS\G;SELECT COUNT(*) FROM sbtest1;"
+  $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; SHOW CREATE TABLE sbtest1; SHOW ENGINE ROCKSDB STATUS\G; show table status"
   shutdownmysql
   exit
 fi
@@ -174,19 +182,16 @@ if [ "${COMMAND_TYPE}" == "init" ]; then
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "CREATE DATABASE test"
 
   free -m
-  $SYSBENCH /usr/local/share/sysbench/oltp_read_write.lua prepare --rand-type=uniform --range-size=$RANGE_SIZE
+  time $SYSBENCH /usr/local/share/sysbench/oltp_read_write.lua prepare --rand-type=uniform --range-size=$RANGE_SIZE
   #$MYSQLDIR/bin/mysql $CLIENT_OPT -Bse "SELECT COUNT(*) FROM test.sbtest1" mysql
   free -m
 
-  $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; SELECT COUNT(*) FROM sbtest1"
-  shutdownmysql
+  $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; show table status"
 
-  if [ "$ENGINE" == "zenfs" ]; then
-    DATA_SIZE=`zenfs list --zbd=$ZENFS_DEV --path=./.rocksdb | awk '{sum+=$1;} END {print sum/1024/1024;}'`
-    echo "Size of RocksDB database is $DATA_SIZE MB"
-  else
-    du -ch $DATADIR
-  fi
+  print_database_size
+  shutdownmysql
+  print_database_size
+
   exit
 fi
 

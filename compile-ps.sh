@@ -49,7 +49,7 @@ case $var in
 esac
 done
 
-SRV_ROOT=/data/mysql-server
+SRV_ROOT=${SRV_ROOT:-/data/mysql-server}
 SRV_PATH=$SRV_ROOT/$1
 
 OS_VERSION=$(lsb_release -d -s)

@@ -49,7 +49,8 @@ case $var in
 esac
 done
 
-SRV_PATH=/data/mysql-server/$1
+SRV_ROOT=/data/mysql-server
+SRV_PATH=$SRV_ROOT/$1
 
 OS_VERSION=$(lsb_release -d -s)
 if [[ "${OS_VERSION}" = *"CentOS release 6."* ]] || [[ "${OS_VERSION}" = *"CentOS Linux release 7."* ]]; then
@@ -118,7 +119,7 @@ echo ADDITIONAL_OPTS="'$ADDITIONAL_OPTS'"
 CCACHE_BIN=$(which ccache)
 
 CMAKE_OPT_COMMON="
- -DDOWNLOAD_ROOT=/data/mysql-server/_deps
+ -DDOWNLOAD_ROOT=$SRV_ROOT/_deps
  -DCMAKE_BUILD_TYPE=$BUILD
  -DMYSQL_MAINTAINER_MODE=$STOP_ON_WARN
  -DCMAKE_C_COMPILER_LAUNCHER=$CCACHE_BIN

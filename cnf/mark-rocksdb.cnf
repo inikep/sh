@@ -1,0 +1,57 @@
+# optimized my.cnf for myrocks
+
+[mysqld]
+sql_mode=no_engine_substitution,no_unsigned_subtraction
+default_tmp_storage_engine=MyISAM
+# tmpdir=/data/m/my/data
+# slow_query_log_file=/data/m/my/slow.log
+long_query_time=5
+# skip_log_bin
+# log_bin=/data/m/my/binlogs/bl
+log_bin=master
+max_binlog_size=1G
+# secure_file_priv=/data/txt/sql
+rocksdb_max_row_locks=16M
+binlog_format=ROW
+sync_binlog=0
+server_id=77
+# datadir=/data/m/my/data
+
+plugin-load=RocksDB=ha_rocksdb.so
+rocksdb
+default-storage-engine=rocksdb
+skip-innodb
+default-tmp-storage-engine=MyISAM
+character-set-server=latin1
+collation-server=latin1_bin
+# rocksdb_wal_dir=/data/m/my/txlogs
+transaction-isolation=READ-COMMITTED
+
+rocksdb_max_open_files=-1
+rocksdb_max_bottom_pri_background_compactions=1
+rocksdb_max_background_compactions=8
+
+rocksdb_max_total_wal_size=4G
+rocksdb_max_background_flushes=4
+
+rocksdb_block_size=16384
+rocksdb_table_cache_numshardbits=6
+
+# rate limiter
+rocksdb_bytes_per_sync=4194304
+rocksdb_wal_bytes_per_sync=4194304
+
+# triggering compaction if there are many sequential deletes
+rocksdb_compaction_sequential_deletes_count_sd=1
+rocksdb_compaction_sequential_deletes=199999
+rocksdb_compaction_sequential_deletes_window=200000
+
+rocksdb_default_cf_options=write_buffer_size=32m;target_file_size_base=32m;max_bytes_for_level_base=256m;level0_file_num_compaction_trigger=4;level0_slowdown_writes_trigger=20;level0_stop_writes_trigger=30;max_write_buffer_number=4;compression_per_level=kNoCompression:kNoCompression:kNoCompression:kLZ4Compression:kLZ4Compression:kLZ4Compression;bottommost_compression=kZlibCompression;compression_opts=-14:1:0;block_based_table_factory={cache_index_and_filter_blocks=1;filter_policy=bloomfilter:10:false;whole_key_filtering=1};level_compaction_dynamic_level_bytes=true;optimize_filters_for_hits=true
+# rocksdb_block_cache_size=2G
+
+rocksdb_write_policy=write_unprepared
+
+
+[mysqld_safe]
+malloc-lib=/usr/lib/libjemalloc.so
+

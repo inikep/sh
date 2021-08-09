@@ -4,28 +4,29 @@ sudo sh -c 'echo - root privilleges acquired'
 sudo killall -9 mysqld && sleep 3
 sudo killall -9 vmstat
 
-COMMAND_TYPE=$1
-SERVER_BUILD=$2
+SERVER_BUILD=$1
 BENCH_PATH=${BENCH_PATH:-/data/bench}
 BUILDDIR=${BUILDDIR:-/data/mysql-server}/$SERVER_BUILD
 ROOTDIR=$BENCH_PATH/$SERVER_BUILD
-ENGINE=$3
-CONFIG_FILE=$4
+CONFIG_FILE=$2
 CFG_FILE=${CONFIG_FILE##*/}
+ENGINE=$3
+COMMAND_TYPE=$4
 
 if [ "$ENGINE" == "zenfs" ]; then
   SUBENGINE=rocksdb
-  ZENFS_DEV=nvme1n2
-  ZENFS_PATH=$BENCH_PATH/zenfs_sysbench_$ZENFS_DEV
-  rm -rf $ZENFS_PATH
-  # zbd reset /dev/nvme1n2
-  zenfs mkfs --zbd=$ZENFS_DEV --aux_path=$ZENFS_PATH --finish_threshold=0 --force || exit
+  ZENFS_DEV=${ZENFS_DEV:-nvme1n2}
+  if [ "$COMMAND_TYPE" == "init" ]; then
+    ZENFS_PATH=$BENCH_PATH/zenfs_sysbench_$ZENFS_DEV
+    rm -rf $ZENFS_PATH
+    zenfs mkfs --zbd=$ZENFS_DEV --aux_path=$ZENFS_PATH --finish_threshold=0 --force || exit
+  fi
 else
   SUBENGINE=$ENGINE
 fi
 
 if ([ "$COMMAND_TYPE" != "verify" ] && [ "$COMMAND_TYPE" != "init" ]) && [ "$COMMAND_TYPE" != "start" ] || ([ "$SUBENGINE" != "innodb" ] && [ "$SUBENGINE" != "rocksdb" ]) || [ $# -lt 3 ]; then
-  echo "usage: $0 [init/start/verify] [server_build] [innodb/rocksdb] [my.cnf]"
+  echo "usage: $0 [server_build] [my.cnf] [innodb/rocksdb/zenfs] [init/start/verify]"
   echo "  init   - copy binaries from $BUILDDIR to $ROOTDIR if required, initialize mysqld database"
   echo "  verify - check mysqld database"
   echo "  start  - start sysbench"
@@ -62,7 +63,7 @@ NTHREADS=${NTHREADS:-16}
 RANGE_SIZE=${RANGE_SIZE:-10000}
 SYSBENCH_DIR=${SYSBENCH_DIR:-/usr/local}
 SYSBENCH="$SYSBENCH_DIR/bin/sysbench --db-driver=mysql --mysql-user=root --mysql-password=pw --mysql-host=127.0.0.1 --mysql-db=test --mysql-storage-engine=$SUBENGINE "
-SYSBENCH+="--table-size=$NROWS --tables=$NTABS --threads=$NTHREADS --events=0 --report-interval=5 --create_secondary=off"
+SYSBENCH+="--table-size=$NROWS --tables=$NTABS --threads=$NTHREADS --events=0 --report-interval=10 --create_secondary=off"
 
 printf "\nSERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS NTHREADS=$NTHREADS MEMORY=$MEMORY CONCURRENCY=$CONCURRENCY\n"
 
@@ -95,7 +96,7 @@ startmysql(){
       ADDITIONAL_PARAMS="--innodb_buffer_pool_size=${MEM}G"
   fi
   if [ "$ENGINE" == "zenfs" ]; then
-     ADDITIONAL_PARAMS+=" --rocksdb_fs_uri=zenfs://dev:nvme1n2"
+     ADDITIONAL_PARAMS+=" --rocksdb_fs_uri=zenfs://dev:$ZENFS_DEV"
   fi
 
   if [ "$1" == "no-defaults-file" ]; then
@@ -173,12 +174,19 @@ if [ "${COMMAND_TYPE}" == "init" ]; then
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "CREATE DATABASE test"
 
   free -m
-  $SYSBENCH /usr/local/share/sysbench/oltp_read_only.lua prepare --rand-type=uniform --range-size=$RANGE_SIZE
+  $SYSBENCH /usr/local/share/sysbench/oltp_read_write.lua prepare --rand-type=uniform --range-size=$RANGE_SIZE
   #$MYSQLDIR/bin/mysql $CLIENT_OPT -Bse "SELECT COUNT(*) FROM test.sbtest1" mysql
   free -m
 
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; SELECT COUNT(*) FROM sbtest1"
   shutdownmysql
+
+  if [ "$ENGINE" == "zenfs" ]; then
+    DATA_SIZE=`zenfs list --zbd=$ZENFS_DEV --path=./.rocksdb | awk '{sum+=$1;} END {print sum/1024/1024;}'`
+    echo "Size of RocksDB database is $DATA_SIZE MB"
+  else
+    du -ch $DATADIR
+  fi
   exit
 fi
 

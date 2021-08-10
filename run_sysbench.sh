@@ -34,8 +34,8 @@ sudo killall -9 mysqld && sleep 3
 sudo killall -9 vmstat
 sudo rm -rf /tmp/mysqlx.sock.lock
 
+ZENFS_DEV=${ZENFS_DEV:-nvme1n2}
 if [ "$ENGINE" == "zenfs" ] && [ "$COMMAND_TYPE" == "init" ]; then
-  ZENFS_DEV=${ZENFS_DEV:-nvme1n2}
   ZENFS_PATH=$BENCH_PATH/zenfs_sysbench_$ZENFS_DEV
   rm -rf $ZENFS_PATH
   zenfs mkfs --zbd=$ZENFS_DEV --aux_path=$ZENFS_PATH --finish_threshold=0 --force || exit
@@ -45,30 +45,27 @@ fi
 # params for creating tables
 NTABS=${NTABS:-16}
 NROWS=${NROWS:-2000000}
-CT_MEMORY=4
+CT_MEMORY=${CT_MEMORY:-8}
 
 # params for benchmarking
 SECS="${SECS:-300}"
-#CONCURRENCY="3 6 12"
-CONCURRENCY="8 16 32"
-#MEMORY="4 8 16"
-MEMORY=${MEMORY:-"16"}
-DISKNAME=nvme1n1
-TABLE_OPTIONS=none
-USE_PK=1
-
-# params for sysbench
-NTHREADS=${NTHREADS:-16}
+MEMORY=${MEMORY:-"16"} # "4 8 16"
+NTHREADS=${NTHREADS:-16} # "8 16 32"
 RANGE_SIZE=${RANGE_SIZE:-10000}
+DISKNAME=$ZENFS_DEV
+TABLE_OPTIONS=none
+USE_PK=${USE_PK:-1}
+
 SYSBENCH_DIR=${SYSBENCH_DIR:-/usr/local}
 SYSBENCH="$SYSBENCH_DIR/bin/sysbench --db-driver=mysql --mysql-user=root --mysql-password=pw --mysql-host=127.0.0.1 --mysql-db=test --mysql-storage-engine=$SUBENGINE "
-SYSBENCH+="--table-size=$NROWS --tables=$NTABS --threads=$NTHREADS --events=0 --report-interval=10 --create_secondary=off"
+SYSBENCH+="--table-size=$NROWS --tables=$NTABS --events=0 --report-interval=10 --create_secondary=off --mysql-ignore-errors=1062"
 
-printf "\nSERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS NTHREADS=$NTHREADS MEMORY=$MEMORY CONCURRENCY=$CONCURRENCY\n"
+printf "\nSERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS NTHREADS=$NTHREADS MEMORY=$MEMORY\n"
 
 #HOST="--mysql-socket=/tmp/mysql.sock"
 HOST="--mysql-host=127.0.0.1"
-CLIENT_OPT="-hlocalhost -uroot"
+CLIENT_OPT_NOPASS="-hlocalhost -uroot"
+CLIENT_OPT="$CLIENT_OPT_NOPASS -ppw"
 MYSQLDIR=$ROOTDIR/mysqld
 DATADIR=$ROOTDIR/master
 
@@ -133,7 +130,7 @@ waitmysql(){
   sleep 5
   while true;
   do
-          $MYSQLDIR/bin/mysql $CLIENT_OPT -Bse "SELECT 1" mysql
+          $MYSQLDIR/bin/mysql $1 -Bse "SELECT 1" mysql
           if [ "$?" -eq 0 ]; then break; fi
           sleep 5
           echo -n "."
@@ -152,7 +149,7 @@ run_sysbench(){
   INSERTSECS=$(( $SECS / 2 ))
   CLEANUP=0
 
-  bash all_concurrency.sh $NTABS $NROWS $READSECS $WRITESECS $INSERTSECS $SUBENGINE 0 $CLEANUP $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $PWD $DISKNAME $USE_PK $CONCURRENCY
+  bash all_concurrency.sh $NTABS $NROWS $READSECS $WRITESECS $INSERTSECS $SUBENGINE 0 $CLEANUP $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $PWD $DISKNAME $USE_PK $NTHREADS
   echo >_res SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE CFG_FILE=$CFG_FILE SECS=$SECS
   cat sb.r.qps.* >>_res
   cat sb.r.qps.*
@@ -160,8 +157,7 @@ run_sysbench(){
 
 if [ "${COMMAND_TYPE}" == "verify" ]; then
   startmysql $CFG_FILE $CT_MEMORY
-  CLIENT_OPT="$CLIENT_OPT -ppw"
-  waitmysql
+  waitmysql "$CLIENT_OPT"
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; SHOW CREATE TABLE sbtest1; SHOW ENGINE ROCKSDB STATUS\G; show table status"
   shutdownmysql
   exit
@@ -175,15 +171,15 @@ if [ "${COMMAND_TYPE}" == "init" ]; then
   $MYSQLDIR/bin/mysqld --initialize-insecure --basedir=$MYSQLDIR --datadir=$DATADIR --log-error-verbosity=2
 
   startmysql $CFG_FILE $CT_MEMORY "--disable-log-bin --rocksdb_bulk_load=1"
-  waitmysql
+  waitmysql "$CLIENT_OPT_NOPASS"
   echo "- Create 'test' database" 
-  $MYSQLDIR/bin/mysql $CLIENT_OPT -e "ALTER USER 'root'@'localhost' IDENTIFIED BY 'pw'"
-  CLIENT_OPT="$CLIENT_OPT -ppw"
+  $MYSQLDIR/bin/mysql $CLIENT_OPT_NOPASS -e "ALTER USER 'root'@'localhost' IDENTIFIED BY 'pw'"
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "CREATE DATABASE test"
 
+  NTHR=${NTHREADS%% *} # get the first number
   free -m
-  time $SYSBENCH /usr/local/share/sysbench/oltp_read_write.lua prepare --rand-type=uniform --range-size=$RANGE_SIZE
-  #$MYSQLDIR/bin/mysql $CLIENT_OPT -Bse "SELECT COUNT(*) FROM test.sbtest1" mysql
+  echo "- Start sysbench using $NTHR threads"
+  time $SYSBENCH --threads=$NTHR /usr/local/share/sysbench/oltp_read_write.lua prepare --rand-type=uniform --range-size=$RANGE_SIZE
   free -m
 
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; show table status"
@@ -202,12 +198,18 @@ do
 free -m
 
 startmysql $CFG_FILE $MEM
-CLIENT_OPT="$CLIENT_OPT -ppw"
-waitmysql
+waitmysql "$CLIENT_OPT"
+
+for NTHR in $NTHREADS
+do
 #run_sysbench
-$SYSBENCH /usr/local/share/sysbench/oltp_read_write.lua run --time=$SECS --range-size=$RANGE_SIZE
-$SYSBENCH /usr/local/share/sysbench/oltp_write_only.lua run --time=$SECS --range-size=$RANGE_SIZE
-$SYSBENCH /usr/local/share/sysbench/oltp_insert.lua run --time=$SECS --range-size=$RANGE_SIZE
+echo "- Start sysbench using $NTHR threads"
+$SYSBENCH --threads=$NTHR /usr/local/share/sysbench/oltp_read_write.lua run --time=$SECS --range-size=$RANGE_SIZE
+$SYSBENCH --threads=$NTHR /usr/local/share/sysbench/oltp_write_only.lua run --time=$SECS --range-size=$RANGE_SIZE
+$SYSBENCH --threads=$NTHR /usr/local/share/sysbench/oltp_insert.lua run --time=$SECS --range-size=$RANGE_SIZE
+done
+
+
 shutdownmysql
 sleep 30
 

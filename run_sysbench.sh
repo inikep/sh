@@ -57,8 +57,8 @@ TABLE_OPTIONS=none
 USE_PK=${USE_PK:-1}
 
 SYSBENCH_DIR=${SYSBENCH_DIR:-/usr/local}
-SYSBENCH="$SYSBENCH_DIR/bin/sysbench --db-driver=mysql --mysql-user=root --mysql-password=pw --mysql-host=127.0.0.1 --mysql-db=test --mysql-storage-engine=$SUBENGINE "
-SYSBENCH+="--table-size=$NROWS --tables=$NTABS --events=0 --report-interval=10 --create_secondary=off --mysql-ignore-errors=1062"
+SYSBENCH="$SYSBENCH_DIR/bin/sysbench --rand-type=uniform --db-driver=mysql --mysql-user=root --mysql-password=pw --mysql-host=127.0.0.1 --mysql-db=test --mysql-storage-engine=$SUBENGINE "
+SYSBENCH+="--table-size=$NROWS --tables=$NTABS --events=0 --report-interval=10 --create_secondary=off --mysql-ignore-errors=1062,1213"
 
 printf "\nSERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS NTHREADS=$NTHREADS MEMORY=$MEMORY\n"
 
@@ -178,7 +178,6 @@ if [ "${COMMAND_TYPE}" == "init" ]; then
 
   NTHR=${NTHREADS%% *} # get the first number
   free -m
-  echo "- Start sysbench using $NTHR threads"
   time $SYSBENCH --threads=$NTHR /usr/local/share/sysbench/oltp_read_write.lua prepare --rand-type=uniform --range-size=$RANGE_SIZE
   free -m
 
@@ -203,7 +202,6 @@ waitmysql "$CLIENT_OPT"
 for NTHR in $NTHREADS
 do
 #run_sysbench
-echo "- Start sysbench using $NTHR threads"
 $SYSBENCH --threads=$NTHR /usr/local/share/sysbench/oltp_read_write.lua run --time=$SECS --range-size=$RANGE_SIZE
 $SYSBENCH --threads=$NTHR /usr/local/share/sysbench/oltp_write_only.lua run --time=$SECS --range-size=$RANGE_SIZE
 $SYSBENCH --threads=$NTHR /usr/local/share/sysbench/oltp_insert.lua run --time=$SECS --range-size=$RANGE_SIZE

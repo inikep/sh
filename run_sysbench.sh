@@ -7,11 +7,14 @@ ROOTDIR=$BENCH_PATH/$SERVER_BUILD
 CONFIG_FILE=$2
 CFG_FILE=${CONFIG_FILE##*/}
 ENGINE=$3
-COMMAND_TYPE=$4
+COMMANDS=$4
 
 if [ "$ENGINE" == "zenfs" ]; then SUBENGINE=rocksdb; else SUBENGINE=$ENGINE; fi
 
-if ([ "$COMMAND_TYPE" != "verify" ] && [ "$COMMAND_TYPE" != "init" ]) && [ "$COMMAND_TYPE" != "start" ] || ([ "$SUBENGINE" != "innodb" ] && [ "$SUBENGINE" != "rocksdb" ]) || [ $# -lt 3 ]; then
+
+for COMMAND_NAME in $(echo "$COMMANDS" | tr "," "\n")
+do
+if ([ "$COMMAND_NAME" != "verify" ] && [ "$COMMAND_NAME" != "init" ]) && [ "$COMMAND_NAME" != "start" ] || ([ "$SUBENGINE" != "innodb" ] && [ "$SUBENGINE" != "rocksdb" ]) || [ $# -lt 3 ]; then
   echo "usage: $0 [server_build] [my.cnf] [innodb/rocksdb/zenfs] [init/start/verify]"
   echo "  init   - copy binaries from $BUILDDIR to $ROOTDIR if required, initialize mysqld database"
   echo "  verify - check mysqld database"
@@ -20,9 +23,10 @@ if ([ "$COMMAND_TYPE" != "verify" ] && [ "$COMMAND_TYPE" != "init" ]) && [ "$COM
   echo "  NROWS - number of rows per table"
   echo "  NTHREADS - number of sysbench threads"
   echo "  SECS - number of seconds per each sysbench job"
-  echo "example: time NTABS=8 SECS=60 run_sysbench.sh verify wdc-8.0-rel-clang12-rocks-toku-add rocksdb /data/sh/cnf/vadim-rocksdb.cnf"
+  echo "example: time NTABS=8 SECS=60 run_sysbench.sh init,verify,start wdc-8.0-rel-clang12-rocks-toku-add rocksdb /data/sh/cnf/vadim-rocksdb.cnf"
   exit
 fi     
+done # for COMMAND_NAME
 
 if [ ! -f "$CONFIG_FILE" ]; then
   echo "error: config file $CONFIG_FILE doesn't exist"
@@ -32,29 +36,20 @@ fi
 sudo sh -c 'echo - root privilleges acquired'
 sudo killall -9 mysqld && sleep 3
 sudo killall -9 vmstat
-sudo rm -rf /tmp/mysqlx.sock.lock
-
-ZENFS_DEV=${ZENFS_DEV:-nvme1n2}
-if [ "$ENGINE" == "zenfs" ] && [ "$COMMAND_TYPE" == "init" ]; then
-  ZENFS_PATH=$BENCH_PATH/zenfs_sysbench_$ZENFS_DEV
-  rm -rf $ZENFS_PATH
-  zenfs mkfs --zbd=$ZENFS_DEV --aux_path=$ZENFS_PATH --finish_threshold=0 --force || exit
-fi
-
-
-# params for creating tables
-NTABS=${NTABS:-16}
-NROWS=${NROWS:-2000000}
-CT_MEMORY=${CT_MEMORY:-16}
+sudo rm -rf /tmp/mysql*
 
 # params for benchmarking
+NTABS=${NTABS:-16}
+NROWS=${NROWS:-10000000}
 SECS="${SECS:-300}"
-MEMORY=${MEMORY:-"16"} # "4 8 16"
-NTHREADS=${NTHREADS:-16} # "8 16 32"
+MEMORY=${MEMORY:-"16"} # "4,8,16"
+CT_MEMORY=${MEMORY##*,} # get the last number
+NTHREADS=${NTHREADS:-16} # "8,16,32"
 RANGE_SIZE=${RANGE_SIZE:-100}
-DISKNAME=$ZENFS_DEV
 TABLE_OPTIONS=none
 USE_PK=${USE_PK:-1}
+ZENFS_DEV=${ZENFS_DEV:-nvme1n2}
+DISKNAME=$ZENFS_DEV
 
 SYSBENCH_DIR=${SYSBENCH_DIR:-/usr/local}
 SYSBENCH="$SYSBENCH_DIR/bin/sysbench --rand-type=uniform --db-driver=mysql --mysql-user=root --mysql-password=pw --mysql-host=127.0.0.1 --mysql-db=test --mysql-storage-engine=$SUBENGINE "
@@ -155,15 +150,23 @@ run_sysbench(){
   cat sb.r.qps.*
 }
 
-if [ "${COMMAND_TYPE}" == "verify" ]; then
+for COMMAND_NAME in $(echo "$COMMANDS" | tr "," "\n")
+do
+
+if [ "${COMMAND_NAME}" == "verify" ]; then
   startmysql $CFG_FILE $CT_MEMORY
   waitmysql "$CLIENT_OPT"
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; SHOW CREATE TABLE sbtest1; SHOW ENGINE ROCKSDB STATUS\G; show table status"
   shutdownmysql
-  exit
+  continue
 fi
 
-if [ "${COMMAND_TYPE}" == "init" ]; then
+if [ "${COMMAND_NAME}" == "init" ]; then
+  if [ "$ENGINE" == "zenfs" ]; then
+    ZENFS_PATH=$BENCH_PATH/zenfs_sysbench_$ZENFS_DEV
+    rm -rf $ZENFS_PATH
+    zenfs mkfs --zbd=$ZENFS_DEV --aux_path=$ZENFS_PATH --finish_threshold=0 --force || exit
+  fi
   echo "- Initialize mysqld"
   rm -rf $DATADIR
   mkdir $DATADIR
@@ -176,9 +179,9 @@ if [ "${COMMAND_TYPE}" == "init" ]; then
   $MYSQLDIR/bin/mysql $CLIENT_OPT_NOPASS -e "ALTER USER 'root'@'localhost' IDENTIFIED BY 'pw'"
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "CREATE DATABASE test"
 
-  NTHR=${NTHREADS%% *} # get the first number
+  THREADS=${NTHREADS##*,} # get the last number
   free -m
-  time $SYSBENCH --threads=$NTHR /usr/local/share/sysbench/oltp_read_write.lua prepare --rand-type=uniform --range-size=$RANGE_SIZE
+  time $SYSBENCH --threads=$THREADS /usr/local/share/sysbench/oltp_read_write.lua prepare --rand-type=uniform --range-size=$RANGE_SIZE
   free -m
 
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; show table status"
@@ -186,29 +189,31 @@ if [ "${COMMAND_TYPE}" == "init" ]; then
   print_database_size
   shutdownmysql
   print_database_size
-
-  exit
+  continue
 fi
 
 
-for MEM in $MEMORY
+for MEM in $(echo "$MEMORY" | tr "," "\n")
 do
-
+echo --MEM=$MEM
 free -m
 
 startmysql $CFG_FILE $MEM
 waitmysql "$CLIENT_OPT"
 
-for NTHR in $NTHREADS
+for THREADS in $(echo "$NTHREADS" | tr "," "\n")
 do
+echo --THREADS=$THREADS
 #run_sysbench
-$SYSBENCH --threads=$NTHR /usr/local/share/sysbench/oltp_read_write.lua run --time=$SECS --range-size=$RANGE_SIZE
-$SYSBENCH --threads=$NTHR /usr/local/share/sysbench/oltp_write_only.lua run --time=$SECS --range-size=$RANGE_SIZE
-$SYSBENCH --threads=$NTHR /usr/local/share/sysbench/oltp_insert.lua run --time=$SECS --range-size=$RANGE_SIZE
-done
+$SYSBENCH --threads=$THREADS --time=$SECS --range-size=$RANGE_SIZE /usr/local/share/sysbench/oltp_read_write.lua run
+$SYSBENCH --threads=$THREADS --time=$SECS --range-size=$RANGE_SIZE /usr/local/share/sysbench/oltp_write_only.lua run
+$SYSBENCH --threads=$THREADS --time=$SECS --range-size=$RANGE_SIZE /usr/local/share/sysbench/oltp_insert.lua run
+done # for THREADS
 
 
 shutdownmysql
 sleep 30
 
-done
+done # for MEM
+
+done # for COMMAND_NAME

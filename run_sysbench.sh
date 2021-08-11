@@ -45,13 +45,13 @@ fi
 # params for creating tables
 NTABS=${NTABS:-16}
 NROWS=${NROWS:-2000000}
-CT_MEMORY=${CT_MEMORY:-8}
+CT_MEMORY=${CT_MEMORY:-16}
 
 # params for benchmarking
 SECS="${SECS:-300}"
 MEMORY=${MEMORY:-"16"} # "4 8 16"
 NTHREADS=${NTHREADS:-16} # "8 16 32"
-RANGE_SIZE=${RANGE_SIZE:-10000}
+RANGE_SIZE=${RANGE_SIZE:-100}
 DISKNAME=$ZENFS_DEV
 TABLE_OPTIONS=none
 USE_PK=${USE_PK:-1}
@@ -116,7 +116,7 @@ shutdownmysql(){
 
 print_database_size(){
   if [ "$ENGINE" == "zenfs" ]; then
-    DATA_SIZE=`zenfs list --zbd=$ZENFS_DEV --path=./.rocksdb | awk '{sum+=$1;} END {print sum/1024/1024;}'`
+    DATA_SIZE=`zenfs list --zbd=$ZENFS_DEV --path=./.rocksdb | awk '{sum+=$1;} END {printf "%d\n", sum/1024/1024;}'`
     echo "Size of RocksDB database is $DATA_SIZE MB"
   else
     du -ch $DATADIR

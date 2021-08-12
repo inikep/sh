@@ -138,6 +138,11 @@ generate_name(){
   echo "$1_${CFG_FILE%.*}_$ENGINE_${NTABS}x${NROWS}_${2}GB_${SECS}s_`date +%F_%H-%M`"
 }
 
+copy_log_err() {
+  cat $ROOTDIR/log.err >>$ROOTDIR/$1
+  rm $ROOTDIR/log.err
+}
+
 run_sysbench(){
   RESULTS_DIR=$(generate_name _res $MEM)
   mkdir $ROOTDIR/$RESULTS_DIR
@@ -154,6 +159,7 @@ run_sysbench(){
   echo >_res SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS
   cat sb.r.qps.* >>_res
   cat sb.r.qps.*
+  copy_log_err $RESULTS_DIR/_log_error
 }
 
 for COMMAND_NAME in $(echo "$COMMANDS" | tr "," "\n")
@@ -166,6 +172,7 @@ if [ "${COMMAND_NAME}" == "verify" ]; then
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; show table status"
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; SHOW CREATE TABLE sbtest1; SHOW ENGINE ROCKSDB STATUS\G; show table status" >$ROOTDIR/$RES_VERIFY
   shutdownmysql
+  copy_log_err $RES_VERIFY
   continue
 fi
 
@@ -202,6 +209,7 @@ if [ "${COMMAND_NAME}" == "init" ]; then
   (time shutdownmysql) 2>>$ROOTDIR/$RES_INIT
   free -m  >>$ROOTDIR/$RES_INIT
   print_database_size >>$ROOTDIR/$RES_INIT
+  copy_log_err $RES_INIT
   continue
 fi
 

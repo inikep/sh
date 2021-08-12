@@ -191,7 +191,7 @@ vmpid=$!
 iostat -kx $samp 10000 >& sb.io.nt${nt}.$sfx &
 iopid=$!
 
-ex="$sysbdir/bin/sysbench --mysql-ignore-errors=1062 --db-driver=mysql $dbcreds --mysql-storage-engine=$engine --range-size=$range --table-size=$nr --tables=$ntabs --threads=$nt --events=0 --time=$secs $testArgs $sysbdir/share/sysbench/$lua run"
+ex="$sysbdir/bin/sysbench --mysql-ignore-errors=1062,1213 --db-driver=mysql $dbcreds --mysql-storage-engine=$engine --range-size=$range --table-size=$nr --tables=$ntabs --threads=$nt --events=0 --time=$secs $testArgs $sysbdir/share/sysbench/$lua run"
 echo $ex > sb.o.nt${nt}.${sfx}
 echo "$realdop CPUs" >> sb.o.nt${nt}.${sfx}
 $ex >> sb.o.nt${nt}.${sfx} 2>&1

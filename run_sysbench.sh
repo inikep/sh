@@ -133,9 +133,13 @@ waitmysql(){
   set -e
 }
 
+# generate_name [prefix] [memory]
+generate_name(){
+  echo "$1_${CFG_FILE%.*}_$ENGINE_${NTABS}x${NROWS}_${2}GB_${SECS}s_`date +%F_%H-%M`"
+}
+
 run_sysbench(){
-  RESULTS_DIR=results-${CFG_FILE%.*}-$ENGINE-${MEM}GB-${SECS}s-`date +%F-%H-%M`
-  rm -rf $ROOTDIR/$RESULTS_DIR
+  RESULTS_DIR=$(generate_name _res $MEM)
   mkdir $ROOTDIR/$RESULTS_DIR
   cd $ROOTDIR/$RESULTS_DIR
 
@@ -143,9 +147,11 @@ run_sysbench(){
   WRITESECS=$SECS
   INSERTSECS=$(( $SECS / 2 ))
   CLEANUP=0
+  THREADS=$(echo "$NTHREADS" | tr "," "\n")
+  echo --THREADS=$THREADS
 
-  bash all_concurrency.sh $NTABS $NROWS $READSECS $WRITESECS $INSERTSECS $SUBENGINE 0 $CLEANUP $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $PWD $DISKNAME $USE_PK $NTHREADS
-  echo >_res SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE CFG_FILE=$CFG_FILE SECS=$SECS
+  bash all_concurrency.sh $NTABS $NROWS $READSECS $WRITESECS $INSERTSECS $SUBENGINE 0 $CLEANUP $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $PWD $DISKNAME $USE_PK "$THREADS"
+  echo >_res SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS
   cat sb.r.qps.* >>_res
   cat sb.r.qps.*
 }
@@ -154,14 +160,17 @@ for COMMAND_NAME in $(echo "$COMMANDS" | tr "," "\n")
 do
 
 if [ "${COMMAND_NAME}" == "verify" ]; then
+  RES_VERIFY=$(generate_name _verify $CT_MEMORY)
   startmysql $CFG_FILE $CT_MEMORY
   waitmysql "$CLIENT_OPT"
-  $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; SHOW CREATE TABLE sbtest1; SHOW ENGINE ROCKSDB STATUS\G; show table status"
+  $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; show table status"
+  $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; SHOW CREATE TABLE sbtest1; SHOW ENGINE ROCKSDB STATUS\G; show table status" >$ROOTDIR/$RES_VERIFY
   shutdownmysql
   continue
 fi
 
 if [ "${COMMAND_NAME}" == "init" ]; then
+  RES_INIT=$(generate_name _init $CT_MEMORY)
   if [ "$ENGINE" == "zenfs" ]; then
     ZENFS_PATH=$BENCH_PATH/zenfs_sysbench_$ZENFS_DEV
     rm -rf $ZENFS_PATH
@@ -179,16 +188,20 @@ if [ "${COMMAND_NAME}" == "init" ]; then
   $MYSQLDIR/bin/mysql $CLIENT_OPT_NOPASS -e "ALTER USER 'root'@'localhost' IDENTIFIED BY 'pw'"
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "CREATE DATABASE test"
 
+  free -m  >>$ROOTDIR/$RES_INIT
   THREADS=${NTHREADS##*,} # get the last number
-  free -m
-  time $SYSBENCH --threads=$THREADS /usr/local/share/sysbench/oltp_read_write.lua prepare --rand-type=uniform --range-size=$RANGE_SIZE
-  free -m
+  echo "- Populate database with sysbench with ${NTABS}x$NROWS rows and $THREADS threads"
+  echo "- Populate database with sysbench with ${NTABS}x$NROWS rows and $THREADS threads" >>$ROOTDIR/$RES_INIT
+  (time $SYSBENCH --threads=$THREADS /usr/local/share/sysbench/oltp_read_write.lua prepare --rand-type=uniform --range-size=$RANGE_SIZE >>$ROOTDIR/$RES_INIT) 2>>$ROOTDIR/$RES_INIT
+  free -m >>$ROOTDIR/$RES_INIT
 
-  $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; show table status"
+  $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; show table status" >>$ROOTDIR/$RES_INIT
 
-  print_database_size
-  shutdownmysql
-  print_database_size
+  print_database_size >>$ROOTDIR/$RES_INIT
+  echo "- Shutdown mysqld" >>$ROOTDIR/$RES_INIT
+  (time shutdownmysql) 2>>$ROOTDIR/$RES_INIT
+  free -m  >>$ROOTDIR/$RES_INIT
+  print_database_size >>$ROOTDIR/$RES_INIT
   continue
 fi
 
@@ -201,15 +214,17 @@ free -m
 startmysql $CFG_FILE $MEM
 waitmysql "$CLIENT_OPT"
 
-for THREADS in $(echo "$NTHREADS" | tr "," "\n")
-do
-echo --THREADS=$THREADS
-#run_sysbench
-$SYSBENCH --threads=$THREADS --time=$SECS --range-size=$RANGE_SIZE /usr/local/share/sysbench/oltp_read_write.lua run
-$SYSBENCH --threads=$THREADS --time=$SECS --range-size=$RANGE_SIZE /usr/local/share/sysbench/oltp_write_only.lua run
-$SYSBENCH --threads=$THREADS --time=$SECS --range-size=$RANGE_SIZE /usr/local/share/sysbench/oltp_insert.lua run
-done # for THREADS
-
+if [ 1 == 0 ]; then
+  for THREADS in $(echo "$NTHREADS" | tr "," "\n")
+  do
+  echo --THREADS=$THREADS
+  $SYSBENCH --threads=$THREADS --time=$SECS --range-size=$RANGE_SIZE /usr/local/share/sysbench/oltp_read_write.lua run
+  $SYSBENCH --threads=$THREADS --time=$SECS --range-size=$RANGE_SIZE /usr/local/share/sysbench/oltp_write_only.lua run
+  $SYSBENCH --threads=$THREADS --time=$SECS --range-size=$RANGE_SIZE /usr/local/share/sysbench/oltp_insert.lua run
+  done # for THREADS
+else
+  run_sysbench
+fi
 
 shutdownmysql
 sleep 30

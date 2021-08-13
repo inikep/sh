@@ -1,8 +1,8 @@
-SH_PATH=$1
+# in .bashrc set:
+# source /data/sh/.bash_aliases
+# source /data/sh/set_env.sh /data/sh
 
-if [ -f $SH_PATH/.bash_aliases ]; then
-    . $SH_PATH/.bash_aliases
-fi
+SH_PATH=$1
 
 export PATH="$SH_PATH:$SH_PATH/sysbench.lua:$PATH"
 export MTR_TERM="gnome-terminal --title %title% --wait -x"

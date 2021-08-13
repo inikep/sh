@@ -50,6 +50,7 @@ TABLE_OPTIONS=none
 USE_PK=${USE_PK:-1}
 ZENFS_DEV=${ZENFS_DEV:-nvme1n2}
 DISKNAME=$ZENFS_DEV
+dbAndCreds=mysql,root,pw,127.0.0.1,test,$SUBENGINE # dbAndCreds=mysql,user,password,host,db,engine
 
 SYSBENCH_DIR=${SYSBENCH_DIR:-/usr/local}
 SYSBENCH="$SYSBENCH_DIR/bin/sysbench --rand-type=uniform --db-driver=mysql --mysql-user=root --mysql-password=pw --mysql-host=127.0.0.1 --mysql-db=test --mysql-storage-engine=$SUBENGINE "
@@ -148,8 +149,6 @@ run_sysbench(){
   mkdir $ROOTDIR/$RESULTS_DIR
   cd $ROOTDIR/$RESULTS_DIR
 
-  # dbAndCreds=mysql,user,password,host,db,engine
-  dbAndCreds=mysql,root,pw,127.0.0.1,test,$SUBENGINE
   READSECS=$SECS
   WRITESECS=$SECS
   INSERTSECS=$SECS
@@ -161,6 +160,20 @@ run_sysbench(){
   echo >_res SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS
   cat sb.r.qps.* >>_res
   cat sb.r.qps.*
+  copy_log_err $RESULTS_DIR/_log_error
+}
+
+run_sysbench_prepare(){
+  RESULTS_DIR=$(generate_name _prep $CT_MEMORY)
+  mkdir $ROOTDIR/$RESULTS_DIR
+  cd $ROOTDIR/$RESULTS_DIR
+
+  THREADS=$(echo "$NTHREADS" | tr "," "\n")
+  echo --THREADS=$THREADS
+
+  bash all_small_setup_only.sh $NTABS $NROWS 0 0 0 $dbAndCreds 1 0 $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $PWD $DISKNAME $USE_PK $THREADS
+
+  echo >_res SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS
   copy_log_err $RESULTS_DIR/_log_error
 }
 
@@ -201,7 +214,8 @@ if [ "${COMMAND_NAME}" == "init" ]; then
   THREADS=${NTHREADS##*,} # get the last number
   echo "- Populate database with sysbench with ${NTABS}x$NROWS rows and $THREADS threads"
   echo "- Populate database with sysbench with ${NTABS}x$NROWS rows and $THREADS threads" >>$ROOTDIR/$RES_INIT
-  (time $SYSBENCH --threads=$THREADS /usr/local/share/sysbench/oltp_read_write.lua prepare --rand-type=uniform --range-size=$RANGE_SIZE >>$ROOTDIR/$RES_INIT) 2>>$ROOTDIR/$RES_INIT
+#  (time $SYSBENCH --threads=$THREADS /usr/local/share/sysbench/oltp_read_write.lua prepare --rand-type=uniform --range-size=$RANGE_SIZE >>$ROOTDIR/$RES_INIT) 2>>$ROOTDIR/$RES_INIT
+  (time run_sysbench_prepare) 2>>$ROOTDIR/$RES_INIT
   free -m >>$ROOTDIR/$RES_INIT
 
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; show table status" >>$ROOTDIR/$RES_INIT

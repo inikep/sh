@@ -177,6 +177,7 @@ kill $vmpid
 kill $iopid
 bash an.sh sb.prepare.io.$sfx sb.prepare.vm.$sfx $dname $rps $realdop > sb.prepare.met.$sfx
 
+exit 0 # after prepare
 fi
 
 # --- run sysbench tests ---
@@ -292,7 +293,7 @@ if [[ $postwrite -eq 1 ]]; then
   #  3) Collect stats
 
   # Sleep for 60 + 60 seconds per 100M rows
-  sleepSecs=$( echo $nr $ntabs | awk '{ printf "%.0f", ((($2) / 100000000) + 1) * 60 }' )
+  sleepSecs=$( echo $nr $ntabs | awk '{ printf "%.0f", ((($1) / 100000000) + 1) * 60 }' )
   echo Sleep for $sleepSecs secs
   echo sleepSecs is $sleepSecs > sb.o.pw.$sfx
 

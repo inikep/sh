@@ -154,8 +154,10 @@ run_sysbench(){
   CLEANUP=0
   THREADS=$(echo "$NTHREADS" | tr "," "\n")
   echo --THREADS=$THREADS
+  # dbAndCreds=mysql,user,password,host,db,engine
+  dbAndCreds=mysql,root,pw,127.0.0.1,test,$SUBENGINE
 
-  bash all_concurrency.sh $NTABS $NROWS $READSECS $WRITESECS $INSERTSECS $SUBENGINE 0 $CLEANUP $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $PWD $DISKNAME $USE_PK "$THREADS"
+  bash all_small.sh $NTABS $NROWS $READSECS $WRITESECS $INSERTSECS $dbAndCreds 0 $CLEANUP $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $PWD $DISKNAME $USE_PK $THREADS
   echo >_res SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS
   cat sb.r.qps.* >>_res
   cat sb.r.qps.*

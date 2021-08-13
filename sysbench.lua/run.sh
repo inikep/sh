@@ -291,8 +291,9 @@ if [[ $postwrite -eq 1 ]]; then
   #  2) Get LSM tree into deterministic state
   #  3) Collect stats
 
-  # Sleep for 60 + 60 seconds per 10M rows
-  sleepSecs=$( echo $nr $ntabs | awk '{ printf "%.0f", ((($1 * $2) / 10000000) + 1) * 60 }' )
+  # Sleep for 60 + 60 seconds per 100M rows
+  sleepSecs=$( echo $nr $ntabs | awk '{ printf "%.0f", ((($2) / 100000000) + 1) * 60 }' )
+  echo Sleep for $sleepSecs secs
   echo sleepSecs is $sleepSecs > sb.o.pw.$sfx
 
   if [[ $driver == "mysql" ]]; then
@@ -321,6 +322,7 @@ if [[ $postwrite -eq 1 ]]; then
       /usr/bin/time -o sb.o.pw.$sfx.a${x} $client "${clientArgs[@]}" -${sqlF} "analyze table sbtest${x}" >> sb.o.pw.$sfx 2>&1
     done
 
+    echo "Sleep for $sleepSecs secs with engine $engine"
     echo "Sleep for $sleepSecs with engine $engine" >> sb.o.pw.$sfx
     sleep $sleepSecs
 

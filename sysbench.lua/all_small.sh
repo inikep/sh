@@ -21,7 +21,7 @@ shift 14
 
 # This does load, runs a query test and then does "postwrite" work
 echo point-query.pre
-bash run.sh $ntabs $nrows $readsecs  $dbAndCreds $setup 0        point-query.warm 100    $client $tableoptions $sysbdir $ddir $dname $usepk 1 $ntabs
+bash run.sh $ntabs $nrows $readsecs  $dbAndCreds $setup 0        point-query.warm 100    $client $tableoptions $sysbdir $ddir $dname $usepk 1 $@
 
 echo point-query.pre
 bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        point-query.pre 100    $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $@
@@ -42,11 +42,13 @@ bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        points-covered-
 echo points-notcovered-pk.pre
 bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        points-notcovered-pk.pre 100    $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $@
 
+if [[ $usepk -eq 0 ]]; then
 echo points-covered-si.pre
 bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        points-covered-si.pre    100    $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $@
 
 echo points-notcovered-si.pre
 bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        points-notcovered-si.pre 100    $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $@
+fi
 
 echo range-covered-pk.pre
 bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        range-covered-pk.pre    100    $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $@
@@ -54,11 +56,13 @@ bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        range-covered-p
 echo range-notcovered-pk.pre
 bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        range-notcovered-pk.pre 100    $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $@
 
+if [[ $usepk -eq 0 ]]; then
 echo range-covered-si.pre
 bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        range-covered-si.pre    100    $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $@
 
 echo range-notcovered-si.pre
 bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        range-notcovered-si.pre 100    $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $@
+fi
 
 echo update-inlist
 bash run.sh $ntabs $nrows $writesecs $dbAndCreds 0      0        update-inlist   100    $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $@
@@ -108,11 +112,13 @@ bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        points-covered-
 echo points-notcovered-pk
 bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        points-notcovered-pk 100  $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $@
 
+if [[ $usepk -eq 0 ]]; then
 echo points-covered-si
 bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        points-covered-si    100  $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $@
 
 echo points-notcovered-si
 bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        points-notcovered-si 100  $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $@
+fi
 
 echo range-covered-pk
 bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        range-covered-pk     100  $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $@
@@ -120,6 +126,7 @@ bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        range-covered-p
 echo range-notcovered-pk
 bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        range-notcovered-pk  100  $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $@
 
+if [[ $usepk -eq 0 ]]; then
 echo range-covered-si
 bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        range-covered-si     100  $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $@
 
@@ -128,6 +135,7 @@ bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        range-notcovere
 
 echo scan
 bash run.sh $ntabs $nrows $insertsecs $dbAndCreds 0     0        scan                 100  $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $ntabs
+fi
 
 echo delete
 bash run.sh $ntabs $nrows $writesecs $dbAndCreds 0      0        delete               100  $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $@

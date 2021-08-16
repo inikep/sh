@@ -21,4 +21,4 @@ shift 14
 
 # This does load, runs a query test and then does "postwrite" work
 echo point-query.pre
-bash run.sh $ntabs $nrows $readsecs  $dbAndCreds $setup 0        point-query.warm 100    $client $tableoptions $sysbdir $ddir $dname $usepk 1 $ntabs
+bash run.sh $ntabs $nrows $readsecs  $dbAndCreds $setup 0        point-query.warm 100    $client $tableoptions $sysbdir $ddir $dname $usepk 1 $@

@@ -132,7 +132,11 @@ fi
 
 prepareArgs=""
 if [[ $usepk -eq 0 ]]; then
-  prepareArgs="--secondary "
+  prepareArgs="--create_secondary=on --threads=1"
+else
+  for nt in "$@"; do
+    prepareArgs="--create_secondary=off --threads=$nt"
+  done
 fi
 
 sfx="${testType}.range${range}.pk${usepk}"

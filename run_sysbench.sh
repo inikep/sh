@@ -33,10 +33,14 @@ if [ ! -f "$CONFIG_FILE" ]; then
   exit
 fi
 
-sudo sh -c 'echo - root privilleges acquired'
-sudo killall -9 mysqld && sleep 3
-sudo killall -9 vmstat
-sudo rm -rf /tmp/mysql*
+kill_all() {
+  sudo sh -c 'echo - root privilleges acquired'
+  sudo killall -9 mysqld && sleep 3
+  sudo killall -9 vmstat
+  sudo rm -rf /tmp/mysql*
+}
+
+kill_all
 
 # params for benchmarking
 NTABS=${NTABS:-16}
@@ -136,7 +140,7 @@ waitmysql(){
 
 # generate_name [prefix] [memory]
 generate_name(){
-  echo "$1_${CFG_FILE%.*}_$ENGINE_${NTABS}x${NROWS}_${2}GB_${SECS}s_`date +%F_%H-%M`"
+  echo "$1_${CFG_FILE%.*}_${ENGINE}_${NTABS}x${NROWS}_${2}GB_${SECS}s_`date +%F_%H-%M`"
 }
 
 copy_log_err() {
@@ -157,8 +161,8 @@ run_sysbench(){
   echo --THREADS=$THREADS
 
   bash all_small.sh $NTABS $NROWS $READSECS $WRITESECS $INSERTSECS $dbAndCreds 0 $CLEANUP $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $PWD $DISKNAME $USE_PK $THREADS
-  echo >_res SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS
-  cat sb.r.qps.* >>_res
+  echo >$RESULTS_DIR SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS
+  cat sb.r.qps.* >>$RESULTS_DIR
   cat sb.r.qps.*
   copy_log_err $RESULTS_DIR/_log_error
 }
@@ -179,6 +183,7 @@ run_sysbench_prepare(){
 
 for COMMAND_NAME in $(echo "$COMMANDS" | tr "," "\n")
 do
+echo "- Execute COMMAND_NAME=$COMMAND_NAME"
 
 if [ "${COMMAND_NAME}" == "verify" ]; then
   RES_VERIFY=$(generate_name _verify $CT_MEMORY)
@@ -225,7 +230,8 @@ if [ "${COMMAND_NAME}" == "init" ]; then
   (time shutdownmysql) 2>>$ROOTDIR/$RES_INIT
   free -m  >>$ROOTDIR/$RES_INIT
   print_database_size >>$ROOTDIR/$RES_INIT
-  copy_log_err $RES_INIT
+#  kill_all
+#  copy_log_err $RES_INIT
   continue
 fi
 
@@ -256,3 +262,5 @@ sleep 30
 done # for MEM
 
 done # for COMMAND_NAME
+
+echo "- Script finish_threshold"

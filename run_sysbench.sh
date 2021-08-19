@@ -14,16 +14,16 @@ if [ "$ENGINE" == "zenfs" ]; then SUBENGINE=rocksdb; else SUBENGINE=$ENGINE; fi
 
 for COMMAND_NAME in $(echo "$COMMANDS" | tr "," "\n")
 do
-if ([ "$COMMAND_NAME" != "verify" ] && [ "$COMMAND_NAME" != "init" ]) && [ "$COMMAND_NAME" != "start" ] || ([ "$SUBENGINE" != "innodb" ] && [ "$SUBENGINE" != "rocksdb" ]) || [ $# -lt 3 ]; then
-  echo "usage: $0 [server_build] [my.cnf] [innodb/rocksdb/zenfs] [init/start/verify]"
+if ([ "$COMMAND_NAME" != "verify" ] && [ "$COMMAND_NAME" != "init" ]) && [ "$COMMAND_NAME" != "run" ] || ([ "$SUBENGINE" != "innodb" ] && [ "$SUBENGINE" != "rocksdb" ]) || [ $# -lt 3 ]; then
+  echo "usage: $0 [server_build] [my.cnf] [innodb/rocksdb/zenfs] [init/run/verify]"
   echo "  init   - copy binaries from $BUILDDIR to $ROOTDIR if required, initialize mysqld database"
   echo "  verify - check mysqld database"
-  echo "  start  - start sysbench"
+  echo "  run  - run sysbench"
   echo "  NTABS - number of tables"
   echo "  NROWS - number of rows per table"
   echo "  NTHREADS - number of sysbench threads"
   echo "  SECS - number of seconds per each sysbench job"
-  echo "example: time NTABS=8 SECS=60 run_sysbench.sh init,verify,start wdc-8.0-rel-clang12-rocks-toku-add rocksdb /data/sh/cnf/vadim-rocksdb.cnf"
+  echo "example: time NTABS=8 SECS=60 run_sysbench.sh init,verify,run wdc-8.0-rel-clang12-rocks-toku-add rocksdb /data/sh/cnf/vadim-rocksdb.cnf"
   exit
 fi     
 done # for COMMAND_NAME
@@ -144,14 +144,13 @@ generate_name(){
 }
 
 copy_log_err() {
-  cat $ROOTDIR/log.err >>$ROOTDIR/$1
+  cat $ROOTDIR/log.err >>$1
   rm $ROOTDIR/log.err
 }
 
 run_sysbench(){
-  RESULTS_DIR=$(generate_name _res $MEM)
-  mkdir $ROOTDIR/$RESULTS_DIR
-  cd $ROOTDIR/$RESULTS_DIR
+  cd $RESULTS_DIR
+  RESULTS_FILE=$1
 
   READSECS=$SECS
   WRITESECS=$SECS
@@ -161,28 +160,23 @@ run_sysbench(){
   echo --THREADS=$THREADS
 
   bash all_small.sh $NTABS $NROWS $READSECS $WRITESECS $INSERTSECS $dbAndCreds 0 $CLEANUP $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $PWD $DISKNAME $USE_PK $THREADS
-  echo >$RESULTS_DIR SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS
-  cat sb.r.qps.* >>$RESULTS_DIR
+  echo >>$RESULTS_FILE SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS
+  cat sb.r.qps.* >>$RESULTS_FILE
   cat sb.r.qps.*
-  copy_log_err $RESULTS_DIR/_log_error
+  copy_log_err $RESULTS_DIR/$RESULTS_FILE
 }
 
-run_sysbench_prepare(){
-  RESULTS_DIR=$(generate_name _prep $CT_MEMORY)
-  mkdir $ROOTDIR/$RESULTS_DIR
-  cd $ROOTDIR/$RESULTS_DIR
-
-  THREADS=$(echo "$NTHREADS" | tr "," "\n")
-  echo --THREADS=$THREADS
-
-  bash all_small_setup_only.sh $NTABS $NROWS 0 0 0 $dbAndCreds 1 0 $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $PWD $DISKNAME $USE_PK $THREADS
-
-  echo >_res SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS
-  copy_log_err $RESULTS_DIR/_log_error
-}
+CREATE_RESULTS_DIR=1
 
 for COMMAND_NAME in $(echo "$COMMANDS" | tr "," "\n")
 do
+
+if [ "${CREATE_RESULTS_DIR}" == "1" ]; then
+  RESULTS_DIR=${ROOTDIR}/$(generate_name _ $CT_MEMORY)
+  mkdir $RESULTS_DIR
+  CREATE_RESULTS_DIR=0
+fi
+
 echo "- Execute COMMAND_NAME=$COMMAND_NAME"
 
 if [ "${COMMAND_NAME}" == "verify" ]; then
@@ -190,14 +184,16 @@ if [ "${COMMAND_NAME}" == "verify" ]; then
   startmysql $CFG_FILE $CT_MEMORY
   waitmysql "$CLIENT_OPT"
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; show table status"
-  $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; SHOW CREATE TABLE sbtest1; SHOW ENGINE ROCKSDB STATUS\G; show table status" >$ROOTDIR/$RES_VERIFY
+  $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; SHOW CREATE TABLE sbtest1; SHOW ENGINE ROCKSDB STATUS\G; show table status" >$RESULTS_DIR/$RES_VERIFY
   shutdownmysql
-  copy_log_err $RES_VERIFY
+  copy_log_err $RESULTS_DIR/$RES_VERIFY
   continue
 fi
 
 if [ "${COMMAND_NAME}" == "init" ]; then
   RES_INIT=$(generate_name _init $CT_MEMORY)
+  echo >>$RESULTS_DIR/$RES_INIT SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS
+
   if [ "$ENGINE" == "zenfs" ]; then
     ZENFS_PATH=$BENCH_PATH/zenfs_sysbench_$ZENFS_DEV
     rm -rf $ZENFS_PATH
@@ -215,23 +211,24 @@ if [ "${COMMAND_NAME}" == "init" ]; then
   $MYSQLDIR/bin/mysql $CLIENT_OPT_NOPASS -e "ALTER USER 'root'@'localhost' IDENTIFIED BY 'pw'"
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "CREATE DATABASE test"
 
-  free -m  >>$ROOTDIR/$RES_INIT
+  free -m  >>$RESULTS_DIR/$RES_INIT
   THREADS=${NTHREADS##*,} # get the last number
   echo "- Populate database with sysbench with ${NTABS}x$NROWS rows and $THREADS threads"
-  echo "- Populate database with sysbench with ${NTABS}x$NROWS rows and $THREADS threads" >>$ROOTDIR/$RES_INIT
-#  (time $SYSBENCH --threads=$THREADS /usr/local/share/sysbench/oltp_read_write.lua prepare --rand-type=uniform --range-size=$RANGE_SIZE >>$ROOTDIR/$RES_INIT) 2>>$ROOTDIR/$RES_INIT
-  (time run_sysbench_prepare) 2>>$ROOTDIR/$RES_INIT
-  free -m >>$ROOTDIR/$RES_INIT
+  echo "- Populate database with sysbench with ${NTABS}x$NROWS rows and $THREADS threads" >>$RESULTS_DIR/$RES_INIT
+#  (time $SYSBENCH --threads=$THREADS /usr/local/share/sysbench/oltp_read_write.lua prepare --rand-type=uniform --range-size=$RANGE_SIZE >>$RESULTS_DIR/$RES_INIT) 2>>$RESULTS_DIR/$RES_INIT
+  cd $RESULTS_DIR
+  (time bash all_small_setup_only.sh $NTABS $NROWS 0 0 0 $dbAndCreds 1 0 $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $PWD $DISKNAME $USE_PK $THREADS) 2>>$RESULTS_DIR/$RES_INIT
+  free -m >>$RESULTS_DIR/$RES_INIT
 
-  $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; show table status" >>$ROOTDIR/$RES_INIT
+  $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; show table status" >>$RESULTS_DIR/$RES_INIT
 
-  print_database_size >>$ROOTDIR/$RES_INIT
-  echo "- Shutdown mysqld" >>$ROOTDIR/$RES_INIT
-  (time shutdownmysql) 2>>$ROOTDIR/$RES_INIT
-  free -m  >>$ROOTDIR/$RES_INIT
-  print_database_size >>$ROOTDIR/$RES_INIT
+  print_database_size >>$RESULTS_DIR/$RES_INIT
+  echo "- Shutdown mysqld" >>$RESULTS_DIR/$RES_INIT
+  (time shutdownmysql) 2>>$RESULTS_DIR/$RES_INIT
+  free -m  >>$RESULTS_DIR/$RES_INIT
+  print_database_size >>$RESULTS_DIR/$RES_INIT
 #  kill_all
-#  copy_log_err $RES_INIT
+  copy_log_err $RESULTS_DIR/$RES_INIT
   continue
 fi
 
@@ -253,7 +250,9 @@ if [ 1 == 0 ]; then
   $SYSBENCH --threads=$THREADS --time=$SECS --range-size=$RANGE_SIZE /usr/local/share/sysbench/oltp_insert.lua run
   done # for THREADS
 else
-  run_sysbench
+  RES_RUN=$(generate_name _run $MEM)
+  (time run_sysbench $RES_RUN) 2>>$RESULTS_DIR/$RES_RUN
+  CREATE_RESULTS_DIR=1
 fi
 
 shutdownmysql

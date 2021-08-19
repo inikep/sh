@@ -51,7 +51,7 @@ CT_MEMORY=${MEMORY##*,} # get the last number
 NTHREADS=${NTHREADS:-16} # "8,16,32"
 RANGE_SIZE=${RANGE_SIZE:-100}
 TABLE_OPTIONS=none
-USE_PK=${USE_PK:-1}
+USE_PK=${USE_PK:-0}
 ZENFS_DEV=${ZENFS_DEV:-nvme1n2}
 DISKNAME=$ZENFS_DEV
 dbAndCreds=mysql,root,pw,127.0.0.1,test,$SUBENGINE # dbAndCreds=mysql,user,password,host,db,engine

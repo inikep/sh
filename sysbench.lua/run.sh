@@ -130,14 +130,9 @@ else
   exit -1
 fi
 
-prepareArgs=""
-if [[ $usepk -eq 0 ]]; then
-  prepareArgs="--create_secondary=on --threads=1"
-else
-  for nt in "$@"; do
-    prepareArgs="--create_secondary=off --threads=$nt"
-  done
-fi
+for nt in "$@"; do
+  prepareArgs="--create_secondary=off --threads=$nt"
+done
 
 sfx="${testType}.range${range}.pk${usepk}"
 
@@ -169,6 +164,17 @@ status=$?
 if [[ $status != 0 ]]; then
   echo sysbench prepare failed, see sb.prepare.o.$sfx
   exit -1
+fi
+
+if [[ $usepk -eq 0 ]]; then
+  exA=(--db-driver=$driver $setupArgs $engineArg --tables=$ntabs --events=0 --time=$secs $sysbdir/share/sysbench/create_sec_index.lua prepare)
+  echo $sysbdir/bin/sysbench "${exA[@]}" "${sbDbCreds[@]}" >> sb.prepare.o.$sfx
+  $sysbdir/bin/sysbench "${exA[@]}" "${sbDbCreds[@]}" >> sb.prepare.o.$sfx 2>&1
+  status=$?
+  if [[ $status != 0 ]]; then
+    echo sysbench prepare failed, see sb.prepare.o.$sfx
+    exit -1
+  fi
 fi
 
 stop_secs=$( date +'%s' )

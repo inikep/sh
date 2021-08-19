@@ -1,0 +1,40 @@
+[mysqld]
+plugin-load=RocksDB=ha_rocksdb.so
+default-storage-engine=rocksdb
+rocksdb=1
+
+#pid-file        = /var/run/mysqld/mysqld.pid
+#socket          = /var/run/mysqld/mysqld.sock
+#datadir                = /var/lib/mysql
+#datadir         = /mnt/percona_myrocks_BBC/mysql
+#log-error       = /var/log/mysql/error.log
+#tmpdir=/tmp/mysqltmp/
+disable-log-bin
+#innodb_undo_directory=/home/undo
+#innodb_purge_rseg_truncate_frequency=1
+#innodb_undo_log_truncate=ON
+#innodb_max_undo_log_size=10485760
+
+
+max_prepared_stmt_count = 4194304
+max-connections=10000
+rocksdb_max_background_jobs=14
+#rocksdb_db_write_buffer_size=68719476736
+rocksdb_db_write_buffer_size=2147483648
+rocksdb_manual_wal_flush=OFF
+rocksdb_use_direct_io_for_flush_and_compaction=ON
+rocksdb_use_direct_reads=ON
+#rocksdb_block_cache_size=16G
+#rocksdb_wal_bytes_per_sync=2097152
+#rocksdb-max-total-wal-size=4194304
+rocksdb-max-open-files=1000
+#rocksdb-compaction_style=kCompactionStyleLevel
+#rocksdb-target_file_size_multiplier=1
+#rocksdb-target_file_size_base=2145701068
+#rocksdb_max_subcompactions=8
+#rocksdb-rate-limiter-bytes-per-sec=1073741824
+#rocksdb-use-direct-io-for-flush-and-compaction=ON
+#rocksdb-use-direct-reads=ON
+#rocksdb-bytes-per-sync=1073741824
+#rocksdb-compaction-sequential-deletes=1000000
+#rocksdb-max-log-file-size=8388608

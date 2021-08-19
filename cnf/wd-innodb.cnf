@@ -1,0 +1,34 @@
+[mysqld]
+#pid-file        = /var/run/mysqld/mysqld.pid
+#socket          = /var/run/mysqld/mysqld.sock
+#datadir                = /var/lib/mysql
+#datadir         = /mnt/percona_innodb_BBC/mysql
+#log-error       = /var/log/mysql/error.log
+#tmpdir=/tmp/mysqltmp/
+disable-log-bin
+#binlog_expire_logs_seconds=300
+innodb_io_capacity_max=10000
+innodb_io_capacity=2000
+skip-grant-tables
+default-storage-engine=InnoDB
+port=3306
+#innodb_flush_sync=0
+innodb_doublewrite=ON
+#innodb_flush_neighbors=0
+#innodb_force_recovery = 4
+
+max_prepared_stmt_count = 4194304
+max-connections=100000
+
+
+#innodb-undo-directory=/home/wdc/myundo
+innodb_flush_method=O_DIRECT
+#innodb_io_capacity=20000
+#innodb_data_home_dir = /myibdata/
+#innodb_data_file_path=ibdata1:50M:autoextend
+innodb_buffer_pool_size=32G
+innodb_buffer_pool_instances=32
+innodb_write_io_threads=64
+innodb_page_size=16384
+innodb_page_cleaners=16
+innodb_open_files=300

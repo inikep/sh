@@ -118,6 +118,8 @@ print_database_size(){
   if [ "$ENGINE" == "zenfs" ]; then
     DATA_SIZE=`zenfs list --zbd=$ZENFS_DEV --path=./.rocksdb | awk '{sum+=$1;} END {printf "%d\n", sum/1024/1024;}'`
     echo "Size of RocksDB database is $DATA_SIZE MB"
+    EMPTY_PAGES=`zbd report /dev/$ZENFS_DEV | grep em | wc -l`
+    echo "Number of empty pages is $EMPTY_PAGES"
   else
     du -ch $DATADIR
   fi

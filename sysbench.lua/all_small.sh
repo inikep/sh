@@ -133,8 +133,8 @@ bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        range-covered-s
 echo range-notcovered-si
 bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        range-notcovered-si  100  $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $@
 
-echo scan
-bash run.sh $ntabs $nrows $insertsecs $dbAndCreds 0     0        scan                 100  $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $ntabs
+# echo scan
+# bash run.sh $ntabs $nrows $insertsecs $dbAndCreds 0     0        scan                 100  $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $ntabs
 fi
 
 echo delete

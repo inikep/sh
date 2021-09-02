@@ -116,13 +116,15 @@ shutdownmysql(){
 
 print_database_size(){
   if [ "$ENGINE" == "zenfs" ]; then
+    EMPTY_ZONES=`zbd report /dev/$ZENFS_DEV | grep em | wc -l`
     DATA_SIZE=`zenfs list --zbd=$ZENFS_DEV --path=./.rocksdb | awk '{sum+=$1;} END {printf "%d\n", sum/1024/1024;}'`
-    echo "Size of RocksDB database is $DATA_SIZE MB"
-    EMPTY_PAGES=`zbd report /dev/$ZENFS_DEV | grep em | wc -l`
-    echo "Number of empty pages is $EMPTY_PAGES"
+    zenfs list --zbd=$ZENFS_DEV --path=./.rocksdb
+    echo "Number of empty zones is $EMPTY_ZONES"
   else
-    du -ch $DATADIR
+    DATA_SIZE=`du -s $DATADIR | awk '{sum+=$1;} END {printf "%d\n", sum/1024;}'`
+    ls -l $DATADIR/.rocksdb
   fi
+  echo "Size of RocksDB database is $DATA_SIZE MB"
 }
 
 waitmysql(){
@@ -220,6 +222,7 @@ if [ "${COMMAND_NAME}" == "init" ]; then
 #  (time $SYSBENCH --threads=$THREADS /usr/local/share/sysbench/oltp_read_write.lua prepare --rand-type=uniform --range-size=$RANGE_SIZE >>$RESULTS_DIR/$RES_INIT) 2>>$RESULTS_DIR/$RES_INIT
   cd $RESULTS_DIR
   (time bash all_small_setup_only.sh $NTABS $NROWS 0 0 0 $dbAndCreds 1 0 $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $PWD $DISKNAME $USE_PK $THREADS) 2>>$RESULTS_DIR/$RES_INIT
+  cat sb.prepare.o.point-query.warm.range100.pk* >>$RESULTS_DIR/$RES_INIT
   free -m >>$RESULTS_DIR/$RES_INIT
 
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; show table status" >>$RESULTS_DIR/$RES_INIT

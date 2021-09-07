@@ -128,8 +128,6 @@ print_database_size(){
 }
 
 waitmysql(){
-  set +e
-
   echo "- Waiting for start of mysqld"
   sleep 5
   while true;
@@ -139,12 +137,11 @@ waitmysql(){
           sleep 5
           echo -n "."
   done
-  set -e
 }
 
 # generate_name [prefix] [memory]
 generate_name(){
-  echo "$1_${CFG_FILE%.*}_${ENGINE}_${NTABS}x${NROWS}_${2}GB_${SECS}s_`date +%F_%H-%M`"
+  echo "${1}${CFG_FILE%.*}_${ENGINE}_${NTABS}x${NROWS}_${2}GB_${SECS}s_`date +%F_%H-%M`"
 }
 
 copy_log_err() {
@@ -184,7 +181,7 @@ fi
 echo "- Execute COMMAND_NAME=$COMMAND_NAME"
 
 if [ "${COMMAND_NAME}" == "verify" ]; then
-  RES_VERIFY=$(generate_name _verify $CT_MEMORY)
+  RES_VERIFY=$(generate_name _verify_ $CT_MEMORY)
   startmysql $CFG_FILE $CT_MEMORY
   waitmysql "$CLIENT_OPT"
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; show table status"
@@ -195,12 +192,14 @@ if [ "${COMMAND_NAME}" == "verify" ]; then
 fi
 
 if [ "${COMMAND_NAME}" == "init" ]; then
-  RES_INIT=$(generate_name _init $CT_MEMORY)
+  RES_INIT=$(generate_name _init_ $CT_MEMORY)
   echo >>$RESULTS_DIR/$RES_INIT SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS
 
   if [ "$ENGINE" == "zenfs" ]; then
     ZENFS_PATH=$BENCH_PATH/zenfs_sysbench_$ZENFS_DEV
     rm -rf $ZENFS_PATH
+    export ZENFS_DEV
+    sudo -E bash -c 'echo mq-deadline > /sys/block/$ZENFS_DEV/queue/scheduler'
     zenfs mkfs --zbd=$ZENFS_DEV --aux_path=$ZENFS_PATH --finish_threshold=0 --force || exit
   fi
   echo "- Initialize mysqld"
@@ -222,6 +221,7 @@ if [ "${COMMAND_NAME}" == "init" ]; then
 #  (time $SYSBENCH --threads=$THREADS /usr/local/share/sysbench/oltp_read_write.lua prepare --rand-type=uniform --range-size=$RANGE_SIZE >>$RESULTS_DIR/$RES_INIT) 2>>$RESULTS_DIR/$RES_INIT
   cd $RESULTS_DIR
   (time bash all_small_setup_only.sh $NTABS $NROWS 0 0 0 $dbAndCreds 1 0 $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $PWD $DISKNAME $USE_PK $THREADS) 2>>$RESULTS_DIR/$RES_INIT
+  STATUS=$?
   cat sb.prepare.o.point-query.warm.range100.pk* >>$RESULTS_DIR/$RES_INIT
   free -m >>$RESULTS_DIR/$RES_INIT
 
@@ -234,6 +234,7 @@ if [ "${COMMAND_NAME}" == "init" ]; then
   print_database_size >>$RESULTS_DIR/$RES_INIT
 #  kill_all
   copy_log_err $RESULTS_DIR/$RES_INIT
+  if [[ $STATUS != 0 ]]; then echo run_sysbench failed; exit -1; fi
   continue
 fi
 
@@ -255,7 +256,7 @@ if [ 1 == 0 ]; then
   $SYSBENCH --threads=$THREADS --time=$SECS --range-size=$RANGE_SIZE /usr/local/share/sysbench/oltp_insert.lua run
   done # for THREADS
 else
-  RES_RUN=$(generate_name _run $MEM)
+  RES_RUN=$(generate_name _run_ $MEM)
   (time run_sysbench $RES_RUN) 2>>$RESULTS_DIR/$RES_RUN
   CREATE_RESULTS_DIR=1
 fi
@@ -267,4 +268,4 @@ done # for MEM
 
 done # for COMMAND_NAME
 
-echo "- Script finish_threshold"
+echo "- Script finished"

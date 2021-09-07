@@ -238,7 +238,14 @@ fi
 
 echo $sysbdir/bin/sysbench "${exA[@]}" "${sbDbCreds[@]}" "${testArgs[@]}"  > sb.o.$sfxn
 echo "$realdop CPUs" >> sb.o.$sfxn
+
 /usr/bin/time -o sb.time.$sfxn $sysbdir/bin/sysbench "${exA[@]}" "${sbDbCreds[@]}" "${testArgs[@]}" >> sb.o.$sfxn 2>&1
+status=$?
+if [[ $status != 0 ]]; then
+  echo sysbench run failed, see sb.o.$sfxn
+  exit -1
+fi
+
 
 if [[ $dbpid -ne -1 && $nt -eq 1 ]] ; then 
   kill $fpid
@@ -302,8 +309,8 @@ if [[ $postwrite -eq 1 ]]; then
   #  2) Get LSM tree into deterministic state
   #  3) Collect stats
 
-  # Sleep for 60 + 60 seconds per 100M rows
-  sleepSecs=$( echo $nr $ntabs | awk '{ printf "%.0f", ((($1) / 100000000) + 1) * 60 }' )
+  # Sleep for 5 + 60 seconds per 100M rows
+  sleepSecs=$( echo $nr $ntabs | awk '{ printf "%.0f", (($1) / 100000000) * 60 + 5 }' )
   echo Sleep for $sleepSecs secs
   echo sleepSecs is $sleepSecs > sb.o.pw.$sfx
 
@@ -402,6 +409,7 @@ else
 fi
 done > sb.r.qps.$sfx
 echo "$engine $testType range=$range" >> sb.r.qps.$sfx
+cat sb.r.qps.$sfx
 
 for nt in "$@"; do
   grep avg: sb.o.$sfx.dop${nt} | awk '{ print $2 }' | awk '{ printf "%s\t", $1 }' 

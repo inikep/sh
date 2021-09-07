@@ -1,3 +1,6 @@
+# Any subsequent(*) commands which fail will cause the shell script to exit immediately
+set -e
+
 ntabs=$1
 nrows=$2
 readsecs=$3

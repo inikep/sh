@@ -196,11 +196,10 @@ if [ "${COMMAND_NAME}" == "init" ]; then
   echo >>$RESULTS_DIR/$RES_INIT SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS
 
   if [ "$ENGINE" == "zenfs" ]; then
-    ZENFS_PATH=$BENCH_PATH/zenfs_sysbench_$ZENFS_DEV
-    rm -rf $ZENFS_PATH
+    rm -rf $DATADIR
     export ZENFS_DEV
     sudo -E bash -c 'echo mq-deadline > /sys/block/$ZENFS_DEV/queue/scheduler'
-    zenfs mkfs --zbd=$ZENFS_DEV --aux_path=$ZENFS_PATH --finish_threshold=0 --force || exit
+    zenfs mkfs --zbd=$ZENFS_DEV --aux_path=$DATADIR --finish_threshold=0 --force || exit
   fi
   echo "- Initialize mysqld"
   rm -rf $DATADIR

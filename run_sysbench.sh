@@ -68,6 +68,7 @@ CLIENT_OPT_NOPASS="-hlocalhost -uroot"
 CLIENT_OPT="$CLIENT_OPT_NOPASS -ppw"
 MYSQLDIR=$ROOTDIR/mysqld
 DATADIR=$ROOTDIR/master
+ZENFS_TOOL=$MYSQLDIR/bin/zenfs
 
 
 if [ ! -d "$ROOTDIR" ]; then mkdir $ROOTDIR; fi
@@ -117,8 +118,8 @@ shutdownmysql(){
 print_database_size(){
   if [ "$ENGINE" == "zenfs" ]; then
     EMPTY_ZONES=`zbd report /dev/$ZENFS_DEV | grep em | wc -l`
-    DATA_SIZE=`zenfs list --zbd=$ZENFS_DEV --path=./.rocksdb | awk '{sum+=$1;} END {printf "%d\n", sum/1024/1024;}'`
-    zenfs list --zbd=$ZENFS_DEV --path=./.rocksdb
+    DATA_SIZE=`$ZENFS_TOOL list --zbd=$ZENFS_DEV --path=./.rocksdb | awk '{sum+=$1;} END {printf "%d\n", sum/1024/1024;}'`
+    $ZENFS_TOOL list --zbd=$ZENFS_DEV --path=./.rocksdb
     echo "Number of empty zones is $EMPTY_ZONES"
   else
     DATA_SIZE=`du -s $DATADIR | awk '{sum+=$1;} END {printf "%d\n", sum/1024;}'`
@@ -199,7 +200,7 @@ if [ "${COMMAND_NAME}" == "init" ]; then
     rm -rf $DATADIR
     export ZENFS_DEV
     sudo -E bash -c 'echo mq-deadline > /sys/block/$ZENFS_DEV/queue/scheduler'
-    zenfs mkfs --zbd=$ZENFS_DEV --aux_path=$DATADIR --finish_threshold=0 --force || exit
+    $ZENFS_TOOL mkfs --zbd=$ZENFS_DEV --aux_path=$DATADIR --finish_threshold=0 --force || exit
   fi
   echo "- Initialize mysqld"
   rm -rf $DATADIR

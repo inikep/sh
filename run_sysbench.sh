@@ -196,19 +196,23 @@ if [ "${COMMAND_NAME}" == "init" ]; then
   RES_INIT=$(generate_name _init_ $CT_MEMORY)
   echo >>$RESULTS_DIR/$RES_INIT SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS
 
+  echo "- Initialize mysqld"
+  rm -rf $DATADIR
   if [ "$ENGINE" == "zenfs" ]; then
-    rm -rf $DATADIR
     export ZENFS_DEV
     sudo -E bash -c 'echo mq-deadline > /sys/block/$ZENFS_DEV/queue/scheduler'
     $ZENFS_TOOL mkfs --zbd=$ZENFS_DEV --aux_path=$DATADIR --finish_threshold=0 --force || exit
+  else
+    mkdir $DATADIR
   fi
-  echo "- Initialize mysqld"
-  rm -rf $DATADIR
-  mkdir $DATADIR
-  cp $MYSQLDIR/bin/mysqld-debug $MYSQLDIR/bin/mysqld
+#  cp $MYSQLDIR/bin/mysqld-debug $MYSQLDIR/bin/mysqld
   $MYSQLDIR/bin/mysqld --initialize-insecure --basedir=$MYSQLDIR --datadir=$DATADIR --log-error-verbosity=2
 
-  startmysql $CFG_FILE $CT_MEMORY "--disable-log-bin --rocksdb_bulk_load=1"
+  if [ "$USE_PK" == "0" ]; then
+    startmysql $CFG_FILE $CT_MEMORY "--disable-log-bin --rocksdb_bulk_load_allow_sk=1 --rocksdb_bulk_load=1"
+  else
+    startmysql $CFG_FILE $CT_MEMORY "--disable-log-bin --rocksdb_bulk_load=1"
+  fi
   waitmysql "$CLIENT_OPT_NOPASS"
   echo "- Create 'test' database" 
   $MYSQLDIR/bin/mysql $CLIENT_OPT_NOPASS -e "ALTER USER 'root'@'localhost' IDENTIFIED BY 'pw'"

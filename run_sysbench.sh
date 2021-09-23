@@ -185,6 +185,7 @@ if [ "${COMMAND_NAME}" == "verify" ]; then
   RES_VERIFY=$(generate_name _verify_ $CT_MEMORY)
   startmysql $CFG_FILE $CT_MEMORY
   waitmysql "$CLIENT_OPT"
+  $MYSQLDIR/bin/mysqlcheck $CLIENT_OPT --analyze --databases test
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; show table status"
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; SHOW CREATE TABLE sbtest1; SHOW ENGINE ROCKSDB STATUS\G; show table status" >$RESULTS_DIR/$RES_VERIFY
   shutdownmysql
@@ -229,6 +230,7 @@ if [ "${COMMAND_NAME}" == "init" ]; then
   cat sb.prepare.o.point-query.warm.range100.pk* >>$RESULTS_DIR/$RES_INIT
   free -m >>$RESULTS_DIR/$RES_INIT
 
+  $MYSQLDIR/bin/mysql $CLIENT_OPT -e "SET global rocksdb_bulk_load=0;"
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; show table status" >>$RESULTS_DIR/$RES_INIT
 
   print_database_size >>$RESULTS_DIR/$RES_INIT

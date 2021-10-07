@@ -2,6 +2,7 @@ alias vpn="sudo openvpn --config /home/przemek/.ssh/client.ovpn --auth-retry int
 alias ssh13="ssh przemyslaw.skibinski@10.30.3.13 -i /home/przemek/.ssh/inikep.priv"
 alias ssh14="ssh przemyslaw.skibinski@10.30.3.14 -i /home/przemek/.ssh/inikep.priv"
 alias ssh117="ssh przemyslaw.skibinski@10.30.7.117 -i /home/przemek/.ssh/inikep.priv"
+alias ssh134="ssh przemyslaw.skibinski@10.30.7.134 -i /home/przemek/.ssh/inikep.priv"
 function sshini() { ssh przemyslaw.skibinski@$1 -i /home/przemek/.ssh/inikep.priv; }
 alias cf_on="git config --local include.path ../percona-8.0/.gitconfig"
 alias cf_off="git config --local --unset include.path"

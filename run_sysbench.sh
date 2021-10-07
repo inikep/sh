@@ -202,6 +202,7 @@ if [ "${COMMAND_NAME}" == "init" ]; then
   if [ "$ENGINE" == "zenfs" ]; then
     export ZENFS_DEV
     sudo -E bash -c 'echo mq-deadline > /sys/block/$ZENFS_DEV/queue/scheduler'
+    sudo chmod o+rw /dev/$ZENFS_DEV
     $ZENFS_TOOL mkfs --zbd=$ZENFS_DEV --aux_path=$DATADIR --finish_threshold=0 --force || exit
   else
     mkdir $DATADIR

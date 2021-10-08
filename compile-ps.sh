@@ -11,6 +11,7 @@
 
 case $1 in
   "") SRV_VER="unknown" ;;
+  wdc-*) SRV_VER="WDC8" ;;
   FB56-*) SRV_VER="FB56" ;;
   fb-prod*) SRV_VER="FB56" ;;
   fb-5.*) SRV_VER="FB56" ;;
@@ -25,7 +26,7 @@ case $1 in
 esac
 
 
-if [[ "$SRV_VER" != +(5.6|5.7|8.0) ]] && [[ "$SRV_VER" != +(FB56|FB8) ]] && [[ "$SRV_VER" != +(MS57|MS8) ]]; then
+if [[ "$SRV_VER" != +(5.6|5.7|8.0|WDC8) ]] && [[ "$SRV_VER" != +(FB56|FB8) ]] && [[ "$SRV_VER" != +(MS57|MS8) ]]; then
    echo Unknown SRV_VER=$SRV_VER;
    echo "Usage: compile-ps.sh <server_dir> <debug/rel/asan/valgrind/rocksdb/tokudb/additional_options>";
    echo "  e.g. compile-ps.sh mysql-8.0 rel";
@@ -176,6 +177,14 @@ CMAKE_PERCONA_80="
  -DWITH_NUMA=ON
 ";
 
+CMAKE_WDC_80="
+ $CMAKE_MYSQL_80
+ -DWITH_SYSTEM_LIBS=ON
+ -DWITH_NUMA=ON
+ -DROCKSDB_PLUGINS=zenfs
+ -DWITH_ZENFS_UTILITY=ON
+";
+
 CMAKE_FACEBOOK_56="
  $CMAKE_MYSQL_56
  -DWITH_LZ4=system
@@ -288,6 +297,9 @@ case $SRV_VER in
           ;;
      FB8)
           CMAKE_OPT="$CMAKE_FACEBOOK_80";
+          ;;
+     WDC8)
+          CMAKE_OPT="$CMAKE_WDC_80";
           ;;
      MS57)
           CMAKE_OPT="$CMAKE_MYSQL_57";

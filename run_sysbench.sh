@@ -1,8 +1,8 @@
 #!/bin/bash 
 
 SERVER_BUILD=$1
-BENCH_PATH=${BENCH_PATH:-/data/bench}
-BUILDDIR=${BUILDDIR:-/data/mysql-server}/$SERVER_BUILD
+BENCH_PATH=${BENCH_PATH:-~/bench}
+BUILDDIR=${BUILDDIR:-~}/$SERVER_BUILD
 ROOTDIR=$BENCH_PATH/$SERVER_BUILD
 CONFIG_FILE=$2
 CFG_FILE=${CONFIG_FILE##*/}
@@ -23,7 +23,7 @@ if ([ "$COMMAND_NAME" != "verify" ] && [ "$COMMAND_NAME" != "init" ]) && [ "$COM
   echo "  NROWS - number of rows per table"
   echo "  NTHREADS - number of sysbench threads"
   echo "  SECS - number of seconds per each sysbench job"
-  echo "example: time NTABS=8 SECS=60 run_sysbench.sh init,verify,run wdc-8.0-rel-clang12-rocks-toku-add rocksdb /data/sh/cnf/vadim-rocksdb.cnf"
+  echo "example: time NTABS=8 SECS=60 run_sysbench.sh init,verify,run wdc-8.0-rel-clang12-rocks-toku-add rocksdb ~/sh/cnf/vadim-rocksdb.cnf"
   exit
 fi     
 done # for COMMAND_NAME
@@ -67,7 +67,7 @@ HOST="--mysql-host=127.0.0.1"
 CLIENT_OPT_NOPASS="-hlocalhost -uroot"
 CLIENT_OPT="$CLIENT_OPT_NOPASS -ppw"
 MYSQLDIR=$ROOTDIR/mysqld
-DATADIR=$ROOTDIR/master
+DATADIR=${DATADIR:-${ROOTDIR}/master}
 ZENFS_TOOL=$MYSQLDIR/bin/zenfs
 
 

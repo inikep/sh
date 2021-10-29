@@ -142,12 +142,23 @@ waitmysql(){
 
 # generate_name [prefix] [memory]
 generate_name(){
-  echo "${1}${CFG_FILE%.*}_${ENGINE}_${NTABS}x${NROWS}_${2}GB_${SECS}s_`date +%F_%H-%M`"
+  echo "${1}${ENGINE}_${NTABS}x${NROWS}_${2}GB_${SECS}s_`date +%F_%H-%M`"
 }
 
 copy_log_err() {
   cat $ROOTDIR/log.err >>$1
   rm $ROOTDIR/log.err
+}
+
+verify_db(){
+  RES_VERIFY=$(generate_name _verify_ $CT_MEMORY)
+  startmysql $CFG_FILE $CT_MEMORY
+  waitmysql "$CLIENT_OPT"
+  $MYSQLDIR/bin/mysqlcheck $CLIENT_OPT --analyze --databases test
+  $MYSQLDIR/bin/mysqlcheck $CLIENT_OPT --analyze --databases test >$RESULTS_DIR/$RES_VERIFY
+  $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; SHOW CREATE TABLE sbtest1; SHOW ENGINE ROCKSDB STATUS\G; show table status" >$RESULTS_DIR/$RES_VERIFY
+  shutdownmysql
+  copy_log_err $RESULTS_DIR/$RES_VERIFY
 }
 
 run_sysbench(){
@@ -174,22 +185,15 @@ for COMMAND_NAME in $(echo "$COMMANDS" | tr "," "\n")
 do
 
 if [ "${CREATE_RESULTS_DIR}" == "1" ]; then
-  RESULTS_DIR=${ROOTDIR}/$(generate_name _ $CT_MEMORY)
-  mkdir $RESULTS_DIR
+  RESULTS_DIR=${ROOTDIR}/${CFG_FILE%.*}$(generate_name / $CT_MEMORY)
+  mkdir -p $RESULTS_DIR
   CREATE_RESULTS_DIR=0
 fi
 
 echo "- Execute COMMAND_NAME=$COMMAND_NAME"
 
 if [ "${COMMAND_NAME}" == "verify" ]; then
-  RES_VERIFY=$(generate_name _verify_ $CT_MEMORY)
-  startmysql $CFG_FILE $CT_MEMORY
-  waitmysql "$CLIENT_OPT"
-  $MYSQLDIR/bin/mysqlcheck $CLIENT_OPT --analyze --databases test
-  $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; show table status"
-  $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; SHOW CREATE TABLE sbtest1; SHOW ENGINE ROCKSDB STATUS\G; show table status" >$RESULTS_DIR/$RES_VERIFY
-  shutdownmysql
-  copy_log_err $RESULTS_DIR/$RES_VERIFY
+  verify_db
   continue
 fi
 
@@ -265,6 +269,7 @@ if [ 1 == 0 ]; then
 else
   RES_RUN=$(generate_name _run_ $MEM)
   (time run_sysbench $RES_RUN) 2>>$RESULTS_DIR/$RES_RUN
+  verify_db
   CREATE_RESULTS_DIR=1
 fi
 

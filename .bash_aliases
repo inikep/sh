@@ -39,8 +39,7 @@ function mtr-result-files() {
   fi
 }
 
-function count-lines-cut() { cat $1 | rev | cut -f 1,2 -d '.' | rev | sort | uniq -c | sort -nr > $1_sorted; }
-function count-lines() { sort $1 | uniq -c | sort -nr > $1_sorted; }
+function count-lines() { cat $1 | rev | cut -f 1,2 -d '.' | rev | sort | uniq -c | sort -nr > $1_sorted; }
 function git-worktree() { git worktree add -b $1 ../$1 $2 $3 $4; cd ../$1; }
 function git-mergetool() { git checkout --conflict=merge $1; git mergetool $1; }
 function git-squash() {

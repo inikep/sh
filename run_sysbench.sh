@@ -44,7 +44,10 @@ kill_all
 
 # params for benchmarking
 NTABS=${NTABS:-16}
+ORIG_NROWS=$NROWS
+if [ ! -z "$NROWS" ]; then NROWS=$(numfmt --from=si $NROWS); fi
 NROWS=${NROWS:-10000000}
+ORIG_NROWS=${ORIG_NROWS:=$NROWS}
 SECS="${SECS:-300}"
 MEMORY=${MEMORY:-"16"} # "4,8,16"
 CT_MEMORY=${MEMORY##*,} # get the last number
@@ -142,11 +145,12 @@ waitmysql(){
 
 # generate_name [prefix] [memory]
 generate_name(){
-  echo "${1}${ENGINE}_${NTABS}x${NROWS}_${2}GB_${SECS}s_`date +%F_%H-%M`"
+  echo "${1}${ENGINE}_${NTABS}x${ORIG_NROWS}_${2}GB_${SECS}s_`date +%F_%H-%M`"
 }
 
 copy_log_err() {
   cat $ROOTDIR/log.err >>$1
+  grep -i "ERROR" $ROOTDIR/log.err
   rm $ROOTDIR/log.err
 }
 
@@ -156,7 +160,7 @@ verify_db(){
   waitmysql "$CLIENT_OPT"
   $MYSQLDIR/bin/mysqlcheck $CLIENT_OPT --analyze --databases test
   $MYSQLDIR/bin/mysqlcheck $CLIENT_OPT --analyze --databases test >$RESULTS_DIR/$RES_VERIFY
-  $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; SHOW CREATE TABLE sbtest1; SHOW ENGINE ROCKSDB STATUS\G; show table status" >$RESULTS_DIR/$RES_VERIFY
+  $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; SHOW CREATE TABLE sbtest1; SHOW ENGINE ROCKSDB STATUS\G; show table status" >>$RESULTS_DIR/$RES_VERIFY
   shutdownmysql
   copy_log_err $RESULTS_DIR/$RES_VERIFY
 }

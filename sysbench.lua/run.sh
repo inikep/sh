@@ -141,7 +141,7 @@ sfx="${testType}.range${range}.pk${usepk}"
 if [[ $setup -eq 1 ]]; then
 
 echo Setup for $ntabs tables > sb.prepare.o.$sfx
-echo Setup for $ntabs tables
+echo Setup for $ntabs tables at $(date '+%H:%M:%S')
 
 for x in $( seq 1 $ntabs ); do
   echo Drop table sbtest$x >> sb.prepare.o.$sfx

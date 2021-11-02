@@ -114,21 +114,26 @@ startmysql(){
 }
 
 shutdownmysql(){
-  echo "- Shutting mysqld down"
+  echo "- Shutting mysqld down at $(date '+%H:%M:%S')"
   $MYSQLDIR/bin/mysqladmin shutdown $CLIENT_OPT
+  echo "- Shutdown finished at $(date '+%H:%M:%S')"
 }
 
+# startmysql [output_file]
 print_database_size(){
+  RESULTS_FILE=$1
   if [ "$ENGINE" == "zenfs" ]; then
     EMPTY_ZONES=`zbd report /dev/$ZENFS_DEV | grep em | wc -l`
     DATA_SIZE=`$ZENFS_TOOL list --zbd=$ZENFS_DEV --path=./.rocksdb | awk '{sum+=$1;} END {printf "%d\n", sum/1024/1024;}'`
-    $ZENFS_TOOL list --zbd=$ZENFS_DEV --path=./.rocksdb
+    $ZENFS_TOOL list --zbd=$ZENFS_DEV --path=./.rocksdb >>$RESULTS_FILE
     echo "Number of empty zones is $EMPTY_ZONES"
+    echo "Number of empty zones is $EMPTY_ZONES" >>$RESULTS_FILE
   else
     DATA_SIZE=`du -s $DATADIR | awk '{sum+=$1;} END {printf "%d\n", sum/1024;}'`
-    ls -l $DATADIR/.rocksdb
+    ls -l $DATADIR/.rocksdb >>$RESULTS_FILE
   fi
   echo "Size of RocksDB database is $DATA_SIZE MB"
+  echo "Size of RocksDB database is $DATA_SIZE MB" >>$RESULTS_FILE
 }
 
 waitmysql(){
@@ -148,6 +153,7 @@ generate_name(){
   echo "${1}${ENGINE}_${NTABS}x${ORIG_NROWS}_${2}GB_${SECS}s_`date +%F_%H-%M`"
 }
 
+# copy_log_err [output_file]
 copy_log_err() {
   cat $ROOTDIR/log.err >>$1
   grep -i "ERROR" $ROOTDIR/log.err
@@ -158,13 +164,13 @@ verify_db(){
   RES_VERIFY=$(generate_name _verify_ $CT_MEMORY)
   startmysql $CFG_FILE $CT_MEMORY
   waitmysql "$CLIENT_OPT"
-  $MYSQLDIR/bin/mysqlcheck $CLIENT_OPT --analyze --databases test
   $MYSQLDIR/bin/mysqlcheck $CLIENT_OPT --analyze --databases test >$RESULTS_DIR/$RES_VERIFY
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; SHOW CREATE TABLE sbtest1; SHOW ENGINE ROCKSDB STATUS\G; show table status" >>$RESULTS_DIR/$RES_VERIFY
   shutdownmysql
   copy_log_err $RESULTS_DIR/$RES_VERIFY
 }
 
+# run_sysbench [output_file]
 run_sysbench(){
   cd $RESULTS_DIR
   RESULTS_FILE=$1
@@ -183,6 +189,7 @@ run_sysbench(){
   copy_log_err $RESULTS_DIR/$RESULTS_FILE
 }
 
+rm $ROOTDIR/log.err
 CREATE_RESULTS_DIR=1
 
 for COMMAND_NAME in $(echo "$COMMANDS" | tr "," "\n")
@@ -194,7 +201,7 @@ if [ "${CREATE_RESULTS_DIR}" == "1" ]; then
   CREATE_RESULTS_DIR=0
 fi
 
-echo "- Execute COMMAND_NAME=$COMMAND_NAME"
+echo "- Execute COMMAND_NAME=$COMMAND_NAME at $(date '+%H:%M:%S')"
 
 if [ "${COMMAND_NAME}" == "verify" ]; then
   verify_db
@@ -205,7 +212,7 @@ if [ "${COMMAND_NAME}" == "init" ]; then
   RES_INIT=$(generate_name _init_ $CT_MEMORY)
   echo >>$RESULTS_DIR/$RES_INIT SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS
 
-  echo "- Initialize mysqld"
+  echo "- Initialize mysqld at $(date '+%H:%M:%S')"
   rm -rf $DATADIR
   if [ "$ENGINE" == "zenfs" ]; then
     export ZENFS_DEV
@@ -224,17 +231,17 @@ if [ "${COMMAND_NAME}" == "init" ]; then
     startmysql $CFG_FILE $CT_MEMORY "--disable-log-bin --rocksdb_bulk_load=1"
   fi
   waitmysql "$CLIENT_OPT_NOPASS"
-  echo "- Create 'test' database" 
+  echo "- Create 'test' database at $(date '+%H:%M:%S')"
   $MYSQLDIR/bin/mysql $CLIENT_OPT_NOPASS -e "ALTER USER 'root'@'localhost' IDENTIFIED BY 'pw'"
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "CREATE DATABASE test"
 
   free -m  >>$RESULTS_DIR/$RES_INIT
   THREADS=${NTHREADS##*,} # get the last number
-  echo "- Populate database with sysbench with ${NTABS}x$NROWS rows and $THREADS threads"
-  echo "- Populate database with sysbench with ${NTABS}x$NROWS rows and $THREADS threads" >>$RESULTS_DIR/$RES_INIT
+  echo "- Populate database with sysbench with ${NTABS}x$NROWS rows and $THREADS threads at $(date '+%H:%M:%S')"
+  echo "- Populate database with sysbench with ${NTABS}x$NROWS rows and $THREADS threads at $(date '+%H:%M:%S')" >>$RESULTS_DIR/$RES_INIT
 #  (time $SYSBENCH --threads=$THREADS /usr/local/share/sysbench/oltp_read_write.lua prepare --rand-type=uniform --range-size=$RANGE_SIZE >>$RESULTS_DIR/$RES_INIT) 2>>$RESULTS_DIR/$RES_INIT
   cd $RESULTS_DIR
-  (time bash all_small_setup_only.sh $NTABS $NROWS 0 0 0 $dbAndCreds 1 0 $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $PWD $DISKNAME $USE_PK $THREADS) 2>>$RESULTS_DIR/$RES_INIT
+  time { (time bash all_small_setup_only.sh $NTABS $NROWS 0 0 0 $dbAndCreds 1 0 $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $PWD $DISKNAME $USE_PK $THREADS) 2>>$RESULTS_DIR/$RES_INIT; }
   STATUS=$?
   cat sb.prepare.o.point-query.warm.range100.pk* >>$RESULTS_DIR/$RES_INIT
   free -m >>$RESULTS_DIR/$RES_INIT
@@ -242,11 +249,11 @@ if [ "${COMMAND_NAME}" == "init" ]; then
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "SET global rocksdb_bulk_load=0;"
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; show table status" >>$RESULTS_DIR/$RES_INIT
 
-  print_database_size >>$RESULTS_DIR/$RES_INIT
-  echo "- Shutdown mysqld" >>$RESULTS_DIR/$RES_INIT
-  (time shutdownmysql) 2>>$RESULTS_DIR/$RES_INIT
+  print_database_size $RESULTS_DIR/$RES_INIT
+  echo "- Shutdown mysqld at $(date '+%H:%M:%S')" >>$RESULTS_DIR/$RES_INIT
+  time { (time shutdownmysql) 2>>$RESULTS_DIR/$RES_INIT; }
   free -m  >>$RESULTS_DIR/$RES_INIT
-  print_database_size >>$RESULTS_DIR/$RES_INIT
+  print_database_size $RESULTS_DIR/$RES_INIT
 #  kill_all
   copy_log_err $RESULTS_DIR/$RES_INIT
   if [[ $STATUS != 0 ]]; then echo run_sysbench failed; exit -1; fi
@@ -272,7 +279,7 @@ if [ 1 == 0 ]; then
   done # for THREADS
 else
   RES_RUN=$(generate_name _run_ $MEM)
-  (time run_sysbench $RES_RUN) 2>>$RESULTS_DIR/$RES_RUN
+  time { (time run_sysbench $RES_RUN) 2>>$RESULTS_DIR/$RES_RUN; }
   verify_db
   CREATE_RESULTS_DIR=1
 fi
@@ -284,4 +291,4 @@ done # for MEM
 
 done # for COMMAND_NAME
 
-echo "- Script finished"
+echo "- Script finished at $(date '+%H:%M:%S')"

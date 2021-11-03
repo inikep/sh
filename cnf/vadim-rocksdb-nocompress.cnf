@@ -1,8 +1,5 @@
 [mysqld]
-rocksdb_max_row_locks=1000M
-#secure_file_priv=/data/txt/sql
 plugin-load=RocksDB=ha_rocksdb.so
-skip-innodb
 rocksdb=1
 default-storage-engine=rocksdb
 default-tmp-storage-engine=MyISAM

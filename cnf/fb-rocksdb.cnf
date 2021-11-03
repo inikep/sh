@@ -1,9 +1,9 @@
 [mysqld]
+plugin-load-add=rocksdb=ha_rocksdb.so
 rocksdb
 default-storage-engine=rocksdb
-skip-innodb
 default-tmp-storage-engine=MyISAM
-binlog_format=ROW
+
 character-set-server=latin1
 collation-server=latin1_bin
 transaction-isolation=READ-COMMITTED

@@ -2,29 +2,20 @@
 
 [mysqld]
 sql_mode=no_engine_substitution,no_unsigned_subtraction
-default_tmp_storage_engine=MyISAM
-# tmpdir=/data/m/my/data
-# slow_query_log_file=/data/m/my/slow.log
-long_query_time=5
+
 # skip_log_bin
-# log_bin=/data/m/my/binlogs/bl
 log_bin=master
 max_binlog_size=1G
-# secure_file_priv=/data/txt/sql
 rocksdb_max_row_locks=16M
 binlog_format=ROW
 sync_binlog=0
-server_id=77
-# datadir=/data/m/my/data
 
 plugin-load=RocksDB=ha_rocksdb.so
 rocksdb
 default-storage-engine=rocksdb
-skip-innodb
 default-tmp-storage-engine=MyISAM
 character-set-server=latin1
 collation-server=latin1_bin
-# rocksdb_wal_dir=/data/m/my/txlogs
 transaction-isolation=READ-COMMITTED
 
 rocksdb_max_open_files=-1

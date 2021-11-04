@@ -117,6 +117,9 @@ shutdownmysql(){
   echo "- Shutting mysqld down at $(date '+%H:%M:%S')"
   $MYSQLDIR/bin/mysqladmin shutdown $CLIENT_OPT
   echo "- Shutdown finished at $(date '+%H:%M:%S')"
+  if [ "$SUBENGINE" == "rocksdb" ]; then
+    cp $DATADIR/.rocksdb/LOG $RESULTS_DIR/$(generate_name _log_ $CT_MEMORY)
+  fi
 }
 
 # startmysql [output_file]
@@ -125,15 +128,17 @@ print_database_size(){
   if [ "$ENGINE" == "zenfs" ]; then
     EMPTY_ZONES=`zbd report /dev/$ZENFS_DEV | grep em | wc -l`
     DATA_SIZE=`$ZENFS_TOOL list --zbd=$ZENFS_DEV --path=./.rocksdb | awk '{sum+=$1;} END {printf "%d\n", sum/1024/1024;}'`
+    FILE_COUNT=`$ZENFS_TOOL list --zbd=$ZENFS_DEV --path=./.rocksdb | wc -l`
     $ZENFS_TOOL list --zbd=$ZENFS_DEV --path=./.rocksdb >>$RESULTS_FILE
     echo "Number of empty zones is $EMPTY_ZONES"
     echo "Number of empty zones is $EMPTY_ZONES" >>$RESULTS_FILE
   else
     DATA_SIZE=`du -s $DATADIR | awk '{sum+=$1;} END {printf "%d\n", sum/1024;}'`
     ls -l $DATADIR/.rocksdb >>$RESULTS_FILE
+    FILE_COUNT=`ls $DATADIR/.rocksdb | wc -l`
   fi
-  echo "Size of RocksDB database is $DATA_SIZE MB"
-  echo "Size of RocksDB database is $DATA_SIZE MB" >>$RESULTS_FILE
+  echo "Size of RocksDB database is $DATA_SIZE MB in $FILE_COUNT files"
+  echo "Size of RocksDB database is $DATA_SIZE MB in $FILE_COUNT files" >>$RESULTS_FILE
 }
 
 waitmysql(){
@@ -189,7 +194,7 @@ run_sysbench(){
   copy_log_err $RESULTS_DIR/$RESULTS_FILE
 }
 
-rm $ROOTDIR/log.err
+rm -f $ROOTDIR/log.err
 CREATE_RESULTS_DIR=1
 
 for COMMAND_NAME in $(echo "$COMMANDS" | tr "," "\n")
@@ -199,6 +204,7 @@ if [ "${CREATE_RESULTS_DIR}" == "1" ]; then
   RESULTS_DIR=${ROOTDIR}/${CFG_FILE%.*}$(generate_name / $CT_MEMORY)
   mkdir -p $RESULTS_DIR
   CREATE_RESULTS_DIR=0
+  cp $CONFIG_FILE $RESULTS_DIR/$CFG_FILE
 fi
 
 echo "- Execute COMMAND_NAME=$COMMAND_NAME at $(date '+%H:%M:%S')"
@@ -218,12 +224,13 @@ if [ "${COMMAND_NAME}" == "init" ]; then
     export ZENFS_DEV
     sudo -E bash -c 'echo mq-deadline > /sys/block/$ZENFS_DEV/queue/scheduler'
     sudo chmod o+rw /dev/$ZENFS_DEV
+    sudo zbd reset /dev/$ZENFS_DEV
     $ZENFS_TOOL mkfs --zbd=$ZENFS_DEV --aux_path=$DATADIR --finish_threshold=0 --force || exit
   else
     mkdir $DATADIR
   fi
 #  cp $MYSQLDIR/bin/mysqld-debug $MYSQLDIR/bin/mysqld
-  $MYSQLDIR/bin/mysqld --initialize-insecure --basedir=$MYSQLDIR --datadir=$DATADIR --log-error-verbosity=2
+  $MYSQLDIR/bin/mysqld --initialize-insecure --basedir=$MYSQLDIR --datadir=$DATADIR --log-error-verbosity=2 --log-error=$ROOTDIR/log.err
 
   if [ "$USE_PK" == "0" ]; then
     startmysql $CFG_FILE $CT_MEMORY "--disable-log-bin --rocksdb_bulk_load_allow_sk=1 --rocksdb_bulk_load=1"

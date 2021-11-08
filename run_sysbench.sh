@@ -113,13 +113,23 @@ startmysql(){
   $MYSQLDIR/bin/mysqld $ADDITIONAL_PARAMS --user=root --port=3306 --log-error=$ROOTDIR/log.err --basedir=$MYSQLDIR --datadir=$DATADIR 2>&1 &
 }
 
+# shutdownmysql [output_file] [print_database_size]
 shutdownmysql(){
+  RESULTS_FILE=$1
+  PRINT_DB_SIZE=$2
+  if [ "$PRINT_DB_SIZE" == "1" ]; then print_database_size $RESULTS_FILE; fi
   echo "- Shutting mysqld down at $(date '+%H:%M:%S')"
+  echo "- Shutting mysqld down at $(date '+%H:%M:%S')" >>$RESULTS_FILE
   $MYSQLDIR/bin/mysqladmin shutdown $CLIENT_OPT
   echo "- Shutdown finished at $(date '+%H:%M:%S')"
+  echo "- Shutdown finished at $(date '+%H:%M:%S')" >>$RESULTS_FILE
+  if [ "$PRINT_DB_SIZE" == "1" ]; then print_database_size $RESULTS_FILE; fi
   if [ "$SUBENGINE" == "rocksdb" ]; then
     cp $DATADIR/.rocksdb/LOG $RESULTS_DIR/$(generate_name _log_ $CT_MEMORY)
   fi
+  cat $ROOTDIR/log.err >>$RESULTS_FILE # copy log err
+  grep -i "ERROR" $ROOTDIR/log.err
+  rm $ROOTDIR/log.err
 }
 
 # startmysql [output_file]
@@ -158,21 +168,13 @@ generate_name(){
   echo "${1}${ENGINE}_${NTABS}x${ORIG_NROWS}_${2}GB_${SECS}s_`date +%F_%H-%M`"
 }
 
-# copy_log_err [output_file]
-copy_log_err() {
-  cat $ROOTDIR/log.err >>$1
-  grep -i "ERROR" $ROOTDIR/log.err
-  rm $ROOTDIR/log.err
-}
-
 verify_db(){
   RES_VERIFY=$(generate_name _verify_ $CT_MEMORY)
   startmysql $CFG_FILE $CT_MEMORY
   waitmysql "$CLIENT_OPT"
   $MYSQLDIR/bin/mysqlcheck $CLIENT_OPT --analyze --databases test >$RESULTS_DIR/$RES_VERIFY
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; SHOW CREATE TABLE sbtest1; SHOW ENGINE ROCKSDB STATUS\G; show table status" >>$RESULTS_DIR/$RES_VERIFY
-  shutdownmysql
-  copy_log_err $RESULTS_DIR/$RES_VERIFY
+  shutdownmysql $RESULTS_DIR/$RES_VERIFY
 }
 
 # run_sysbench [output_file]
@@ -191,7 +193,6 @@ run_sysbench(){
   echo >>$RESULTS_FILE SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS
   cat sb.r.qps.* >>$RESULTS_FILE
   cat sb.r.qps.*
-  copy_log_err $RESULTS_DIR/$RESULTS_FILE
 }
 
 rm -f $ROOTDIR/log.err
@@ -256,13 +257,8 @@ if [ "${COMMAND_NAME}" == "init" ]; then
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "SET global rocksdb_bulk_load=0;"
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; show table status" >>$RESULTS_DIR/$RES_INIT
 
-  print_database_size $RESULTS_DIR/$RES_INIT
-  echo "- Shutdown mysqld at $(date '+%H:%M:%S')" >>$RESULTS_DIR/$RES_INIT
-  time { (time shutdownmysql) 2>>$RESULTS_DIR/$RES_INIT; }
+  time { (time shutdownmysql $RESULTS_DIR/$RES_INIT 1) 2>>$RESULTS_DIR/$RES_INIT; }
   free -m  >>$RESULTS_DIR/$RES_INIT
-  print_database_size $RESULTS_DIR/$RES_INIT
-#  kill_all
-  copy_log_err $RESULTS_DIR/$RES_INIT
   if [[ $STATUS != 0 ]]; then echo run_sysbench failed; exit -1; fi
   continue
 fi
@@ -287,11 +283,12 @@ if [ 1 == 0 ]; then
 else
   RES_RUN=$(generate_name _run_ $MEM)
   time { (time run_sysbench $RES_RUN) 2>>$RESULTS_DIR/$RES_RUN; }
-  verify_db
   CREATE_RESULTS_DIR=1
 fi
 
-shutdownmysql
+shutdownmysql $RESULTS_DIR/$RES_RUN
+verify_db
+
 sleep 30
 
 done # for MEM

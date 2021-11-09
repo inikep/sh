@@ -53,6 +53,8 @@ MEMORY=${MEMORY:-"16"} # "4,8,16"
 CT_MEMORY=${MEMORY##*,} # get the last number
 NTHREADS=${NTHREADS:-16} # "8,16,32"
 RANGE_SIZE=${RANGE_SIZE:-100}
+BULK_LOAD=${BULK_LOAD:-1}
+BULK_SYNC_SIZE=${BULK_SYNC_SIZE:-0}
 TABLE_OPTIONS=none
 USE_PK=${USE_PK:-0}
 ZENFS_DEV=${ZENFS_DEV:-nvme1n2}
@@ -189,24 +191,19 @@ run_sysbench(){
   THREADS=$(echo "$NTHREADS" | tr "," "\n")
   echo --THREADS=$THREADS
 
-  bash all_small.sh $NTABS $NROWS $READSECS $WRITESECS $INSERTSECS $dbAndCreds 0 $CLEANUP $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $PWD $DISKNAME $USE_PK $THREADS
+  bash all_small.sh $NTABS $NROWS $READSECS $WRITESECS $INSERTSECS $dbAndCreds 0 $CLEANUP $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $PWD $DISKNAME $USE_PK $BULK_SYNC_SIZE $THREADS
   echo >>$RESULTS_FILE SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS
   cat sb.r.qps.* >>$RESULTS_FILE
   cat sb.r.qps.*
 }
 
 rm -f $ROOTDIR/log.err
-CREATE_RESULTS_DIR=1
+RESULTS_DIR=${ROOTDIR}/${CFG_FILE%.*}$(generate_name / $CT_MEMORY)
+mkdir -p $RESULTS_DIR
+cp $CONFIG_FILE $RESULTS_DIR/$CFG_FILE
 
 for COMMAND_NAME in $(echo "$COMMANDS" | tr "," "\n")
 do
-
-if [ "${CREATE_RESULTS_DIR}" == "1" ]; then
-  RESULTS_DIR=${ROOTDIR}/${CFG_FILE%.*}$(generate_name / $CT_MEMORY)
-  mkdir -p $RESULTS_DIR
-  CREATE_RESULTS_DIR=0
-  cp $CONFIG_FILE $RESULTS_DIR/$CFG_FILE
-fi
 
 echo "- Execute COMMAND_NAME=$COMMAND_NAME at $(date '+%H:%M:%S')"
 
@@ -233,11 +230,13 @@ if [ "${COMMAND_NAME}" == "init" ]; then
 #  cp $MYSQLDIR/bin/mysqld-debug $MYSQLDIR/bin/mysqld
   $MYSQLDIR/bin/mysqld --initialize-insecure --basedir=$MYSQLDIR --datadir=$DATADIR --log-error-verbosity=2 --log-error=$ROOTDIR/log.err
 
-  if [ "$USE_PK" == "0" ]; then
-    startmysql $CFG_FILE $CT_MEMORY "--disable-log-bin --rocksdb_bulk_load_allow_sk=1 --rocksdb_bulk_load=1"
-  else
-    startmysql $CFG_FILE $CT_MEMORY "--disable-log-bin --rocksdb_bulk_load=1"
+  ADDITIONAL_PARAMS="--disable-log-bin"
+  if [ "$BULK_LOAD" == "1" ]; then
+    ADDITIONAL_PARAMS+=" --rocksdb_bulk_load=1"
+    if [ "$USE_PK" == "0" ]; then ADDITIONAL_PARAMS+=" --rocksdb_bulk_load_allow_sk=1"; fi
   fi
+  startmysql $CFG_FILE $CT_MEMORY "$ADDITIONAL_PARAMS"
+
   waitmysql "$CLIENT_OPT_NOPASS"
   echo "- Create 'test' database at $(date '+%H:%M:%S')"
   $MYSQLDIR/bin/mysql $CLIENT_OPT_NOPASS -e "ALTER USER 'root'@'localhost' IDENTIFIED BY 'pw'"
@@ -249,7 +248,7 @@ if [ "${COMMAND_NAME}" == "init" ]; then
   echo "- Populate database with sysbench with ${NTABS}x$NROWS rows and $THREADS threads at $(date '+%H:%M:%S')" >>$RESULTS_DIR/$RES_INIT
 #  (time $SYSBENCH --threads=$THREADS /usr/local/share/sysbench/oltp_read_write.lua prepare --rand-type=uniform --range-size=$RANGE_SIZE >>$RESULTS_DIR/$RES_INIT) 2>>$RESULTS_DIR/$RES_INIT
   cd $RESULTS_DIR
-  time { (time bash all_small_setup_only.sh $NTABS $NROWS 0 0 0 $dbAndCreds 1 0 $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $PWD $DISKNAME $USE_PK $THREADS) 2>>$RESULTS_DIR/$RES_INIT; }
+  time { (time bash all_small_setup_only.sh $NTABS $NROWS 0 0 0 $dbAndCreds 1 0 $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $PWD $DISKNAME $USE_PK $BULK_SYNC_SIZE $THREADS) 2>>$RESULTS_DIR/$RES_INIT; }
   STATUS=$?
   cat sb.prepare.o.point-query.warm.range100.pk* >>$RESULTS_DIR/$RES_INIT
   free -m >>$RESULTS_DIR/$RES_INIT
@@ -271,6 +270,7 @@ free -m
 
 startmysql $CFG_FILE $MEM
 waitmysql "$CLIENT_OPT"
+RES_RUN=$(generate_name _run_ $MEM)
 
 if [ 1 == 0 ]; then
   for THREADS in $(echo "$NTHREADS" | tr "," "\n")
@@ -281,9 +281,7 @@ if [ 1 == 0 ]; then
   $SYSBENCH --threads=$THREADS --time=$SECS --range-size=$RANGE_SIZE /usr/local/share/sysbench/oltp_insert.lua run
   done # for THREADS
 else
-  RES_RUN=$(generate_name _run_ $MEM)
   time { (time run_sysbench $RES_RUN) 2>>$RESULTS_DIR/$RES_RUN; }
-  CREATE_RESULTS_DIR=1
 fi
 
 shutdownmysql $RESULTS_DIR/$RES_RUN

@@ -13,9 +13,10 @@ ddir=${12}
 dname=${13}
 usepk=${14}
 postwrite=${15}
+sync_size=${16}
 
 #echo $@
-shift 15
+shift 16
 
 samp=1
 nsamp=10000000
@@ -157,7 +158,11 @@ iostat -y -kx $samp $nsamp >& sb.prepare.io.$sfx &
 iopid=$!
 start_secs=$( date +'%s' )
 
-exA=(--db-driver=$driver $setupArgs $engineArg --range-size=$range --table-size=$nr --tables=$ntabs --events=0 --time=$secs $sysbdir/share/sysbench/$lua $prepareArgs prepare)
+if [[ $sync_size == "0" ]]; then
+  exA=(--db-driver=$driver $setupArgs $engineArg --range-size=$range --table-size=$nr --tables=$ntabs --events=0 --time=$secs $sysbdir/share/sysbench/$lua $prepareArgs prepare)
+else
+  exA=(--db-driver=$driver $setupArgs $engineArg --rocksdb_bulk_load_sync_size=$sync_size --range-size=$range --table-size=$nr --tables=$ntabs --events=0 --time=$secs $sysbdir/share/sysbench/$lua $prepareArgs prepare)
+fi
 echo $sysbdir/bin/sysbench "${exA[@]}" "${sbDbCreds[@]}" >> sb.prepare.o.$sfx
 $sysbdir/bin/sysbench "${exA[@]}" "${sbDbCreds[@]}" >> sb.prepare.o.$sfx 2>&1
 status=$?

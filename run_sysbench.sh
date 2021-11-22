@@ -1,4 +1,5 @@
-#!/bin/bash 
+#!/bin/bash
+shopt -s extglob
 
 SERVER_BUILD=$1
 BENCH_PATH=${BENCH_PATH:-~/bench}
@@ -193,9 +194,19 @@ run_sysbench(){
   echo --THREADS=$THREADS
 
   bash all_wdc.sh $NTABS $NROWS $READSECS $WRITESECS $INSERTSECS $dbAndCreds 0 $CLEANUP $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $PWD $DISKNAME $USE_PK $BULK_SYNC_SIZE $THREADS
+
   echo >>$RESULTS_FILE SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS
-  cat sb.r.qps.* >>$RESULTS_FILE
-  cat sb.r.qps.*
+  echo "- Results in queries per second (QPS)" >>$RESULTS_FILE
+  cat sb.r.qps.!(*.pre.*) | sort -k2 >>$RESULTS_FILE
+  echo "- Results in transactions per second (TPS)" >>$RESULTS_FILE
+  cat sb.r.trx.!(*.pre.*) | sort -k2  >>$RESULTS_FILE
+  echo "- Latency max (ms)" >>$RESULTS_FILE
+  cat sb.r.rtmax.!(*.pre.*) | sort -k2  >>$RESULTS_FILE
+  echo "- Latency avg (ms)" >>$RESULTS_FILE
+  cat sb.r.rtavg.!(*.pre.*) | sort -k2  >>$RESULTS_FILE
+  echo "- Latency 95th percentile (ms)" >>$RESULTS_FILE
+  cat sb.r.rt95.!(*.pre.*) | sort -k2  >>$RESULTS_FILE
+  cat $RESULTS_FILE
 }
 
 rm -f $ROOTDIR/log.err

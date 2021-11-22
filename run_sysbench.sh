@@ -115,44 +115,6 @@ startmysql(){
   $MYSQLDIR/bin/mysqld $ADDITIONAL_PARAMS --user=root --port=3306 --log-error=$ROOTDIR/log.err --basedir=$MYSQLDIR --datadir=$DATADIR 2>&1 &
 }
 
-# shutdownmysql [output_file] [print_database_size]
-shutdownmysql(){
-  RESULTS_FILE=$1
-  PRINT_DB_SIZE=$2
-  if [ "$PRINT_DB_SIZE" == "1" ]; then print_database_size $RESULTS_FILE; fi
-  echo "- Shutting mysqld down at $(date '+%H:%M:%S')"
-  echo "- Shutting mysqld down at $(date '+%H:%M:%S')" >>$RESULTS_FILE
-  $MYSQLDIR/bin/mysqladmin shutdown $CLIENT_OPT
-  echo "- Shutdown finished at $(date '+%H:%M:%S')"
-  echo "- Shutdown finished at $(date '+%H:%M:%S')" >>$RESULTS_FILE
-  if [ "$PRINT_DB_SIZE" == "1" ]; then print_database_size $RESULTS_FILE; fi
-  if [ "$SUBENGINE" == "rocksdb" ]; then
-    cp $DATADIR/.rocksdb/LOG $RESULTS_DIR/$(generate_name _log_ $CT_MEMORY)
-  fi
-  cat $ROOTDIR/log.err >>$RESULTS_FILE # copy log err
-  grep -i "ERROR" $ROOTDIR/log.err
-  rm $ROOTDIR/log.err
-}
-
-# startmysql [output_file]
-print_database_size(){
-  RESULTS_FILE=$1
-  if [ "$ENGINE" == "zenfs" ]; then
-    EMPTY_ZONES=`zbd report /dev/$ZENFS_DEV | grep em | wc -l`
-    DATA_SIZE=`$ZENFS_TOOL list --zbd=$ZENFS_DEV --path=./.rocksdb | awk '{sum+=$1;} END {printf "%d\n", sum/1024/1024;}'`
-    FILE_COUNT=`$ZENFS_TOOL list --zbd=$ZENFS_DEV --path=./.rocksdb | wc -l`
-    $ZENFS_TOOL list --zbd=$ZENFS_DEV --path=./.rocksdb >>$RESULTS_FILE
-    echo "Number of empty zones is $EMPTY_ZONES"
-    echo "Number of empty zones is $EMPTY_ZONES" >>$RESULTS_FILE
-  else
-    DATA_SIZE=`du -s $DATADIR | awk '{sum+=$1;} END {printf "%d\n", sum/1024;}'`
-    ls -l $DATADIR/.rocksdb >>$RESULTS_FILE
-    FILE_COUNT=`ls $DATADIR/.rocksdb | wc -l`
-  fi
-  echo "Size of RocksDB database is $DATA_SIZE MB in $FILE_COUNT files"
-  echo "Size of RocksDB database is $DATA_SIZE MB in $FILE_COUNT files" >>$RESULTS_FILE
-}
-
 waitmysql(){
   echo "- Waiting for start of mysqld"
   sleep 5
@@ -163,6 +125,45 @@ waitmysql(){
           sleep 5
           echo -n "."
   done
+}
+
+# shutdownmysql [output_file] [print_files]
+shutdownmysql(){
+  local RESULTS_FILE=$1
+  local PRINT_FILES=$2
+  print_database_size $RESULTS_FILE $PRINT_FILES
+  echo "- Shutting mysqld down at $(date '+%H:%M:%S')"
+  echo "- Shutting mysqld down at $(date '+%H:%M:%S')" >>$RESULTS_FILE
+  $MYSQLDIR/bin/mysqladmin shutdown $CLIENT_OPT
+  echo "- Shutdown finished at $(date '+%H:%M:%S')"
+  echo "- Shutdown finished at $(date '+%H:%M:%S')" >>$RESULTS_FILE
+  print_database_size $RESULTS_FILE $PRINT_FILES
+  if [ "$SUBENGINE" == "rocksdb" ]; then
+    cp $DATADIR/.rocksdb/LOG $RESULTS_DIR/$(generate_name _log_ $CT_MEMORY)
+  fi
+  cat $ROOTDIR/log.err >>$RESULTS_FILE # copy log err
+  grep -i "ERROR" $ROOTDIR/log.err
+  rm $ROOTDIR/log.err
+}
+
+# startmysql [output_file] [print_files]
+print_database_size(){
+  local RESULTS_FILE=$1
+  local PRINT_FILES=$2
+  if [ "$ENGINE" == "zenfs" ]; then
+    EMPTY_ZONES=`zbd report /dev/$ZENFS_DEV | grep em | wc -l`
+    DATA_SIZE=`$ZENFS_TOOL list --zbd=$ZENFS_DEV --path=./.rocksdb | awk '{sum+=$1;} END {printf "%d\n", sum/1024/1024;}'`
+    FILE_COUNT=`$ZENFS_TOOL list --zbd=$ZENFS_DEV --path=./.rocksdb | wc -l`
+    if [ "$PRINT_FILES" == "1" ]; then $ZENFS_TOOL list --zbd=$ZENFS_DEV --path=./.rocksdb >>$RESULTS_FILE; fi
+    echo "- Number of empty zones is $EMPTY_ZONES"
+    echo "- Number of empty zones is $EMPTY_ZONES" >>$RESULTS_FILE
+  else
+    DATA_SIZE=`du -s $DATADIR | awk '{sum+=$1;} END {printf "%d\n", sum/1024;}'`
+    if [ "$PRINT_FILES" == "1" ]; then ls -l $DATADIR/.rocksdb >>$RESULTS_FILE; fi
+    FILE_COUNT=`ls $DATADIR/.rocksdb | wc -l`
+  fi
+  echo "- Size of RocksDB database is $DATA_SIZE MB in $FILE_COUNT files"
+  echo "- Size of RocksDB database is $DATA_SIZE MB in $FILE_COUNT files" >>$RESULTS_FILE
 }
 
 # generate_name [prefix] [memory]
@@ -182,7 +183,7 @@ verify_db(){
 # run_sysbench [output_file]
 run_sysbench(){
   cd $RESULTS_DIR
-  RESULTS_FILE=$1
+  local RESULTS_FILE=$1
 
   READSECS=$SECS
   WRITESECS=$SECS

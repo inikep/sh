@@ -67,7 +67,11 @@ MEMORY=${MEMORY:-"16"} # "4,8,16"
 CT_MEMORY=${MEMORY##*,} # get the last number
 NTHREADS=${NTHREADS:-16} # "8,16,32"
 RANGE_SIZE=${RANGE_SIZE:-100}
-BULK_LOAD=${BULK_LOAD:-1}
+if ([ "$ENGINE" == "innodb" ]); then
+  BULK_LOAD=${BULK_LOAD:-0}
+else
+  BULK_LOAD=${BULK_LOAD:-1}
+fi
 BULK_SYNC_SIZE=${BULK_SYNC_SIZE:-0}
 TABLE_OPTIONS=none
 USE_PK=${USE_PK:-0}
@@ -163,13 +167,14 @@ print_database_size(){
     EMPTY_ZONES=`zbd report /dev/$ZENFS_DEV | grep em | wc -l`
     DATA_SIZE=`$ZENFS_TOOL list --zbd=$ZENFS_DEV --path=./.rocksdb | awk '{sum+=$1;} END {printf "%d\n", sum/1024/1024;}'`
     FILE_COUNT=`$ZENFS_TOOL list --zbd=$ZENFS_DEV --path=./.rocksdb | wc -l`
+    $ZENFS_TOOL df --zbd=$ZENFS_DEV >>$RESULTS_FILE
     if [ "$PRINT_FILES" == "1" ]; then $ZENFS_TOOL list --zbd=$ZENFS_DEV --path=./.rocksdb >>$RESULTS_FILE; fi
     echo "- Number of empty zones is $EMPTY_ZONES"
     echo "- Number of empty zones is $EMPTY_ZONES" >>$RESULTS_FILE
   else
     DATA_SIZE=`du -s $DATADIR | awk '{sum+=$1;} END {printf "%d\n", sum/1024;}'`
-    if [ "$PRINT_FILES" == "1" ]; then ls -l $DATADIR/.rocksdb >>$RESULTS_FILE; fi
-    FILE_COUNT=`ls $DATADIR/.rocksdb | wc -l`
+    if [ "$PRINT_FILES" == "1" ]; then ls -alR $DATADIR >>$RESULTS_FILE; fi
+    FILE_COUNT=`ls -aR $DATADIR | wc -l`
   fi
   echo "- Size of RocksDB database is $DATA_SIZE MB in $FILE_COUNT files"
   echo "- Size of RocksDB database is $DATA_SIZE MB in $FILE_COUNT files" >>$RESULTS_FILE
@@ -185,7 +190,7 @@ verify_db(){
   startmysql $CFG_FILE $CT_MEMORY
   waitmysql "$CLIENT_OPT"
   $MYSQLDIR/bin/mysqlcheck $CLIENT_OPT --analyze --databases test >$RESULTS_DIR/$RES_VERIFY
-  $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; SHOW CREATE TABLE sbtest1; SHOW ENGINE ROCKSDB STATUS\G; show table status" >>$RESULTS_DIR/$RES_VERIFY
+  $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; SHOW CREATE TABLE sbtest1; SHOW ENGINE $ENGINE STATUS\G; show table status" >>$RESULTS_DIR/$RES_VERIFY
   shutdownmysql $RESULTS_DIR/$RES_VERIFY
 }
 
@@ -223,7 +228,7 @@ rm -f $ROOTDIR/log.err
 RESULTS_DIR=${ROOTDIR}/${CFG_FILE%.*}$(generate_name / $CT_MEMORY)
 mkdir -p $RESULTS_DIR
 cp $CONFIG_FILE $RESULTS_DIR/$CFG_FILE
-
+echo "- Script started at $(date '+%H:%M:%S'). Results are written to $RESULTS_DIR"
 
 # main loop
 for COMMAND_NAME in $(echo "$COMMANDS" | tr "," "\n")
@@ -277,7 +282,6 @@ if [ "${COMMAND_NAME}" == "init" ]; then
   cat sb.prepare.o.point-query.warm.range100.pk* >>$RESULTS_DIR/$RES_INIT
   free -m >>$RESULTS_DIR/$RES_INIT
 
-  $MYSQLDIR/bin/mysql $CLIENT_OPT -e "SET global rocksdb_bulk_load=0;"
   $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; show table status" >>$RESULTS_DIR/$RES_INIT
 
   time { (time shutdownmysql $RESULTS_DIR/$RES_INIT 1) 2>>$RESULTS_DIR/$RES_INIT; }
@@ -317,4 +321,4 @@ done # for MEM
 
 done # for COMMAND_NAME
 
-echo "- Script finished at $(date '+%H:%M:%S')"
+echo "- Script finished at $(date '+%H:%M:%S'). Results are written to $RESULTS_DIR"

@@ -2,22 +2,35 @@
 shopt -s extglob
 
 SERVER_BUILD=$1
-BENCH_PATH=${BENCH_PATH:-~/bench}
-BUILDDIR=${BUILDDIR:-~}/$SERVER_BUILD
-ROOTDIR=$BENCH_PATH/$SERVER_BUILD
 CONFIG_FILE=$2
 CFG_FILE=${CONFIG_FILE##*/}
-ENGINE=$3
+FILE_SYSTEM=$3
 COMMANDS=$4
 
-if [ "$ENGINE" == "zenfs" ]; then SUBENGINE=rocksdb; else SUBENGINE=$ENGINE; fi
+BUILDDIR=${BUILDDIR:-~}/$SERVER_BUILD
+BENCH_PATH=${BENCH_PATH:-~/bench}
+ROOTDIR=$BENCH_PATH/$SERVER_BUILD
+MYSQLDIR=$ROOTDIR/mysqld
+DATADIR=${DATADIR:-${ROOTDIR}/master}
+SYSBENCH_DIR=${SYSBENCH_DIR:-/usr/local}
+ZENFS_DEV=${ZENFS_DEV:-nvme1n2}
 
+if [ "$FILE_SYSTEM" == "zenfs" ]; then
+  ENGINE=rocksdb
+else
+  ENGINE=$FILE_SYSTEM
+  [ ! -d "$DATADIR" ] && mkdir -p $DATADIR
+  DATADIR_TYPE=`stat -f -c %T $DATADIR`
+  if [ ! -z "$DATADIR_TYPE" ]; then FILE_SYSTEM=${DATADIR_TYPE##*/}; fi
+fi
 
 for COMMAND_NAME in $(echo "$COMMANDS" | tr "," "\n")
 do
-if ([ "$COMMAND_NAME" != "verify" ] && [ "$COMMAND_NAME" != "init" ]) && [ "$COMMAND_NAME" != "run" ] || ([ "$SUBENGINE" != "innodb" ] && [ "$SUBENGINE" != "rocksdb" ]) || [ $# -lt 3 ]; then
+if ([ "$COMMAND_NAME" != "verify" ] && [ "$COMMAND_NAME" != "init" ]) && [ "$COMMAND_NAME" != "run" ] ||
+    ([ "$ENGINE" != "innodb" ] && [ "$ENGINE" != "rocksdb" ]) ||
+    [ $# -lt 3 ]; then
   echo "usage: $0 [server_build] [my.cnf] [innodb/rocksdb/zenfs] [init/run/verify]"
-  echo "  init   - copy binaries from $BUILDDIR to $ROOTDIR if required, initialize mysqld database"
+  echo "  init   - copy binaries from \$BUILDDIR to \$ROOTDIR if required, initialize mysqld database"
   echo "  verify - check mysqld database"
   echo "  run  - run sysbench"
   echo "  NTABS - number of tables"
@@ -58,24 +71,19 @@ BULK_LOAD=${BULK_LOAD:-1}
 BULK_SYNC_SIZE=${BULK_SYNC_SIZE:-0}
 TABLE_OPTIONS=none
 USE_PK=${USE_PK:-0}
-ZENFS_DEV=${ZENFS_DEV:-nvme1n2}
 DISKNAME=$ZENFS_DEV
-dbAndCreds=mysql,root,pw,127.0.0.1,test,$SUBENGINE # dbAndCreds=mysql,user,password,host,db,engine
+dbAndCreds=mysql,root,pw,127.0.0.1,test,$ENGINE # dbAndCreds=mysql,user,password,host,db,engine
 
-SYSBENCH_DIR=${SYSBENCH_DIR:-/usr/local}
-SYSBENCH="$SYSBENCH_DIR/bin/sysbench --rand-type=uniform --db-driver=mysql --mysql-user=root --mysql-password=pw --mysql-host=127.0.0.1 --mysql-db=test --mysql-storage-engine=$SUBENGINE "
-SYSBENCH+="--table-size=$NROWS --tables=$NTABS --events=0 --report-interval=10 --create_secondary=off --mysql-ignore-errors=1062,1213"
-
-printf "\nSERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS NTHREADS=$NTHREADS MEMORY=$MEMORY\n"
+# SYSBENCH="$SYSBENCH_DIR/bin/sysbench --rand-type=uniform --db-driver=mysql --mysql-user=root --mysql-password=pw --mysql-host=127.0.0.1 --mysql-db=test --mysql-storage-engine=$ENGINE "
+# SYSBENCH+="--table-size=$NROWS --tables=$NTABS --events=0 --report-interval=10 --create_secondary=off --mysql-ignore-errors=1062,1213"
 
 #HOST="--mysql-socket=/tmp/mysql.sock"
 HOST="--mysql-host=127.0.0.1"
 CLIENT_OPT_NOPASS="-hlocalhost -uroot"
 CLIENT_OPT="$CLIENT_OPT_NOPASS -ppw"
-MYSQLDIR=$ROOTDIR/mysqld
-DATADIR=${DATADIR:-${ROOTDIR}/master}
 ZENFS_TOOL=$MYSQLDIR/bin/zenfs
 
+printf "\nSERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE FILE_SYSTEM=$FILE_SYSTEM CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS NTHREADS=$NTHREADS MEMORY=$MEMORY DATADIR=$DATADIR\n"
 
 if [ ! -d "$ROOTDIR" ]; then mkdir $ROOTDIR; fi
 cp $CONFIG_FILE $ROOTDIR/$CFG_FILE
@@ -93,12 +101,12 @@ fi
 startmysql(){
   MEM="${2:-8}"
   ADDITIONAL_PARAMS=""
-  if [ "$SUBENGINE" == "rocksdb" ]; then
+  if [ "$ENGINE" == "rocksdb" ]; then
       ADDITIONAL_PARAMS="--rocksdb_block_cache_size=${MEM}G --rocksdb_merge_buf_size=1G $3"
   else 
       ADDITIONAL_PARAMS="--innodb_buffer_pool_size=${MEM}G"
   fi
-  if [ "$ENGINE" == "zenfs" ]; then
+  if [ "$FILE_SYSTEM" == "zenfs" ]; then
      ADDITIONAL_PARAMS+=" --rocksdb_fs_uri=zenfs://dev:$ZENFS_DEV"
   fi
 
@@ -139,7 +147,7 @@ shutdownmysql(){
   echo "- Shutdown finished at $(date '+%H:%M:%S')"
   echo "- Shutdown finished at $(date '+%H:%M:%S')" >>$RESULTS_FILE
   print_database_size $RESULTS_FILE $PRINT_FILES
-  if [ "$SUBENGINE" == "rocksdb" ]; then
+  if [ "$ENGINE" == "rocksdb" ]; then
     cp $DATADIR/.rocksdb/LOG $RESULTS_DIR/$(generate_name _log_ $CT_MEMORY)
   fi
   cat $ROOTDIR/log.err >>$RESULTS_FILE # copy log err
@@ -151,7 +159,7 @@ shutdownmysql(){
 print_database_size(){
   local RESULTS_FILE=$1
   local PRINT_FILES=$2
-  if [ "$ENGINE" == "zenfs" ]; then
+  if [ "$FILE_SYSTEM" == "zenfs" ]; then
     EMPTY_ZONES=`zbd report /dev/$ZENFS_DEV | grep em | wc -l`
     DATA_SIZE=`$ZENFS_TOOL list --zbd=$ZENFS_DEV --path=./.rocksdb | awk '{sum+=$1;} END {printf "%d\n", sum/1024/1024;}'`
     FILE_COUNT=`$ZENFS_TOOL list --zbd=$ZENFS_DEV --path=./.rocksdb | wc -l`
@@ -169,7 +177,7 @@ print_database_size(){
 
 # generate_name [prefix] [memory]
 generate_name(){
-  echo "${1}${ENGINE}_${NTABS}x${ORIG_NROWS}_${2}GB_${SECS}s_`date +%F_%H-%M`"
+  echo "${1}${FILE_SYSTEM}_${NTABS}x${ORIG_NROWS}_${2}GB_${SECS}s_`date +%F_%H-%M`"
 }
 
 verify_db(){
@@ -195,25 +203,29 @@ run_sysbench(){
 
   bash all_wdc.sh $NTABS $NROWS $READSECS $WRITESECS $INSERTSECS $dbAndCreds 0 $CLEANUP $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $PWD $DISKNAME $USE_PK $BULK_SYNC_SIZE $THREADS
 
-  echo >>$RESULTS_FILE SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS
-  echo "- Results in queries per second (QPS)" >>$RESULTS_FILE
+  echo >>$RESULTS_FILE SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE FILE_SYSTEM=$FILE_SYSTEM CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS DATADIR=$DATADIR
+  printf "\n- Results in queries per second (QPS)\n" >>$RESULTS_FILE
   cat sb.r.qps.!(*.pre.*) | sort -k2 >>$RESULTS_FILE
-  echo "- Results in transactions per second (TPS)" >>$RESULTS_FILE
+  printf "\n- Results in transactions per second (TPS)\n" >>$RESULTS_FILE
   cat sb.r.trx.!(*.pre.*) | sort -k2  >>$RESULTS_FILE
-  echo "- Latency max (ms)" >>$RESULTS_FILE
+  printf "\n- Latency max (ms)\n" >>$RESULTS_FILE
   cat sb.r.rtmax.!(*.pre.*) | sort -k2  >>$RESULTS_FILE
-  echo "- Latency avg (ms)" >>$RESULTS_FILE
+  printf "\n- Latency avg (ms)\n" >>$RESULTS_FILE
   cat sb.r.rtavg.!(*.pre.*) | sort -k2  >>$RESULTS_FILE
-  echo "- Latency 95th percentile (ms)" >>$RESULTS_FILE
+  printf "\n- Latency 95th percentile (ms)\n" >>$RESULTS_FILE
   cat sb.r.rt95.!(*.pre.*) | sort -k2  >>$RESULTS_FILE
   cat $RESULTS_FILE
 }
 
+
+# preparations before main loop
 rm -f $ROOTDIR/log.err
 RESULTS_DIR=${ROOTDIR}/${CFG_FILE%.*}$(generate_name / $CT_MEMORY)
 mkdir -p $RESULTS_DIR
 cp $CONFIG_FILE $RESULTS_DIR/$CFG_FILE
 
+
+# main loop
 for COMMAND_NAME in $(echo "$COMMANDS" | tr "," "\n")
 do
 
@@ -226,18 +238,18 @@ fi
 
 if [ "${COMMAND_NAME}" == "init" ]; then
   RES_INIT=$(generate_name _init_ $CT_MEMORY)
-  echo >>$RESULTS_DIR/$RES_INIT SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS
+  echo >>$RESULTS_DIR/$RES_INIT SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE FILE_SYSTEM=$FILE_SYSTEM CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS DATADIR=$DATADIR
 
   echo "- Initialize mysqld at $(date '+%H:%M:%S')"
   rm -rf $DATADIR
-  if [ "$ENGINE" == "zenfs" ]; then
+  if [ "$FILE_SYSTEM" == "zenfs" ]; then
     export ZENFS_DEV
     sudo -E bash -c 'echo mq-deadline > /sys/block/$ZENFS_DEV/queue/scheduler'
     sudo chmod o+rw /dev/$ZENFS_DEV
     sudo zbd reset /dev/$ZENFS_DEV
     $ZENFS_TOOL mkfs --zbd=$ZENFS_DEV --aux_path=$DATADIR --finish_threshold=0 --force || exit
   else
-    mkdir $DATADIR
+    mkdir -p $DATADIR
   fi
 #  cp $MYSQLDIR/bin/mysqld-debug $MYSQLDIR/bin/mysqld
   $MYSQLDIR/bin/mysqld --initialize-insecure --basedir=$MYSQLDIR --datadir=$DATADIR --log-error-verbosity=2 --log-error=$ROOTDIR/log.err

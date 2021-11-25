@@ -77,6 +77,7 @@ TABLE_OPTIONS=none
 USE_PK=${USE_PK:-0}
 DISKNAME=$ZENFS_DEV
 dbAndCreds=mysql,root,pw,127.0.0.1,test,$ENGINE # dbAndCreds=mysql,user,password,host,db,engine
+WORKLOAD_SCRIPT=${WORKLOAD_SCRIPT:=all_small.sh}
 
 # SYSBENCH="$SYSBENCH_DIR/bin/sysbench --rand-type=uniform --db-driver=mysql --mysql-user=root --mysql-password=pw --mysql-host=127.0.0.1 --mysql-db=test --mysql-storage-engine=$ENGINE "
 # SYSBENCH+="--table-size=$NROWS --tables=$NTABS --events=0 --report-interval=10 --create_secondary=off --mysql-ignore-errors=1062,1213"
@@ -204,9 +205,9 @@ run_sysbench(){
   INSERTSECS=$SECS
   CLEANUP=0
   THREADS=$(echo "$NTHREADS" | tr "," "\n")
-  echo --THREADS=$THREADS
+  echo - Run $WORKLOAD_SCRIPT for THREADS=$THREADS
 
-  bash all_wdc.sh $NTABS $NROWS $READSECS $WRITESECS $INSERTSECS $dbAndCreds 0 $CLEANUP $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $PWD $DISKNAME $USE_PK $BULK_SYNC_SIZE $THREADS
+  bash $WORKLOAD_SCRIPT $NTABS $NROWS $READSECS $WRITESECS $INSERTSECS $dbAndCreds 0 $CLEANUP $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $PWD $DISKNAME $USE_PK $BULK_SYNC_SIZE $THREADS
 
   echo >>$RESULTS_FILE SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE FILE_SYSTEM=$FILE_SYSTEM CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS DATADIR=$DATADIR
   printf "\n- Results in queries per second (QPS)\n" >>$RESULTS_FILE

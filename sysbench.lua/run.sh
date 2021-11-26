@@ -399,6 +399,7 @@ for nt in "$@"; do
   grep transactions: sb.o.$sfx.dop${nt} | awk '{ print $3 }' | tr -d '(' | awk '{ printf "%.0f\t", $1 }' 
 done > sb.r.trx.$sfx
 echo "$engine $testType range=$range" >> sb.r.trx.$sfx
+printf "TPS: "; cat sb.r.trx.$sfx
 
 for nt in "$@"; do
 if [[ $testType == "scan" ]]; then
@@ -414,7 +415,7 @@ else
 fi
 done > sb.r.qps.$sfx
 echo "$engine $testType range=$range" >> sb.r.qps.$sfx
-cat sb.r.qps.$sfx
+printf "QPS: "; cat sb.r.qps.$sfx
 
 for nt in "$@"; do
   grep avg: sb.o.$sfx.dop${nt} | awk '{ print $2 }' | awk '{ printf "%s\t", $1 }' 

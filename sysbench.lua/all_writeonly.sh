@@ -27,18 +27,18 @@ shift 15
 #bash run.sh $ntabs $nrows $insertsecs $dbAndCreds 0      0        insert          100 $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
 #df
 
-echo write-only
-bash run.sh $ntabs $nrows $readsecs   $dbAndCreds 0      0        write-only      100 $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
+echo write-only, run 1
+bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        write-only.run-1      100 $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
 df
 
-echo write-only
-bash run.sh $ntabs $nrows $readsecs   $dbAndCreds 0      0        write-only      100 $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
+echo write-only, run 2
+bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        write-only.run-2      100 $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
 df
 
-echo write-only
-bash run.sh $ntabs $nrows $readsecs   $dbAndCreds 0      0        write-only      100 $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
+echo write-only, run 3
+bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        write-only.run-3      100 $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
 df
 
-echo write-only
-bash run.sh $ntabs $nrows $readsecs   $dbAndCreds 0      0        write-only      100 $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
+echo write-only, run 4
+bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        write-only.run-4      100 $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
 df

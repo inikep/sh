@@ -7,14 +7,23 @@ default-tmp-storage-engine=MyISAM
 # character-set-server=latin1
 # collation-server=latin1_bin
 
-# skip-log-bin
+# binary log
 binlog_space_limit=4G
 sync_binlog=1K
+# skip-log-bin
 
 # general
 table_open_cache=256K
 table_open_cache_instances=64
 
+# connections
+ssl=0
+connect_timeout=120
+back_log=4K
+max_connections=4K
+max_prepared_stmt_count=4M
+
+# RocksDB
 rocksdb_max_open_files=-1
 rocksdb_max_background_jobs=8
 rocksdb_max_total_wal_size=4G

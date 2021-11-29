@@ -211,15 +211,15 @@ run_sysbench(){
 
   echo >>$RESULTS_FILE SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE FILE_SYSTEM=$FILE_SYSTEM CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS DATADIR=$DATADIR
   printf "\n- Results in queries per second (QPS)\n" >>$RESULTS_FILE
-  cat sb.r.qps.!(*.pre.*) | sort -k2 >>$RESULTS_FILE
+  cat sb.r.qps.!(*.pre.*) | sort -k3 >>$RESULTS_FILE
   printf "\n- Results in transactions per second (TPS)\n" >>$RESULTS_FILE
-  cat sb.r.trx.!(*.pre.*) | sort -k2  >>$RESULTS_FILE
+  cat sb.r.trx.!(*.pre.*) | sort -k3  >>$RESULTS_FILE
   printf "\n- Latency max (ms)\n" >>$RESULTS_FILE
-  cat sb.r.rtmax.!(*.pre.*) | sort -k2  >>$RESULTS_FILE
+  cat sb.r.rtmax.!(*.pre.*) | sort -k3  >>$RESULTS_FILE
   printf "\n- Latency avg (ms)\n" >>$RESULTS_FILE
-  cat sb.r.rtavg.!(*.pre.*) | sort -k2  >>$RESULTS_FILE
+  cat sb.r.rtavg.!(*.pre.*) | sort -k3  >>$RESULTS_FILE
   printf "\n- Latency 95th percentile (ms)\n" >>$RESULTS_FILE
-  cat sb.r.rt95.!(*.pre.*) | sort -k2  >>$RESULTS_FILE
+  cat sb.r.rt95.!(*.pre.*) | sort -k3  >>$RESULTS_FILE
   cat $RESULTS_FILE
 }
 

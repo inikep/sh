@@ -29,48 +29,12 @@ shift 15
 preparesecs=$((readsecs / 4 )) 
 
 echo point-query.pre
-bash run.sh $ntabs $nrows $preparesecs  $dbAndCreds 0      0        point-query.pre 100    $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
-
-for range in 10 100 ; do
-echo random-points.pre range $range
-bash run.sh $ntabs $nrows $preparesecs  $dbAndCreds 0      0        random-points.pre $range  $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
-done
+bash run.sh $ntabs $nrows $preparesecs $dbAndCreds 0    0        point-query.pre 100    $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
 
 for range in 10 100 10000 ; do
 echo read-only.pre range $range
-bash run.sh $ntabs $nrows $preparesecs  $dbAndCreds 0      0        read-only.pre   $range $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
+bash run.sh $ntabs $nrows $preparesecs $dbAndCreds 0    0        read-only.pre   $range $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
 done
-
-echo points-covered-pk.pre
-bash run.sh $ntabs $nrows $preparesecs  $dbAndCreds 0      0        points-covered-pk.pre    100    $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
-
-echo points-notcovered-pk.pre
-bash run.sh $ntabs $nrows $preparesecs  $dbAndCreds 0      0        points-notcovered-pk.pre 100    $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
-
-if [[ $usepk -eq 0 ]]; then
-echo points-covered-si.pre
-bash run.sh $ntabs $nrows $preparesecs  $dbAndCreds 0      0        points-covered-si.pre    100    $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
-
-echo points-notcovered-si.pre
-bash run.sh $ntabs $nrows $preparesecs  $dbAndCreds 0      0        points-notcovered-si.pre 100    $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
-fi
-
-echo range-covered-pk.pre
-bash run.sh $ntabs $nrows $preparesecs  $dbAndCreds 0      0        range-covered-pk.pre    100    $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
-
-echo range-notcovered-pk.pre
-bash run.sh $ntabs $nrows $preparesecs  $dbAndCreds 0      0        range-notcovered-pk.pre 100    $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
-
-if [[ $usepk -eq 0 ]]; then
-echo range-covered-si.pre
-bash run.sh $ntabs $nrows $preparesecs  $dbAndCreds 0      0        range-covered-si.pre    100    $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
-
-echo range-notcovered-si.pre
-bash run.sh $ntabs $nrows $preparesecs  $dbAndCreds 0      0        range-notcovered-si.pre 100    $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
-fi
-
-echo update-inlist
-bash run.sh $ntabs $nrows $writesecs $dbAndCreds 0      0        update-inlist   100    $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
 
 echo update-index
 bash run.sh $ntabs $nrows $writesecs $dbAndCreds 0      0        update-index    100    $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
@@ -85,16 +49,16 @@ echo update-zipf
 bash run.sh $ntabs $nrows $writesecs $dbAndCreds 0      0        update-zipf      100    $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
 
 echo write-only, run 1
-bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        write-only.run-1      100 $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
+bash run.sh $ntabs $nrows $writesecs $dbAndCreds 0      0        write-only.run-1      100 $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
 
 echo write-only, run 2
-bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        write-only.run-2      100 $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
+bash run.sh $ntabs $nrows $writesecs $dbAndCreds 0      0        write-only.run-2      100 $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
 
 echo write-only, run 3
-bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        write-only.run-3      100 $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
+bash run.sh $ntabs $nrows $writesecs $dbAndCreds 0      0        write-only.run-3      100 $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
 
 echo write-only, run 4
-bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        write-only.run-4      100 $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
+bash run.sh $ntabs $nrows $writesecs $dbAndCreds 0      0        write-only.run-4      100 $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
 
 echo read-write range 10
 bash run.sh $ntabs $nrows $writesecs $dbAndCreds 0      0        read-write      10 $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
@@ -108,45 +72,6 @@ done
 
 echo point-query
 bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        point-query     100    $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
-
-for range in 10 100 ; do
-echo random-points range $range
-bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        random-points $range   $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
-done
-
-echo hot-points
-bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        hot-points      100    $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
-
-echo points-covered-pk
-bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        points-covered-pk    100  $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
-
-echo points-notcovered-pk
-bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        points-notcovered-pk 100  $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
-
-if [[ $usepk -eq 0 ]]; then
-echo points-covered-si
-bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        points-covered-si    100  $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
-
-echo points-notcovered-si
-bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        points-notcovered-si 100  $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
-fi
-
-echo range-covered-pk
-bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        range-covered-pk     100  $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
-
-echo range-notcovered-pk
-bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        range-notcovered-pk  100  $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
-
-if [[ $usepk -eq 0 ]]; then
-echo range-covered-si
-bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        range-covered-si     100  $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
-
-echo range-notcovered-si
-bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        range-notcovered-si  100  $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
-
-# echo scan
-# bash run.sh $ntabs $nrows $insertsecs $dbAndCreds 0     0        scan                 100  $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $ntabs
-fi
 
 echo delete
 bash run.sh $ntabs $nrows $writesecs $dbAndCreds 0      0        delete               100  $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@

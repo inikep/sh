@@ -14,6 +14,7 @@ MYSQLDIR=$ROOTDIR/mysqld
 DATADIR=${DATADIR:-${ROOTDIR}/master}
 SYSBENCH_DIR=${SYSBENCH_DIR:-/usr/local}
 ZENFS_DEV=${ZENFS_DEV:-nvme1n2}
+DISKNAME=${DISKNAME:-nvme0n1}
 
 if [ "$FILE_SYSTEM" == "zenfs" ]; then
   ENGINE=rocksdb
@@ -74,10 +75,9 @@ else
 fi
 BULK_SYNC_SIZE=${BULK_SYNC_SIZE:-0}
 TABLE_OPTIONS=none
-USE_PK=${USE_PK:-0}
-DISKNAME=$ZENFS_DEV
+USE_PK=${USE_PK:-1}
 dbAndCreds=mysql,root,pw,127.0.0.1,test,$ENGINE # dbAndCreds=mysql,user,password,host,db,engine
-WORKLOAD_SCRIPT=${WORKLOAD_SCRIPT:=all_small.sh}
+WORKLOAD_SCRIPT=${WORKLOAD_SCRIPT:=all_wdc.sh}
 
 # SYSBENCH="$SYSBENCH_DIR/bin/sysbench --rand-type=uniform --db-driver=mysql --mysql-user=root --mysql-password=pw --mysql-host=127.0.0.1 --mysql-db=test --mysql-storage-engine=$ENGINE "
 # SYSBENCH+="--table-size=$NROWS --tables=$NTABS --events=0 --report-interval=10 --create_secondary=off --mysql-ignore-errors=1062,1213"
@@ -88,7 +88,7 @@ CLIENT_OPT_NOPASS="-hlocalhost -uroot"
 CLIENT_OPT="$CLIENT_OPT_NOPASS -ppw"
 ZENFS_TOOL=$MYSQLDIR/bin/zenfs
 
-printf "\nSERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE FILE_SYSTEM=$FILE_SYSTEM CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS NTHREADS=$NTHREADS MEMORY=$MEMORY DATADIR=$DATADIR\n"
+printf "\nSERVER_BUILD=$SERVER_BUILD CFG_FILE=$CFG_FILE ENGINE=$ENGINE FILE_SYSTEM=$FILE_SYSTEM SECS=$SECS NTABS=$NTABS NROWS=$NROWS NTHREADS=$NTHREADS MEMORY=$MEMORY DISKNAME=$DISKNAME DATADIR=$DATADIR\n"
 
 if [ ! -d "$ROOTDIR" ]; then mkdir $ROOTDIR; fi
 cp $CONFIG_FILE $ROOTDIR/$CFG_FILE
@@ -168,10 +168,11 @@ print_database_size(){
     EMPTY_ZONES=`zbd report /dev/$ZENFS_DEV | grep em | wc -l`
     DATA_SIZE=`$ZENFS_TOOL list --zbd=$ZENFS_DEV --path=./.rocksdb | awk '{sum+=$1;} END {printf "%d\n", sum/1024/1024;}'`
     FILE_COUNT=`$ZENFS_TOOL list --zbd=$ZENFS_DEV --path=./.rocksdb | wc -l`
-    $ZENFS_TOOL df --zbd=$ZENFS_DEV >>$RESULTS_FILE
     if [ "$PRINT_FILES" == "1" ]; then $ZENFS_TOOL list --zbd=$ZENFS_DEV --path=./.rocksdb >>$RESULTS_FILE; fi
     echo "- Number of empty zones is $EMPTY_ZONES"
     echo "- Number of empty zones is $EMPTY_ZONES" >>$RESULTS_FILE
+    $ZENFS_TOOL df --zbd=$ZENFS_DEV
+    $ZENFS_TOOL df --zbd=$ZENFS_DEV >>$RESULTS_FILE
   else
     DATA_SIZE=`du -s $DATADIR | awk '{sum+=$1;} END {printf "%d\n", sum/1024;}'`
     if [ "$PRINT_FILES" == "1" ]; then ls -alR $DATADIR >>$RESULTS_FILE; fi
@@ -209,7 +210,7 @@ run_sysbench(){
 
   bash $WORKLOAD_SCRIPT $NTABS $NROWS $READSECS $WRITESECS $INSERTSECS $dbAndCreds 0 $CLEANUP $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $PWD $DISKNAME $USE_PK $BULK_SYNC_SIZE $THREADS
 
-  echo >>$RESULTS_FILE SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE FILE_SYSTEM=$FILE_SYSTEM CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS DATADIR=$DATADIR
+  echo >>$RESULTS_FILE SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE FILE_SYSTEM=$FILE_SYSTEM CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS DISKNAME=$DISKNAME DATADIR=$DATADIR
   printf "\n- Results in queries per second (QPS)\n" >>$RESULTS_FILE
   cat sb.r.qps.!(*.pre.*) | sort -k3 >>$RESULTS_FILE
   printf "\n- Results in transactions per second (TPS)\n" >>$RESULTS_FILE
@@ -220,6 +221,8 @@ run_sysbench(){
   cat sb.r.rtavg.!(*.pre.*) | sort -k3  >>$RESULTS_FILE
   printf "\n- Latency 95th percentile (ms)\n" >>$RESULTS_FILE
   cat sb.r.rt95.!(*.pre.*) | sort -k3  >>$RESULTS_FILE
+  printf "\n- $DISKNAME disk usage\n" >>$RESULTS_FILE
+  cat sb.df.!(*.pre.*) | sort -k3  >>$RESULTS_FILE
   cat $RESULTS_FILE
 }
 
@@ -244,7 +247,7 @@ fi
 
 if [ "${COMMAND_NAME}" == "init" ]; then
   RES_INIT=$(generate_name _init_ $CT_MEMORY)
-  echo >>$RESULTS_DIR/$RES_INIT SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE FILE_SYSTEM=$FILE_SYSTEM CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS DATADIR=$DATADIR
+  echo >>$RESULTS_DIR/$RES_INIT SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE FILE_SYSTEM=$FILE_SYSTEM CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS DISKNAME=$DISKNAME DATADIR=$DATADIR
 
   echo "- Initialize mysqld at $(date '+%H:%M:%S')"
   rm -rf $DATADIR

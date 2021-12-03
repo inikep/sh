@@ -432,3 +432,6 @@ for nt in "$@"; do
 done > sb.r.rt95.$sfx
 echo "$engine $testType range=$range" >> sb.r.rt95.$sfx
 
+percent=`df | grep $dname | awk '{print $5}'`
+echo "$percent $engine $testType range=$range" >> sb.df.$sfx
+printf "$dname disk usage: "; cat sb.df.$sfx

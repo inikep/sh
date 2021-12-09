@@ -52,7 +52,7 @@ elif [[ $testType == "update-index" ]]; then
 elif [[ $testType == "update-rate" ]]; then
   lua="oltp_update_rate.lua"
   testArgs=(--rand-type=uniform --update-rate=1000)
-elif [[ $testType == "point-query" || $testType == "point-query.pre" || $testType == "point-query.warm" ]]; then
+elif [[ $testType == "point-query" || $testType == "point-query.pre" || $testType == "point-query.warm" || $testType == "setup" || $testType == "cleanup" ]]; then
   lua="oltp_point_select.lua"
   testArgs=(--rand-type=uniform --skip-trx)
 elif [[ $testType == "random-points" || $testType == "random-points.pre" ]]; then
@@ -137,6 +137,7 @@ done
 
 sfx="${testType}.range${range}.pk${usepk}"
 
+
 # --- Setup ---
 
 if [[ $setup -eq 1 ]]; then
@@ -192,10 +193,12 @@ kill $vmpid
 kill $iopid
 bash an.sh sb.prepare.io.$sfx sb.prepare.vm.$sfx $dname $rps $realdop > sb.prepare.met.$sfx
 
-exit 0 # after prepare
-fi
+fi # if setup
+
 
 # --- run sysbench tests ---
+
+if [[ $setup == 0 ]] && [[ $cleanup == 0 ]]; then
 
 rm -f sb.r.trx.$sfx sb.r.qps.$sfx sb.r.rtavg.$sfx sb.r.rtmax.$sfx sb.r.rt95.$sfx
 
@@ -305,6 +308,9 @@ du -hs --apparent-size $ddir >> sb.sz.$sfx
 echo "all" >> sb.sz.$sfx
 du -hs ${ddir}/* >> sb.sz.$sfx
 
+fi # [[ $setup == 0 ]] && [[ $cleanup == 0 ]]
+
+
 # --- Postwrite ---
 
 if [[ $postwrite -eq 1 ]]; then
@@ -384,6 +390,9 @@ if [[ $postwrite -eq 1 ]]; then
 
 fi # if postwrite ...
 
+
+# Cleanup
+
 if [[ $cleanup == 1 ]]; then
 
 echo Cleanup
@@ -394,6 +403,11 @@ for x in $( seq 1 $ntabs ); do
 done
 
 fi
+
+
+# Process results
+
+if [[ $setup == 0 ]] && [[ $cleanup == 0 ]]; then
 
 for nt in "$@"; do
   grep transactions: sb.o.$sfx.dop${nt} | awk '{ print $3 }' | tr -d '(' | awk '{ printf "%.0f\t", $1 }' 
@@ -431,6 +445,11 @@ for nt in "$@"; do
   grep percentile: sb.o.$sfx.dop${nt} | awk '{ print $3 }' | awk '{ printf "%s\t", $1 }' 
 done > sb.r.rt95.$sfx
 echo "$engine $testType range=$range" >> sb.r.rt95.$sfx
+
+fi # [[ $setup == 0 ]] && [[ $cleanup == 0 ]]
+
+
+# Disk usage
 
 percent=`df | grep $dname | awk '{print $5}'`
 echo "$percent $engine $testType range=$range" >> sb.df.$sfx

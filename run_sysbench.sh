@@ -208,7 +208,7 @@ run_sysbench(){
   THREADS=$(echo "$NTHREADS" | tr "," "\n")
   echo - Run $WORKLOAD_SCRIPT for THREADS=$THREADS
 
-  bash $WORKLOAD_SCRIPT $NTABS $NROWS $READSECS $WRITESECS $INSERTSECS $dbAndCreds 0 $CLEANUP $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $PWD $DISKNAME $USE_PK $BULK_SYNC_SIZE $THREADS
+  bash $WORKLOAD_SCRIPT $NTABS $NROWS $READSECS $WRITESECS $INSERTSECS $dbAndCreds 0 $CLEANUP $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $DATADIR $DISKNAME $USE_PK $BULK_SYNC_SIZE $THREADS
 
   echo >>$RESULTS_FILE SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE FILE_SYSTEM=$FILE_SYSTEM CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS DISKNAME=$DISKNAME DATADIR=$DATADIR
   printf "\n- Results in queries per second (QPS)\n" >>$RESULTS_FILE
@@ -281,7 +281,7 @@ if [ "${COMMAND_NAME}" == "init" ]; then
   echo "- Populate database with sysbench with ${NTABS}x$NROWS rows and $THREADS threads at $(date '+%H:%M:%S')" >>$RESULTS_DIR/$RES_INIT
 #  (time $SYSBENCH --threads=$THREADS /usr/local/share/sysbench/oltp_read_write.lua prepare --rand-type=uniform --range-size=$RANGE_SIZE >>$RESULTS_DIR/$RES_INIT) 2>>$RESULTS_DIR/$RES_INIT
   cd $RESULTS_DIR
-  time { (time bash all_setup_only.sh $NTABS $NROWS 0 0 0 $dbAndCreds 1 0 $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $PWD $DISKNAME $USE_PK $BULK_SYNC_SIZE $THREADS) 2>>$RESULTS_DIR/$RES_INIT; }
+  time { (time bash run.sh $NTABS $NROWS 0 $dbAndCreds 1 0 setup 0 $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $DATADIR $DISKNAME $USE_PK 0 $BULK_SYNC_SIZE $THREADS) 2>>$RESULTS_DIR/$RES_INIT; }
   STATUS=$?
   cat sb.prepare.o.point-query.warm.range100.pk* >>$RESULTS_DIR/$RES_INIT
   free -m >>$RESULTS_DIR/$RES_INIT

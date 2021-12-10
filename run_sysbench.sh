@@ -27,11 +27,12 @@ fi
 
 for COMMAND_NAME in $(echo "$COMMANDS" | tr "," "\n")
 do
-if ([ "$COMMAND_NAME" != "verify" ] && [ "$COMMAND_NAME" != "init" ]) && [ "$COMMAND_NAME" != "run" ] ||
+if ([ "$COMMAND_NAME" != "verify" ] && [ "$COMMAND_NAME" != "init" ]) && [ "$COMMAND_NAME" != "run" ] && [ "$COMMAND_NAME" != "prepare" ] ||
     ([ "$ENGINE" != "innodb" ] && [ "$ENGINE" != "rocksdb" ]) ||
     [ $# -lt 3 ]; then
   echo "usage: $0 [server_build] [my.cnf] [innodb/rocksdb/zenfs] [init/run/verify]"
   echo "  init   - copy binaries from \$BUILDDIR to \$ROOTDIR if required, initialize mysqld database"
+  echo "  prepare - populate database"
   echo "  verify - check mysqld database"
   echo "  run  - run sysbench"
   echo "  NTABS - number of tables"
@@ -187,8 +188,63 @@ generate_name(){
   echo "${1}${FILE_SYSTEM}_${NTABS}x${ORIG_NROWS}_${2}GB_${SECS}s_`date +%F_%H-%M`"
 }
 
+init_db(){
+  local RES_INIT=$(generate_name _init_ $CT_MEMORY)
+  echo >>$RESULTS_DIR/$RES_INIT SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE FILE_SYSTEM=$FILE_SYSTEM CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS DISKNAME=$DISKNAME DATADIR=$DATADIR
+
+  echo "- Initialize mysqld at $(date '+%H:%M:%S')"
+  rm -rf $DATADIR
+  if [ "$FILE_SYSTEM" == "zenfs" ]; then
+    export ZENFS_DEV
+    sudo -E bash -c 'echo mq-deadline > /sys/block/$ZENFS_DEV/queue/scheduler'
+    sudo chmod o+rw /dev/$ZENFS_DEV
+    sudo zbd reset /dev/$ZENFS_DEV
+    $ZENFS_TOOL mkfs --zbd=$ZENFS_DEV --aux_path=$DATADIR --finish_threshold=0 --force || exit
+  else
+    mkdir -p $DATADIR
+  fi
+#  cp $MYSQLDIR/bin/mysqld-debug $MYSQLDIR/bin/mysqld
+  $MYSQLDIR/bin/mysqld --initialize-insecure --basedir=$MYSQLDIR --datadir=$DATADIR --log-error-verbosity=2 --log-error=$ROOTDIR/log.err
+
+  startmysql $CFG_FILE $CT_MEMORY
+  waitmysql "$CLIENT_OPT_NOPASS"
+  echo "- Create 'test' database at $(date '+%H:%M:%S')"
+  $MYSQLDIR/bin/mysql $CLIENT_OPT_NOPASS -e "ALTER USER 'root'@'localhost' IDENTIFIED BY 'pw'"
+  $MYSQLDIR/bin/mysql $CLIENT_OPT -e "CREATE DATABASE test"
+  shutdownmysql $RESULTS_DIR/$RES_INIT
+}
+
+prepare_db(){
+  local RES_PREPARE=$(generate_name _prepare_ $CT_MEMORY)
+
+  ADDITIONAL_PARAMS="--disable-log-bin"
+  if [ "$BULK_LOAD" == "1" ]; then
+    ADDITIONAL_PARAMS+=" --rocksdb_bulk_load=1"
+    if [ "$USE_PK" == "0" ]; then ADDITIONAL_PARAMS+=" --rocksdb_bulk_load_allow_sk=1"; fi
+  fi
+  startmysql $CFG_FILE $CT_MEMORY "$ADDITIONAL_PARAMS"
+  waitmysql "$CLIENT_OPT"
+
+  free -m  >>$RESULTS_DIR/$RES_PREPARE
+  THREADS=${NTHREADS##*,} # get the last number
+  echo "- Populate database with sysbench with ${NTABS}x$NROWS rows and $THREADS threads at $(date '+%H:%M:%S')"
+  echo "- Populate database with sysbench with ${NTABS}x$NROWS rows and $THREADS threads at $(date '+%H:%M:%S')" >>$RESULTS_DIR/$RES_PREPARE
+#  (time $SYSBENCH --threads=$THREADS /usr/local/share/sysbench/oltp_read_write.lua prepare --rand-type=uniform --range-size=$RANGE_SIZE >>$RESULTS_DIR/$RES_PREPARE) 2>>$RESULTS_DIR/$RES_PREPARE
+  cd $RESULTS_DIR
+  time { (time bash run.sh $NTABS $NROWS 0 $dbAndCreds 1 0 setup 100 $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $DATADIR $DISKNAME $USE_PK 0 $BULK_SYNC_SIZE $THREADS) 2>>$RESULTS_DIR/$RES_PREPARE; }
+  STATUS=$?
+  cat sb.prepare.o.setup.range100.pk* >>$RESULTS_DIR/$RES_PREPARE
+  free -m >>$RESULTS_DIR/$RES_PREPARE
+
+  $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; show table status" >>$RESULTS_DIR/$RES_PREPARE
+
+  time { (time shutdownmysql $RESULTS_DIR/$RES_PREPARE 1) 2>>$RESULTS_DIR/$RES_PREPARE; }
+  free -m  >>$RESULTS_DIR/$RES_PREPARE
+  if [[ $STATUS != 0 ]]; then echo run_sysbench failed; exit -1; fi
+}
+
 verify_db(){
-  RES_VERIFY=$(generate_name _verify_ $CT_MEMORY)
+  local RES_VERIFY=$(generate_name _verify_ $CT_MEMORY)
   startmysql $CFG_FILE $CT_MEMORY
   waitmysql "$CLIENT_OPT"
   $MYSQLDIR/bin/mysqlcheck $CLIENT_OPT --analyze --databases test >$RESULTS_DIR/$RES_VERIFY
@@ -240,60 +296,9 @@ do
 
 echo "- Execute COMMAND_NAME=$COMMAND_NAME at $(date '+%H:%M:%S')"
 
-if [ "${COMMAND_NAME}" == "verify" ]; then
-  verify_db
-  continue
-fi
-
-if [ "${COMMAND_NAME}" == "init" ]; then
-  RES_INIT=$(generate_name _init_ $CT_MEMORY)
-  echo >>$RESULTS_DIR/$RES_INIT SERVER_BUILD=$SERVER_BUILD ENGINE=$ENGINE FILE_SYSTEM=$FILE_SYSTEM CFG_FILE=$CFG_FILE SECS=$SECS NTABS=$NTABS NROWS=$NROWS MEM=$MEM NTHREADS=$NTHREADS DISKNAME=$DISKNAME DATADIR=$DATADIR
-
-  echo "- Initialize mysqld at $(date '+%H:%M:%S')"
-  rm -rf $DATADIR
-  if [ "$FILE_SYSTEM" == "zenfs" ]; then
-    export ZENFS_DEV
-    sudo -E bash -c 'echo mq-deadline > /sys/block/$ZENFS_DEV/queue/scheduler'
-    sudo chmod o+rw /dev/$ZENFS_DEV
-    sudo zbd reset /dev/$ZENFS_DEV
-    $ZENFS_TOOL mkfs --zbd=$ZENFS_DEV --aux_path=$DATADIR --finish_threshold=0 --force || exit
-  else
-    mkdir -p $DATADIR
-  fi
-#  cp $MYSQLDIR/bin/mysqld-debug $MYSQLDIR/bin/mysqld
-  $MYSQLDIR/bin/mysqld --initialize-insecure --basedir=$MYSQLDIR --datadir=$DATADIR --log-error-verbosity=2 --log-error=$ROOTDIR/log.err
-
-  ADDITIONAL_PARAMS="--disable-log-bin"
-  if [ "$BULK_LOAD" == "1" ]; then
-    ADDITIONAL_PARAMS+=" --rocksdb_bulk_load=1"
-    if [ "$USE_PK" == "0" ]; then ADDITIONAL_PARAMS+=" --rocksdb_bulk_load_allow_sk=1"; fi
-  fi
-  startmysql $CFG_FILE $CT_MEMORY "$ADDITIONAL_PARAMS"
-
-  waitmysql "$CLIENT_OPT_NOPASS"
-  echo "- Create 'test' database at $(date '+%H:%M:%S')"
-  $MYSQLDIR/bin/mysql $CLIENT_OPT_NOPASS -e "ALTER USER 'root'@'localhost' IDENTIFIED BY 'pw'"
-  $MYSQLDIR/bin/mysql $CLIENT_OPT -e "CREATE DATABASE test"
-
-  free -m  >>$RESULTS_DIR/$RES_INIT
-  THREADS=${NTHREADS##*,} # get the last number
-  echo "- Populate database with sysbench with ${NTABS}x$NROWS rows and $THREADS threads at $(date '+%H:%M:%S')"
-  echo "- Populate database with sysbench with ${NTABS}x$NROWS rows and $THREADS threads at $(date '+%H:%M:%S')" >>$RESULTS_DIR/$RES_INIT
-#  (time $SYSBENCH --threads=$THREADS /usr/local/share/sysbench/oltp_read_write.lua prepare --rand-type=uniform --range-size=$RANGE_SIZE >>$RESULTS_DIR/$RES_INIT) 2>>$RESULTS_DIR/$RES_INIT
-  cd $RESULTS_DIR
-  time { (time bash run.sh $NTABS $NROWS 0 $dbAndCreds 1 0 setup 0 $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $DATADIR $DISKNAME $USE_PK 0 $BULK_SYNC_SIZE $THREADS) 2>>$RESULTS_DIR/$RES_INIT; }
-  STATUS=$?
-  cat sb.prepare.o.point-query.warm.range100.pk* >>$RESULTS_DIR/$RES_INIT
-  free -m >>$RESULTS_DIR/$RES_INIT
-
-  $MYSQLDIR/bin/mysql $CLIENT_OPT -e "USE test; show table status" >>$RESULTS_DIR/$RES_INIT
-
-  time { (time shutdownmysql $RESULTS_DIR/$RES_INIT 1) 2>>$RESULTS_DIR/$RES_INIT; }
-  free -m  >>$RESULTS_DIR/$RES_INIT
-  if [[ $STATUS != 0 ]]; then echo run_sysbench failed; exit -1; fi
-  continue
-fi
-
+if [ "${COMMAND_NAME}" == "init" ]; then init_db; continue; fi
+if [ "${COMMAND_NAME}" == "prepare" ]; then prepare_db; continue; fi
+if [ "${COMMAND_NAME}" == "verify" ]; then verify_db; continue; fi
 
 for MEM in $(echo "$MEMORY" | tr "," "\n")
 do

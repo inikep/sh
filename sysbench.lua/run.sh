@@ -451,6 +451,6 @@ fi # [[ $setup == 0 ]] && [[ $cleanup == 0 ]]
 
 # Disk usage
 
-percent=`df | grep $dname | awk '{print $5}'`
+percent=`df | grep $dname | awk '{print $5}' ORS=" "`
 echo "$percent $engine $testType range=$range" >> sb.df.$sfx
 printf "$dname disk usage: "; cat sb.df.$sfx

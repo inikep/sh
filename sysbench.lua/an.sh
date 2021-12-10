@@ -42,7 +42,7 @@ fi
 printf "iostat, vmstat normalized by operation rate\n" 
 printf "samp\tr/s\trMB/s\tw/s\twMB/s\tr/o\trKB/o\twKB/o\to/s\n" 
 
-grep $dname $iof | awk '{ rs += $crs; rkb += $crkb; ws += $cws; wkb += $cwkb; c += 1 } END { printf "%s\t%.1f\t%.1f\t%.1f\t%.1f\t%.3f\t%.3f\t%.3f\t%s\n", c, rs/c, rkb/c/1024.0, ws/c, wkb/c/1024.0, rs/c/q, rkb/c/q, wkb/c/q, q }' q=${ops} p=$realdop crs=$crs crkb=$crkb cwkb=$cwkb cws=$cws
+grep $dname $iof | awk '{ rs += $crs; rkb += $crkb; ws += $cws; wkb += $cwkb; c += 1 } END { if (c>0) printf "%s\t%.1f\t%.1f\t%.1f\t%.1f\t%.3f\t%.3f\t%.3f\t%s\n", c, rs/c, rkb/c/1024.0, ws/c, wkb/c/1024.0, rs/c/q, rkb/c/q, wkb/c/q, q }' q=${ops} p=$realdop crs=$crs crkb=$crkb cwkb=$cwkb cws=$cws
 
 printf "\nsamp\tcs/s\tcpu/s\tcs/o\tcpu/o\n"
 grep -v swpd $vmf | awk '{ if (NR>1) { cs += $12; cpu += $13 + $14; c += 1 } } END { printf "%s\t%.0f\t%.1f\t%.3f\t%.6f\n", c, cs/c, cpu/c, cs/c/q, cpu/c/q }' q=${ops}

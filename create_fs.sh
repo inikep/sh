@@ -12,9 +12,9 @@ fi
 df -T | grep $DEVICE
 umount $MOUNT_POINT
 if [ "$FILE_SYSTEM" == "xfs" ]; then
-    mkfs.$FILE_SYSTEM -f $DEVICE
+    mkfs.$FILE_SYSTEM -f -K $DEVICE
 else
-    mkfs.$FILE_SYSTEM -F $DEVICE
+    mkfs.$FILE_SYSTEM -F -K $DEVICE
 fi
 mkdir -p $MOUNT_POINT
 mount $DEVICE $MOUNT_POINT

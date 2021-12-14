@@ -22,7 +22,6 @@ table_open_cache=8000
 
 innodb_doublewrite=ON
 innodb_flush_method=O_DIRECT
-innodb_buffer_pool_size=320G
 innodb_buffer_pool_instances=16
 innodb_write_io_threads=32
 innodb_page_size=16384

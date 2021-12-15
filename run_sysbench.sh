@@ -78,7 +78,7 @@ BULK_SYNC_SIZE=${BULK_SYNC_SIZE:-0}
 TABLE_OPTIONS=none
 USE_PK=${USE_PK:-1}
 dbAndCreds=mysql,root,pw,127.0.0.1,test,$ENGINE # dbAndCreds=mysql,user,password,host,db,engine
-WORKLOAD_SCRIPT=${WORKLOAD_SCRIPT:=all_wdc.sh}
+WORKLOAD_SCRIPT=${WORKLOAD_SCRIPT:=all_percona.sh}
 
 # SYSBENCH="$SYSBENCH_DIR/bin/sysbench --rand-type=uniform --db-driver=mysql --mysql-user=root --mysql-password=pw --mysql-host=127.0.0.1 --mysql-db=test --mysql-storage-engine=$ENGINE "
 # SYSBENCH+="--table-size=$NROWS --tables=$NTABS --events=0 --report-interval=10 --create_secondary=off --mysql-ignore-errors=1062,1213"

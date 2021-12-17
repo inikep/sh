@@ -120,21 +120,16 @@ kill_all() {
 # startmysql $CFG_FILE $MEMORY $ADDITIONAL_OPTIONS
 startmysql(){
   MEM="${2:-8}"
-  ADDITIONAL_PARAMS=""
+  ADDITIONAL_PARAMS="--defaults-file=$1"
   if [ "$ENGINE" == "rocksdb" ]; then
-      ADDITIONAL_PARAMS="--rocksdb_block_cache_size=${MEM}G --rocksdb_merge_buf_size=1G $3"
+      ADDITIONAL_PARAMS+=" --rocksdb_block_cache_size=${MEM}G $3"
   else 
-      ADDITIONAL_PARAMS="--innodb_buffer_pool_size=${MEM}G"
+      ADDITIONAL_PARAMS+=" --innodb_buffer_pool_size=${MEM}G $3"
   fi
   if [ "$FILE_SYSTEM" == "zenfs" ]; then
      ADDITIONAL_PARAMS+=" --rocksdb_fs_uri=zenfs://dev:$ZENFS_DEV"
   fi
 
-  if [ "$1" == "no-defaults-file" ]; then
-      ADDITIONAL_PARAMS="--no-defaults-file"
-  else
-      ADDITIONAL_PARAMS="--defaults-file=$1 $ADDITIONAL_PARAMS"  
-  fi
   echo "- Starting mysqld with $ADDITIONAL_PARAMS"
   sync
   sudo sh -c 'sysctl -q -w vm.drop_caches=3'
@@ -232,7 +227,7 @@ prepare_db(){
   local RES_PREPARE=$(generate_name _prepare_ $CT_MEMORY)
 
   ADDITIONAL_PARAMS="--disable-log-bin"
-  if [ "$BULK_LOAD" == "1" ]; then
+  if [ "$ENGINE" == "rocksdb" ] && [ "$BULK_LOAD" == "1" ]; then
     ADDITIONAL_PARAMS+=" --rocksdb_bulk_load=1"
     if [ "$USE_PK" == "0" ]; then ADDITIONAL_PARAMS+=" --rocksdb_bulk_load_allow_sk=1"; fi
   fi

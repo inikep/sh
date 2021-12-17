@@ -1,7 +1,7 @@
 #!/bin/bash
 shopt -s extglob
 
-SERVER_BUILD=$1
+SERVER_BUILD=${1##*/}
 CONFIG_FILE=$2
 CFG_FILE=${CONFIG_FILE##*/}
 FILE_SYSTEM=$3
@@ -15,6 +15,7 @@ DATADIR=${DATADIR:-${ROOTDIR}/master}
 SYSBENCH_DIR=${SYSBENCH_DIR:-/usr/local}
 ZENFS_DEV=${ZENFS_DEV:-nvme1n2}
 DISKNAME=${DISKNAME:-nvme0n1}
+WORKLOAD_SCRIPT=${WORKLOAD_SCRIPT:=all_percona.sh}
 
 if [ "$FILE_SYSTEM" == "zenfs" ]; then
   ENGINE=rocksdb
@@ -24,39 +25,6 @@ else
   DATADIR_TYPE=`stat -f -c %T $DATADIR`
   if [ ! -z "$DATADIR_TYPE" ]; then FILE_SYSTEM=${DATADIR_TYPE##*/}; fi
 fi
-
-for COMMAND_NAME in $(echo "$COMMANDS" | tr "," "\n")
-do
-if ([ "$COMMAND_NAME" != "verify" ] && [ "$COMMAND_NAME" != "init" ]) && [ "$COMMAND_NAME" != "run" ] && [ "$COMMAND_NAME" != "prepare" ] ||
-    ([ "$ENGINE" != "innodb" ] && [ "$ENGINE" != "rocksdb" ]) ||
-    [ $# -lt 3 ]; then
-  echo "usage: $0 [server_build] [my.cnf] [innodb/rocksdb/zenfs] [init/run/verify]"
-  echo "  init   - copy binaries from \$BUILDDIR to \$ROOTDIR if required, initialize mysqld database"
-  echo "  prepare - populate database"
-  echo "  verify - check mysqld database"
-  echo "  run  - run sysbench"
-  echo "  NTABS - number of tables"
-  echo "  NROWS - number of rows per table"
-  echo "  NTHREADS - number of sysbench threads"
-  echo "  SECS - number of seconds per each sysbench job"
-  echo "example: time NTABS=8 SECS=60 run_sysbench.sh init,verify,run wdc-8.0-rel-clang12-rocks-toku-add rocksdb ~/sh/cnf/vadim-rocksdb.cnf"
-  exit
-fi     
-done # for COMMAND_NAME
-
-if [ ! -f "$CONFIG_FILE" ]; then
-  echo "error: config file $CONFIG_FILE doesn't exist"
-  exit
-fi
-
-kill_all() {
-  sudo sh -c 'echo - root privilleges acquired'
-  sudo killall -9 mysqld && sleep 3
-  sudo killall -9 vmstat
-  sudo rm -rf /tmp/mysql*
-}
-
-kill_all
 
 # params for benchmarking
 NTABS=${NTABS:-16}
@@ -78,30 +46,76 @@ BULK_SYNC_SIZE=${BULK_SYNC_SIZE:-0}
 TABLE_OPTIONS=none
 USE_PK=${USE_PK:-1}
 dbAndCreds=mysql,root,pw,127.0.0.1,test,$ENGINE # dbAndCreds=mysql,user,password,host,db,engine
-WORKLOAD_SCRIPT=${WORKLOAD_SCRIPT:=all_percona.sh}
 
-# SYSBENCH="$SYSBENCH_DIR/bin/sysbench --rand-type=uniform --db-driver=mysql --mysql-user=root --mysql-password=pw --mysql-host=127.0.0.1 --mysql-db=test --mysql-storage-engine=$ENGINE "
-# SYSBENCH+="--table-size=$NROWS --tables=$NTABS --events=0 --report-interval=10 --create_secondary=off --mysql-ignore-errors=1062,1213"
-
-#HOST="--mysql-socket=/tmp/mysql.sock"
-HOST="--mysql-host=127.0.0.1"
 CLIENT_OPT_NOPASS="-hlocalhost -uroot"
 CLIENT_OPT="$CLIENT_OPT_NOPASS -ppw"
 ZENFS_TOOL=$MYSQLDIR/bin/zenfs
+MYSQLD_TOOL=$MYSQLDIR/bin/mysqld
 
-printf "\nSERVER_BUILD=$SERVER_BUILD CFG_FILE=$CFG_FILE ENGINE=$ENGINE FILE_SYSTEM=$FILE_SYSTEM SECS=$SECS NTABS=$NTABS NROWS=$NROWS NTHREADS=$NTHREADS MEMORY=$MEMORY DISKNAME=$DISKNAME DATADIR=$DATADIR\n"
+# HOST="--mysql-socket=/tmp/mysql.sock"
+# HOST="--mysql-host=127.0.0.1"
+# SYSBENCH="$SYSBENCH_DIR/bin/sysbench --rand-type=uniform --db-driver=mysql --mysql-user=root --mysql-password=pw $HOST --mysql-db=test --mysql-storage-engine=$ENGINE "
+# SYSBENCH+="--table-size=$NROWS --tables=$NTABS --events=0 --report-interval=10 --create_secondary=off --mysql-ignore-errors=1062,1213"
+
+print_usage() {
+  printf "\nusage: ${0##*/} [SERVER_BUILD] [CONFIG_FILE] [ENGINE] [COMMANDS]\n"
+  echo "where:"
+  echo "[SERVER_BUILD] - directory name of server build/binaries (please set also \$BUILDDIR)"
+  echo "[CONFIG_FILE] - full path to Percona Server's configuration file"
+  echo "[ENGINE] - 'innodb' or 'rocksdb' or 'zenfs'"
+  echo "[COMMANDS]:"
+  echo "  init    - copy binaries from \$BUILDDIR to \$ROOTDIR if required, initialize mysqld database and tables"
+  echo "  prepare - populate \$NTABS tables with \$NROWS using \$NTHREADS"
+  echo "  verify  - check mysqld database"
+  echo "  run     - run sysbench using \$WORKLOAD_SCRIPT for \$SECS for each workload"
+  echo "variables:"
+  echo "  NTABS - number of tables (default = $NTABS)"
+  echo "  NROWS - number of rows per table (default = $NROWS), accepts e.g. 10M, 2G"
+  echo "  NTHREADS - number of sysbench threads (default = $NTHREADS), accepts e.g. \"14,24\""
+  echo "  SECS - number of seconds per each sysbench job (default = $SECS)"
+  echo "  MEMORY - memory in GB (default = $MEMORY), sets 'innodb_buffer_pool_size' or 'rocksdb_block_cache_size'"
+  echo "  BUILDDIR - path to server build/binaries without \$SERVER_BUILD (default = $BUILDDIR)"
+  echo "  BENCH_PATH - path where to copy server binaries and keep output results (default = $BENCH_PATH)"
+  echo "  DATADIR - path to Percona Server's data directory (default = $DATADIR)"
+  echo "  WORKLOAD_SCRIPT - use a given script from 'sysbench.lua' directory (default = $WORKLOAD_SCRIPT)"
+  echo "example:"
+  echo "  NTABS=8 NROWS=10M SECS=60 BENCH_PATH=/data/bench BUILDDIR=/data/mysql-server run_sysbench.sh wdc-8.0-rel-clang12 ~/cnf/vadim-rocksdb.cnf rocksdb init,prepare,verify,run"
+}
+
+if [ $# -lt 4 ]; then echo "error: too few parameters"; print_usage; exit; fi
+if [ ! -f "$CONFIG_FILE" ]; then echo "error: config file $CONFIG_FILE doesn't exist"; print_usage; exit; fi
+if [ "$ENGINE" != "innodb" ] && [ "$ENGINE" != "rocksdb" ]; then echo "error: unknown $ENGINE storage engine"; exit; fi
+
+for COMMAND_NAME in $(echo "$COMMANDS" | tr "," "\n")
+do
+if [ "$COMMAND_NAME" != "verify" ] && [ "$COMMAND_NAME" != "init" ] && [ "$COMMAND_NAME" != "run" ] && [ "$COMMAND_NAME" != "prepare" ]; then
+  echo "error: unknown $COMMAND_NAME command";
+  print_usage;
+  exit
+fi
+done # for COMMAND_NAME
 
 if [ ! -d "$ROOTDIR" ]; then mkdir $ROOTDIR; fi
 cp $CONFIG_FILE $ROOTDIR/$CFG_FILE
-if [ ! -d "$MYSQLDIR" ]; then
+if [ ! -f $MYSQLD_TOOL ]; then
+   echo "- Copy server from $BUILDDIR to $MYSQLDIR"
+   if [ ! -f $BUILDDIR/bin/mysqld ]; then echo "error: can't find $BUILDDIR/bin/mysqld; check \$BUILDDIR parameter"; print_usage; exit; fi
    STARTPATH=$PWD
    cd $BUILDDIR
-   make install DESTDIR="$MYSQLDIR"          
+   make install DESTDIR="$MYSQLDIR" || exit
    mv $MYSQLDIR/usr/local/mysql/* $MYSQLDIR || exit
    cd $STARTPATH
-fi    
+fi
 
-# trap "trap - SIGTERM && kill -- -$$" SIGINT SIGTERM EXIT
+printf "\nSERVER_BUILD=$SERVER_BUILD CFG_FILE=$CFG_FILE ENGINE=$ENGINE FILE_SYSTEM=$FILE_SYSTEM SECS=$SECS NTABS=$NTABS NROWS=$NROWS NTHREADS=$NTHREADS MEMORY=$MEMORY DISKNAME=$DISKNAME DATADIR=$DATADIR BUILDDIR=$BUILDDIR\n"
+
+
+kill_all() {
+  sudo sh -c 'echo - root privilleges acquired'
+  sudo killall -9 mysqld && sleep 3
+  sudo killall -9 vmstat
+  sudo rm -rf /tmp/mysql*
+}
 
 # startmysql $CFG_FILE $MEMORY $ADDITIONAL_OPTIONS
 startmysql(){
@@ -127,7 +141,7 @@ startmysql(){
   sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'
   ulimit -n 1000000
   cd $ROOTDIR
-  $MYSQLDIR/bin/mysqld $ADDITIONAL_PARAMS --user=root --port=3306 --log-error=$ROOTDIR/log.err --basedir=$MYSQLDIR --datadir=$DATADIR 2>&1 &
+  $MYSQLD_TOOL $ADDITIONAL_PARAMS --user=root --port=3306 --log-error=$ROOTDIR/log.err --basedir=$MYSQLDIR --datadir=$DATADIR 2>&1 &
 }
 
 waitmysql(){
@@ -161,7 +175,7 @@ shutdownmysql(){
   rm $ROOTDIR/log.err
 }
 
-# startmysql [output_file] [print_files]
+# print_database_size [output_file] [print_files]
 print_database_size(){
   local RESULTS_FILE=$1
   local PRINT_FILES=$2
@@ -203,8 +217,8 @@ init_db(){
   else
     mkdir -p $DATADIR
   fi
-#  cp $MYSQLDIR/bin/mysqld-debug $MYSQLDIR/bin/mysqld
-  $MYSQLDIR/bin/mysqld --initialize-insecure --basedir=$MYSQLDIR --datadir=$DATADIR --log-error-verbosity=2 --log-error=$ROOTDIR/log.err
+#  cp ${MYSQLD_TOOL}-debug $MYSQLD_TOOL
+  $MYSQLD_TOOL --initialize-insecure --basedir=$MYSQLDIR --datadir=$DATADIR --log-error-verbosity=2 --log-error=$ROOTDIR/log.err
 
   startmysql $CFG_FILE $CT_MEMORY
   waitmysql "$CLIENT_OPT_NOPASS"
@@ -284,6 +298,8 @@ run_sysbench(){
 
 
 # preparations before main loop
+kill_all
+# trap "trap - SIGTERM && kill -- -$$" SIGINT SIGTERM EXIT
 rm -f $ROOTDIR/log.err
 RESULTS_DIR=${ROOTDIR}/${CFG_FILE%.*}$(generate_name / $CT_MEMORY)
 mkdir -p $RESULTS_DIR

@@ -160,9 +160,9 @@ iopid=$!
 start_secs=$( date +'%s' )
 
 if [[ $sync_size == "0" ]]; then
-  exA=(--db-driver=$driver $setupArgs $engineArg --range-size=$range --table-size=$nr --tables=$ntabs --events=0 --time=$secs $sysbdir/share/sysbench/$lua $prepareArgs prepare)
+  exA=(--db-driver=$driver $setupArgs $engineArg $prepareArgs --range-size=$range --table-size=$nr --tables=$ntabs --events=0 --time=$secs $sysbdir/share/sysbench/$lua prepare)
 else
-  exA=(--db-driver=$driver $setupArgs $engineArg --rocksdb_bulk_load_sync_size=$sync_size --range-size=$range --table-size=$nr --tables=$ntabs --events=0 --time=$secs $sysbdir/share/sysbench/$lua $prepareArgs prepare)
+  exA=(--db-driver=$driver $setupArgs $engineArg $prepareArgs --range-size=$range --table-size=$nr --tables=$ntabs --events=0 --time=$secs $sysbdir/share/sysbench/$lua --rocksdb_bulk_load_sync_size=$sync_size prepare)
 fi
 echo $sysbdir/bin/sysbench "${exA[@]}" "${sbDbCreds[@]}" >> sb.prepare.o.$sfx
 $sysbdir/bin/sysbench "${exA[@]}" "${sbDbCreds[@]}" >> sb.prepare.o.$sfx 2>&1
@@ -241,7 +241,7 @@ fi
 if [[ $testType == "scan" ]]; then
   exA=(--db-driver=$driver --range-size=$range --table-size=$nr --tables=$ntabs --threads=$nt --events=1 --warmup-time=0 --time=0 $sysbdir/share/sysbench/$lua run)
 else
-  exA=(--db-driver=$driver --range-size=$range --table-size=$nr --tables=$ntabs --threads=$nt --events=0 --warmup-time=5 --time=$secs --report-interval=5 $sysbdir/share/sysbench/$lua run)
+  exA=(--db-driver=$driver --range-size=$range --table-size=$nr --tables=$ntabs --threads=$nt --events=0 --warmup-time=30 --time=$secs --report-interval=5 $sysbdir/share/sysbench/$lua run)
 fi
 
 echo $sysbdir/bin/sysbench "${exA[@]}" "${sbDbCreds[@]}" "${testArgs[@]}"  > sb.o.$sfxn

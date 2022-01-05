@@ -28,10 +28,7 @@ fi
 
 # params for benchmarking
 NTABS=${NTABS:-16}
-ORIG_NROWS=$NROWS
-if [ ! -z "$NROWS" ]; then NROWS=$(numfmt --from=si $NROWS); fi
-NROWS=${NROWS:-10000000}
-ORIG_NROWS=${ORIG_NROWS:=$NROWS}
+NROWS=${NROWS:-10M}; NROWS=$(numfmt --from=si $NROWS); NROWS_SI=$(numfmt --to=si $NROWS)
 SECS="${SECS:-300}"
 MEMORY=${MEMORY:-"16"} # "4,8,16"
 CT_MEMORY=${MEMORY##*,} # get the last number
@@ -42,7 +39,7 @@ if ([ "$ENGINE" == "innodb" ]); then
 else
   BULK_LOAD=${BULK_LOAD:-1}
 fi
-BULK_SYNC_SIZE=${BULK_SYNC_SIZE:-0}
+BULK_SYNC_SIZE=${BULK_SYNC_SIZE:-0}; BULK_SYNC_SIZE=$(numfmt --from=si $BULK_SYNC_SIZE)
 TABLE_OPTIONS=none
 USE_PK=${USE_PK:-1}
 dbAndCreds=mysql,root,pw,127.0.0.1,test,$ENGINE # dbAndCreds=mysql,user,password,host,db,engine
@@ -194,7 +191,7 @@ print_database_size(){
 
 # generate_name [prefix] [memory]
 generate_name(){
-  echo "${1}${FILE_SYSTEM}_${NTABS}x${ORIG_NROWS}_${2}GB_${SECS}s_`date +%F_%H-%M`"
+  echo "${1}${FILE_SYSTEM}_${NTABS}x${NROWS_SI}_${2}GB_${SECS}s_`date +%F_%H-%M`"
 }
 
 init_db(){

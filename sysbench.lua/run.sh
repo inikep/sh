@@ -239,9 +239,9 @@ if [[ $dbpid -ne -1 && $nt -eq 1 ]] ; then
 fi
 
 if [[ $testType == "scan" ]]; then
-  exA=(--db-driver=$driver --range-size=$range --table-size=$nr --tables=$ntabs --threads=$nt --events=1 --warmup-time=0 --time=0 $sysbdir/share/sysbench/$lua run)
+  exA=(--db-driver=$driver --range-size=$range --table-size=$nr --tables=$ntabs --threads=$nt --thread-init-timeout=120 --events=1 --warmup-time=0 --time=0 $sysbdir/share/sysbench/$lua run)
 else
-  exA=(--db-driver=$driver --range-size=$range --table-size=$nr --tables=$ntabs --threads=$nt --events=0 --warmup-time=30 --time=$secs --report-interval=5 $sysbdir/share/sysbench/$lua run)
+  exA=(--db-driver=$driver --range-size=$range --table-size=$nr --tables=$ntabs --threads=$nt --thread-init-timeout=120 --events=0 --warmup-time=30 --time=$secs --report-interval=5 $sysbdir/share/sysbench/$lua run)
 fi
 
 echo $sysbdir/bin/sysbench "${exA[@]}" "${sbDbCreds[@]}" "${testArgs[@]}"  > sb.o.$sfxn

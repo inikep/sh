@@ -23,6 +23,11 @@ pwr=0
 # The remaining args are the number of concurrent users per test run, for example "1 2 4"
 shift 15
 
+echo write-only warmup
+
+writewarmupsecs=$((writesecs * 10 ))
+bash run.sh $ntabs $nrows $writewarmupsecs $dbAndCreds 0      0        write-only.warm      100 $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
+
 # This does load, runs a query test and then does "postwrite" work
 #echo point-query.warm
 #bash run.sh $ntabs $nrows $readsecs  $dbAndCreds $setup 0        point-query.warm 100    $client $tableoptions $sysbdir $ddir $dname $usepk 1 $sync_size $@

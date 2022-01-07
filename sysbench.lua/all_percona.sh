@@ -16,57 +16,43 @@ ddir=${12}
 dname=${13}
 usepk=${14}
 sync_size=${15}
-
-# value for "postwrite" option for most tests
-pwr=0
-
-# The remaining args are the number of concurrent users per test run, for example "1 2 4"
 shift 15
+threads=$@  # The remaining args are the number of concurrent users per test run, for example "1 2 4"
+pwr=0       # value for "postwrite" option for most tests
 
+# run_workload [testType] [range] [secs]
+run_workload() {
+  local testType=$1
+  local range=$2
+  local secs=$3
+  bash run.sh $ntabs $nrows $secs $dbAndCreds 0 0 $testType $range $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $threads
+}
 
 # prepare
-preparesecs=$((readsecs / 4 ))
+preparesecs=$((readsecs / 4))
 
-echo point-query.pre
-bash run.sh $ntabs $nrows $preparesecs $dbAndCreds 0    0        point-query.pre 100    $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
+run_workload point-query.pre  100 $preparesecs
 
 for range in 10 100 10000 ; do
-echo read-only.pre range $range
-bash run.sh $ntabs $nrows $preparesecs $dbAndCreds 0    0        read-only.pre   $range $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
+run_workload read-only.pre $range $preparesecs
 done
 
 
 # main tests
-echo update-index
-bash run.sh $ntabs $nrows $writesecs $dbAndCreds 0      0        update-index    100    $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
+run_workload update-index     100 $writesecs
+run_workload update-nonindex  100 $writesecs
+run_workload update-one       100 $writesecs
+run_workload update-zipf      100 $writesecs
+run_workload write-only       100 $writesecs
 
-echo update-nonindex
-bash run.sh $ntabs $nrows $writesecs $dbAndCreds 0      0        update-nonindex 100    $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
-
-echo update-one
-bash run.sh $ntabs $nrows $writesecs $dbAndCreds 0      0        update-one      100    $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
-
-echo update-zipf
-bash run.sh $ntabs $nrows $writesecs $dbAndCreds 0      0        update-zipf      100    $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
-
-echo write-only
-bash run.sh $ntabs $nrows $writesecs $dbAndCreds 0      0        write-only      100 $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
-
-echo read-write range 10
-bash run.sh $ntabs $nrows $writesecs $dbAndCreds 0      0        read-write      10 $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
-echo read-write range 100
-bash run.sh $ntabs $nrows $writesecs $dbAndCreds 0      0        read-write      100 $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
-
-for range in 10 100 10000 ; do
-echo read-only range $range
-bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        read-only       $range $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
+for range in 10 100 ; do
+run_workload read-write    $range $writesecs
 done
 
-echo point-query
-bash run.sh $ntabs $nrows $readsecs  $dbAndCreds 0      0        point-query     100    $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
+for range in 10 100 10000 ; do
+run_workload read-only     $range $readsecs
+done
 
-echo delete
-bash run.sh $ntabs $nrows $writesecs $dbAndCreds 0      0        delete               100  $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
-
-echo insert
-bash run.sh $ntabs $nrows $insertsecs $dbAndCreds 0     $cleanup insert               100  $client $tableoptions $sysbdir $ddir $dname $usepk $pwr $sync_size $@
+run_workload point-query      100 $readsecs
+run_workload delete           100 $writesecs
+run_workload insert           100 $insertsecs

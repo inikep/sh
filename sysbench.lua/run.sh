@@ -208,7 +208,7 @@ if [[ $testType == "scan" && $nt -gt $ntabs ]]; then
   echo Skip because scan is limited to $ntabs threads
   continue
 else
-  echo Run for $nt threads at $( date )
+  echo "Run $testType (range $range) for $nt threads at $(date '+%H:%M:%S')"
 fi
 
 

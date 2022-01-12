@@ -7,7 +7,7 @@ fi
 
 COMMIT1=$1
 COMMIT2=$2
-OUTCSV=$3/$2.csv
+OUTCSV=$3/${2##*/}.csv
 
 function git-check-files() {
   FILES=`git diff --name-only $COMMIT~..$COMMIT | grep $1`

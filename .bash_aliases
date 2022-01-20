@@ -50,6 +50,17 @@ function git-squash() {
     git commit
   fi
 }
+function git-split() {
+  if [ $# -lt 1 ]; then
+    echo usage: $0 [file_names]
+  else
+    git reset HEAD^ -- $@
+    git commit --amend
+    git add $@
+    git commit --reuse-message=HEAD@{1}
+    git commit --amend
+  fi
+}
 
 
 function fb-worktree() { git fetch facebook && cd ../fb-8.0.13 && git checkout fb-8.0.13 && git pull && git worktree add -b $@ ../$@ facebook/fb-mysql-8.0.13; cd ../$@; }

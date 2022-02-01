@@ -15,7 +15,7 @@ alias git-amend="git cherry-pick --amend"
 alias zenfs-rocks-size="zenfs list --zbd=nvme1n2 --path=./.rocksdb | awk '{sum+=\$1;} END {printf \"%d\n\", sum/1024/1024;}'"
 alias zenfs-free-zones="zbd report /dev/nvme1n2 | grep em | wc -l"
 
-MTR_BASE="./mysql-test/mtr --debug-server --retry-failure=0 --mysqld-env=LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libeatmydata.so --mysqld=--slave-parallel-workers=4"
+MTR_BASE="./mysql-test/mtr --debug-server --retry-failure=0 --mysqld-env=LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libeatmydata.so --mysqld=--replica-parallel-workers=4"
 MTR_PARALLEL="$MTR_BASE --parallel=auto --force --max-test-fail=0"
 MTR_SANITIZE="$MTR_PARALLEL --sanitize --big-test"
 alias     mtr-single="$MTR_BASE"

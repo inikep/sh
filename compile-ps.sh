@@ -86,7 +86,7 @@ case $var in
   inverted) INVERTED=1; BUILD_PATH+=-inverted ;;
   jenkins) JENKINS=1; BUILD_PATH+=-jenkins ;;
   jemalloc) JEMALLOC=1; BUILD_PATH+=-jemalloc ;;
-  boring*) BORINGSSL=1; BUILD_PATH+=-boring ;;
+  boring*) BORINGSSL=$var; BUILD_PATH+=-$var ;;
   asan) ASAN=1; BUILD_PATH+=-asan ;;
   valgrind) VALGRIND=1; BUILD_PATH+=-valgrind ;;
   rocks*) ROCKSDB=1; BUILD_PATH+=-rocks ;;
@@ -362,8 +362,8 @@ if [ "$JEMALLOC" == "1" ]; then
    CMAKE_OPT="$CMAKE_OPT -DWITH_JEMALLOC=1";
 fi
 
-if [ "$BORINGSSL" == "1" ]; then
-   CMAKE_OPT="$CMAKE_OPT -DWITH_SSL=system -DCMAKE_PREFIX_PATH=/data/lib/boringssl_api16";
+if [ "$BORINGSSL" != "" ]; then
+   CMAKE_OPT="$CMAKE_OPT -DWITH_SSL=system -DCMAKE_PREFIX_PATH=/data/lib/$BORINGSSL";
 fi
 
 mkdir $BUILD_PATH;

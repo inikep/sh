@@ -15,11 +15,12 @@ function git-check-files() {
 }
 
 i=1
-echo >$OUTCSV "Date;Author;fbshipit-source-id;Commit title;FB Tag;Commit;Link;Differential Revision;Squash with;Tags;Status;Additional Info;Modified MTR files"
+echo >$OUTCSV "Date;Author;fbshipit-source-id;Commit title;FB Tag;Commit;Link;Differential Revision;Modifications;Tags;Status;Additional Info;Failing MTR files;Modified MTR files"
 
-for COMMIT in $(git rev-list --first-parent --topo-order --reverse $COMMIT2 ^$COMMIT1)
+for COMMIT in $(git rev-list --topo-order --reverse $COMMIT2 ^$COMMIT1)
 do
   TAGS=""
+  git-check-files "mysqld_safe\.sh" mysqld_safe
   git-check-files "mysql-test-run\.pl" mysql-test-run
   git-check-files "\.gitignore" gitignore
   git-check-files "\.pem" cert
@@ -49,10 +50,15 @@ do
   PARAMS=$(git show -s $COMMIT --pretty="format:%cd;%an" --date=short)
   COMMIT_SHORT=$(git show -s $COMMIT --pretty="format:%h")
   TITLE=$(git show -s --format=%s $COMMIT | tr -d ';')
+  STATSLINE=$(git show --stat $COMMIT | tail -1)
+  STATS=( $STATSLINE )
+  MODIFICATIONS="${STATS[0]} files ${STATS[3]}+ ${STATS[5]:-0}-"
   DIFF_REV=$(git show -s $COMMIT --format=%B | grep -zioP 'Differential revision[: \n]*(https://reviews.facebook.net/|https://phabricator.intern.facebook.com/|)\K[[:alnum:] ,]*' | tr '\0' ',' | head --bytes -1)
-  SQUASH=$(git show -s $COMMIT --format=%B | grep -zioP 'Squash with[: \n]*(https://reviews.facebook.net/|https://phabricator.intern.facebook.com/|)\K[[:alnum:] ,]*' | tr '\0' ',' | head --bytes -1)
+  SQUASH=$(git show -s $COMMIT --format=%B | grep -zioP 'Squash with[: \n]*(https://reviews.facebook.net/|https://phabricator.intern.facebook.com/|)\K.*' | tr '\0' ',' | head --bytes -1)
   SOURCE_ID=$(git show -s $COMMIT --format=%B | grep -zioP 'fbshipit-source-id[: \n]*\K[[:alnum:] ,]*' | tr '\0' ',' | head --bytes -1)
+  UPSTREAM_BUG=$(git show -s $COMMIT --format=%B | grep -zioP 'https://bugs\.mysql\.com/(bug\.php\?id=|)[0-9]*' | tr '\0' ',' | head --bytes -1)
   GIT_TAG=$(git tag --contains $COMMIT | head -1)
-  echo >>$OUTCSV "$PARAMS;$SOURCE_ID;$TITLE;$GIT_TAG;$COMMIT_SHORT;;$DIFF_REV;$SQUASH;$TAGS;should port;;$MTR_FILES"
+  if [[ "$SQUASH" != "" ]]; then SQUASH="Squash with $SQUASH"; fi;
+  echo >>$OUTCSV "$PARAMS;$SOURCE_ID;$TITLE;$GIT_TAG;$COMMIT_SHORT;;$DIFF_REV;$MODIFICATIONS;$TAGS;should port;$SQUASH;$UPSTREAM_BUG;$MTR_FILES"
   ((i=i+1))
 done

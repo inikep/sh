@@ -59,13 +59,15 @@ if [[ "${OS_VERSION}" = *"CentOS release 6."* ]] || [[ "${OS_VERSION}" = *"CentO
    JOB_CMAKE='cmake3'
 else
    BUILD_PATH=$SRV_PATH
+#   JOB_CMAKE='cmake --trace-source=/data/mysql-server/fb-8.0.28/storage/rocksdb/CMakeLists.txt'
    JOB_CMAKE='cmake'
 fi
 
 if [ "$DOCKER" != "1" ]; then
    BUILD_PATH=$SRV_PATH
 else
-   BUILD_PATH=/data/docker/$1
+   VERSION_CODENAME=`grep '^VERSION_CODENAME' /etc/os-release | cut -d "=" -f 2`
+   BUILD_PATH=/data/docker/${VERSION_CODENAME}-$1
 fi
 
 if [ "$RELEASE" == "1" ]; then
@@ -163,7 +165,7 @@ CMAKE_PERCONA_57="
  $CMAKE_MYSQL_57
  -DWITH_KEYRING_VAULT=ON
  -DWITH_NUMA=ON
- -DWITH_PAM=ON
+ -DWITH_PAM=OFF
 ";
 
 CMAKE_PERCONA_80="

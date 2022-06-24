@@ -56,8 +56,8 @@ do
   fi
 done
 
-printf >>$OUTNAME "\nNull cherry-picked upstream commits:\n"
-printf >>$OUTNAME-jira "\n4. Null cherry-picked upstream commits:\n"
+printf >>$OUTNAME "\nSkipped upstream commits:\n"
+printf >>$OUTNAME-jira "\n4. Skipped upstream commits:\n"
 i=1
 for COMMIT in $(git rev-list --first-parent --topo-order --reverse $FBPROD2 ^$FBPROD1)
 do

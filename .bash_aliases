@@ -68,6 +68,14 @@ function git-split() {
   fi
 }
 
+function git-unmerge() {
+  if [ $# -lt 2 ]; then
+    echo usage: $0 [start_commit] [end_commit]
+  else
+    git log --pretty='%H' --topo-order $1..$2 --reverse | xargs git cherry-pick -m1
+  fi
+}
+
 
 function fb-worktree() { git fetch facebook && cd ../fb-8.0.13 && git checkout fb-8.0.13 && git pull && git worktree add -b $@ ../$@ facebook/fb-mysql-8.0.13; cd ../$@; }
 function fb-update() { MYPWD=`pwd`; git fetch facebook && cd ../fb-8.0.13 && git checkout fb-8.0.13 && git pull; cd $MYPWD; }

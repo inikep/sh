@@ -25,6 +25,7 @@ do
   git-check-files "\.gitignore" gitignore
   git-check-files "\.pem" cert
   git-check-files "\.travis\.yml" travis
+  git-check-files "\.circleci/config\.yml" circle
   git-check-files "azure-pipelines\.yml" azure
   git-check-files "\.cmake" cmake
   git-check-files "CMakeLists\.txt" cmake
@@ -44,6 +45,7 @@ do
   git-check-files "man/" man
   git-check-files "mysys/" mysys
   git-check-files "plugin/" plugin
+  git-check-files "router/" router
   git-check-files "scripts/" scripts
   git-check-files "sql/" sql
   git-check-files "sql-common/" sql-common

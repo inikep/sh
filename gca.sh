@@ -1,7 +1,7 @@
 #!/bin/bash
 
 if [ $# -lt 2 ]; then
-  echo "usage: $0 [branch_name] <lowest_version=5.6>"
+  echo "usage: $0 [branch_name] <lowest_version=5.7>"
   exit
 fi
 
@@ -10,7 +10,7 @@ set -u
 readonly BRANCH=$1
 readonly LOWEST_VERSION_ARG=$2
 
-readonly DEFAULT_LOWEST_VERSION="5.6"
+readonly DEFAULT_LOWEST_VERSION="5.7"
 
 if [ "$LOWEST_VERSION_ARG" = "" ]; then
     echo "Creating branches starting at $DEFAULT_LOWEST_VERSION"

@@ -17,7 +17,7 @@ function git-check-files() {
 i=1
 echo >$OUTCSV "Date;Author;Commit title;FB Tag;Commit;Link;Differential Revision;Modifications;Tags;Status;Additional Info;Failing MTR files;Modified MTR files"
 
-for COMMIT in $(git rev-list --topo-order --reverse $COMMIT2 ^$COMMIT1)
+for COMMIT in $(git rev-list --first-parent --topo-order --reverse $COMMIT2 ^$COMMIT1)
 do
   TAGS=""
   git-check-files "mysqld_safe\.sh" mysqld_safe
@@ -27,6 +27,7 @@ do
   git-check-files "\.travis\.yml" travis
   git-check-files "\.circleci/config\.yml" circle
   git-check-files "azure-pipelines\.yml" azure
+  git-check-files "\.cirrus\.yml" cirrus
   git-check-files "\.cmake" cmake
   git-check-files "CMakeLists\.txt" cmake
   git-check-files rocks rocks
@@ -44,7 +45,13 @@ do
   git-check-files "libmysql/" libmysql
   git-check-files "man/" man
   git-check-files "mysys/" mysys
+  git-check-files "mysql-test/suite/privacy/" privacy
+  git-check-files "mysql-test/suite/rpl_raft/" rpl_raft
+  git-check-files "mysql-test/suite/thread_pool/" thread_pool
+  git-check-files "percona-xtradb-cluster-tests" pxc-tests
+  git-check-files "packaging/" packaging
   git-check-files "plugin/" plugin
+  git-check-files "policy/" policy
   git-check-files "router/" router
   git-check-files "scripts/" scripts
   git-check-files "sql/" sql
@@ -57,12 +64,13 @@ do
   git-check-files "storage/perfschema" perfschema
   git-check-files "storage/temptable" temptable
   git-check-files "strings/" strings
+  git-check-files "support-files/" support-files
   git-check-files "mysql-test/" mtr
   git-check-files "vio/" vio
   git-check-files "unittest/" unittest
   if [[ "$TAGS" != "" ]]; then TAGS=${TAGS::-1}; fi
 
-  MTR_FILES=$(git diff --name-only $COMMIT~..$COMMIT | grep -P ."\.(result|test)" | cut -f 1 -d '.' | rev | cut -f 1 -d '/' | rev | sort | uniq | tr '\n' ',')
+  MTR_FILES=$(git diff --name-only $COMMIT~..$COMMIT | grep -P ."\.(result|test)" | cut -f 1 -d '.' | rev | cut -f 1 -d '/' | rev | sort | uniq | tr '\n' ' ')
   if [[ "$MTR_FILES" != "" ]]; then MTR_FILES=${MTR_FILES::-1}; fi
 
   PARAMS=$(git show -s $COMMIT --pretty="format:%cd;%an" --date=short)

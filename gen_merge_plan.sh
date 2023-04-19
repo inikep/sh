@@ -14,16 +14,7 @@ rm -f $OUTNAME;
 rm -f $OUTNAME-jira;
 
 printf >>$OUTNAME "https://github.com/facebook/mysql-5.6/compare/$FBPROD1...$FBPROD2\n\n"
-printf >>$OUTNAME "fb_prod_skip_commits.sh $FBPROD1 $FBPROD2 $PS_JIRA\n\n"
-printf >>$OUTNAME "fb_skip_commit.sh $FBPROD2 $PS_JIRA [commit]\n\n"
 printf >>$OUTNAME -- "------------------------------------------------------\n"
-printf >>$OUTNAME "Upstream commit ID : fb-mysql-5.6.35/XXXX\n"
-printf >>$OUTNAME "$PS_JIRA : Merge $FBPROD2\n"
-printf >>$OUTNAME "\n"
-printf >>$OUTNAME "This is a NULL cherry-pick to Percona Server 5.7 to create the commit placeholder for the corresponding upstream commit.\n"
-printf >>$OUTNAME "Reason: Patch not taken into Percona Server\n"
-printf >>$OUTNAME "Reason: Change already applied to source tree through another patch.\n"
-printf >>$OUTNAME "\n"
 printf >>$OUTNAME "git cherry-pick\n"
 printf >>$OUTNAME "git checkout HEAD . ; git status\n"
 printf >>$OUTNAME "git rm -f\n"
@@ -47,8 +38,8 @@ do
      ROCKS_FILES=`git diff --name-only $COMMIT~..$COMMIT`
      printf >>$OUTNAME "\nCOMMIT $i: $COMMIT $TITLE\n"
      printf >>$OUTNAME -- "------------------------------------------------------\n"
-     printf >>$OUTNAME "Upstream commit ID : fb-mysql-5.6.35/$COMMIT\n"
-     printf >>$OUTNAME "$PS_JIRA : Merge $FBPROD2\n\n"
+     printf >>$OUTNAME "Upstream commit ID: https://github.com/facebook/mysql-5.6/commit/$COMMIT\n"
+     printf >>$OUTNAME "$PS_JIRA: Merge $FBPROD2 (https://jira.percona.com/browse/$PS_JIRA)\n\n"
      printf >>$OUTNAME "Modified MTR files: $MTR_FILES\n\n"
      echo >>$OUTNAME "$ROCKS_FILES"
      echo >>$OUTNAME-jira "- [$COMMIT $TITLE|https://github.com/facebook/mysql-5.6/commit/$COMMIT]"
@@ -56,16 +47,20 @@ do
   fi
 done
 
+printf >>$OUTNAME "\nSkipped MyRocks commits:\n"
+printf >>$OUTNAME-jira "\n4. Skipped MyRocks commits:\n\n"
+
 printf >>$OUTNAME "\nSkipped upstream commits:\n"
-printf >>$OUTNAME-jira "\n4. Skipped upstream commits:\n"
+printf >>$OUTNAME-jira "\n5. Skipped upstream commits:\n"
 i=1
 for COMMIT in $(git rev-list --first-parent --topo-order --reverse $FBPROD2 ^$FBPROD1)
 do
   TITLE=$(git show -s --format=%s $COMMIT)
   ROCKS_FILES=`git diff --name-only $COMMIT~..$COMMIT | grep rocksdb`
   if [[ "$ROCKS_FILES" == "" ]]; then
-     echo >>$OUTNAME "COMMIT $i: $COMMIT $TITLE"
+     #echo >>$OUTNAME "COMMIT $i: $COMMIT $TITLE"
      echo >>$OUTNAME-jira "- [$COMMIT $TITLE|https://github.com/facebook/mysql-5.6/commit/$COMMIT]"
+     echo >>$OUTNAME-jira "- $COMMIT $TITLE"
      ((i=i+1))
   fi
 done

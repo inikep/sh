@@ -4,7 +4,7 @@ alias ssh14="ssh przemyslaw.skibinski@10.30.3.14 -i /home/przemek/.ssh/inikep.pr
 alias ssh117="ssh przemyslaw.skibinski@10.30.7.117 -i /home/przemek/.ssh/inikep.priv"
 alias ssh134="ssh przemyslaw.skibinski@10.30.7.134 -i /home/przemek/.ssh/inikep.priv"
 function sshini() { ssh przemyslaw.skibinski@$1 -i /home/przemek/.ssh/inikep.priv; }
-alias cf_on="git config --local include.path ../percona-8.0/.gitconfig"
+alias cf_on="git config --local include.path /data/mysql-server/percona-8.0/.gitconfig"
 alias cf_off="git config --local --unset include.path"
 alias git-clang-format="cf_off; git clang-format $@; cf_on"
 alias git-log="git log --oneline -10 $@"
@@ -27,6 +27,7 @@ alias   mtr-sanitize-old="$MTR_SANITIZE_OLD"
 alias   mtr-parallel-old="$MTR_PARALLEL_OLD"
 alias     mtr-single-old="$MTR_BASE_OLD"
 alias     mtr-single="$MTR_BASE"
+alias      mtr-zenfs="sudo $MTR_BASE --mysqld=--rocksdb_fs_uri=zenfs://dev:nvme1n2"
 alias   mtr-jemalloc="$MTR_BASE --mysqld-env=LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so:/usr/lib/x86_64-linux-gnu/libeatmydata.so"
 alias   mtr-valgrind="$MTR_PARALLEL --shutdown-timeout=150 --valgrind --valgrind-clients --valgrind-option=--num-callers=32 --valgrind-option=--show-leak-kinds=all --valgrind-option=--leak-check=full"
 alias     mtr-massif="$MTR_BASE --shutdown-timeout=150 --valgrind --valgrind-clients --valgrind-option=--tool=massif"
@@ -38,6 +39,7 @@ alias   mtr-sanitize="$MTR_SANITIZE --mysqld-env=LD_PRELOAD=/usr/lib/x86_64-linu
 alias  mtr-sanitize5="$MTR_SANITIZE --mysqld-env=LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libasan.so.5:/usr/lib/x86_64-linux-gnu/libeatmydata.so"
 alias  mtr-sanitize6="$MTR_SANITIZE --mysqld-env=LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libasan.so.6:/usr/lib/x86_64-linux-gnu/libeatmydata.so"
 alias  mtr-sanitize8="$MTR_SANITIZE --mysqld-env=LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libasan.so.8:/usr/lib/x86_64-linux-gnu/libeatmydata.so"
+
 function mtr-result-files() {
   if [ $# -lt 1 ]; then
     echo "usage: $0 [commit1] <commit2>"
@@ -52,6 +54,7 @@ function count-lines() { cat $1 | rev | cut -f 1,2 -d '.' | rev | sort | uniq -c
 function git-worktree() { git worktree add -b $1 ../$1 $2 $3 $4; cd ../$1; }
 function git-mergetool() { git checkout --conflict=merge $1; git mergetool $1; }
 function git-commitfile() { git add $1; git commit -m"$1"; }
+function git-diff-files() { git diff $1~..$1 $2 $3 $4; }
 function git-squash() {
   if [ $# -lt 1 ]; then
     echo usage: $0 [num_of_commits]

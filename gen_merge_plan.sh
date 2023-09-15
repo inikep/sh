@@ -60,7 +60,6 @@ do
   if [[ "$ROCKS_FILES" == "" ]]; then
      #echo >>$OUTNAME "COMMIT $i: $COMMIT $TITLE"
      echo >>$OUTNAME-jira "- [$COMMIT $TITLE|https://github.com/facebook/mysql-5.6/commit/$COMMIT]"
-     echo >>$OUTNAME-jira "- $COMMIT $TITLE"
      ((i=i+1))
   fi
 done

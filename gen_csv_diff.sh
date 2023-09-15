@@ -45,12 +45,14 @@ do
   git-check-files "libmysql/" libmysql
   git-check-files "man/" man
   git-check-files "mysys/" mysys
+  git-check-files "mysql-test/suite/clone/" clone
   git-check-files "mysql-test/suite/privacy/" privacy
   git-check-files "mysql-test/suite/rpl_raft/" rpl_raft
   git-check-files "mysql-test/suite/thread_pool/" thread_pool
   git-check-files "percona-xtradb-cluster-tests" pxc-tests
   git-check-files "packaging/" packaging
   git-check-files "plugin/" plugin
+  git-check-files "plugin/clone" plugin_clone
   git-check-files "policy/" policy
   git-check-files "router/" router
   git-check-files "scripts/" scripts

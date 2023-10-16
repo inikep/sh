@@ -11,7 +11,7 @@ BUILDDIR=${BUILDDIR:-~}/$SERVER_BUILD
 BENCH_PATH=${BENCH_PATH:-~/bench}
 ROOTDIR=$BENCH_PATH/$SERVER_BUILD
 MYSQLDIR=$ROOTDIR/mysqld
-DATADIR=${DATADIR:-${ROOTDIR}/master}
+DATADIR=${DATADIR:-${ROOTDIR}/data-${FILE_SYSTEM}}
 SYSBENCH_DIR=${SYSBENCH_DIR:-/usr/local}
 ZENFS_DEV=${ZENFS_DEV:-nvme1n2}
 DISKNAME=${DISKNAME:-nvme0n1}
@@ -185,8 +185,8 @@ print_database_size(){
     if [ "$PRINT_FILES" == "1" ]; then ls -alR $DATADIR >>$RESULTS_FILE; fi
     FILE_COUNT=`ls -aR $DATADIR | wc -l`
   fi
-  echo "- Size of RocksDB database is $DATA_SIZE MB in $FILE_COUNT files"
-  echo "- Size of RocksDB database is $DATA_SIZE MB in $FILE_COUNT files" >>$RESULTS_FILE
+  echo "- Size of database is $DATA_SIZE MB in $FILE_COUNT files"
+  echo "- Size of database is $DATA_SIZE MB in $FILE_COUNT files" >>$RESULTS_FILE
 }
 
 # generate_name [prefix] [memory]
@@ -237,7 +237,7 @@ prepare_db(){
   echo "- Populate database with sysbench with ${NTABS}x$NROWS rows and $THREADS threads at $(date '+%H:%M:%S')" >>$RESULTS_DIR/$RES_PREPARE
 #  (time $SYSBENCH --threads=$THREADS /usr/local/share/sysbench/oltp_read_write.lua prepare --rand-type=uniform --range-size=$RANGE_SIZE >>$RESULTS_DIR/$RES_PREPARE) 2>>$RESULTS_DIR/$RES_PREPARE
   cd $RESULTS_DIR
-  time { (time bash run.sh $NTABS $NROWS 0 $dbAndCreds 1 0 setup 100 $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $DATADIR $DISKNAME $USE_PK 0 $BULK_SYNC_SIZE $THREADS) 2>>$RESULTS_DIR/$RES_PREPARE; }
+  time { (time bash run.sh $NTABS $NROWS 0 $dbAndCreds 1 0 setup $RANGE_SIZE $MYSQLDIR/bin/mysql $TABLE_OPTIONS $SYSBENCH_DIR $DATADIR $DISKNAME $USE_PK 0 $BULK_SYNC_SIZE $THREADS) 2>>$RESULTS_DIR/$RES_PREPARE; }
   STATUS=$?
   cat sb.prepare.o.setup.range100.pk* >>$RESULTS_DIR/$RES_PREPARE
   free -m >>$RESULTS_DIR/$RES_PREPARE

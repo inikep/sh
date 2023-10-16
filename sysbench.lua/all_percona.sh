@@ -30,8 +30,9 @@ run_workload() {
 
 # prepare
 preparesecs=$((readsecs / 4))
+RANGE_SIZE=100
 
-run_workload point-query.pre  100 $preparesecs
+run_workload point-query.pre  $RANGE_SIZE $preparesecs
 
 for range in 10 100 10000 ; do
 run_workload read-only.pre $range $preparesecs
@@ -39,11 +40,11 @@ done
 
 
 # main tests
-run_workload update-index     100 $writesecs
-run_workload update-nonindex  100 $writesecs
-run_workload update-one       100 $writesecs
-run_workload update-zipf      100 $writesecs
-run_workload write-only       100 $writesecs
+run_workload update-index     $RANGE_SIZE $writesecs
+run_workload update-nonindex  $RANGE_SIZE $writesecs
+run_workload update-one       $RANGE_SIZE $writesecs
+run_workload update-zipf      $RANGE_SIZE $writesecs
+run_workload write-only       $RANGE_SIZE $writesecs
 
 for range in 10 100 ; do
 run_workload read-write    $range $writesecs
@@ -53,6 +54,6 @@ for range in 10 100 10000 ; do
 run_workload read-only     $range $readsecs
 done
 
-run_workload point-query      100 $readsecs
-run_workload delete           100 $writesecs
-run_workload insert           100 $insertsecs
+run_workload point-query      $RANGE_SIZE $readsecs
+run_workload delete           $RANGE_SIZE $writesecs
+run_workload insert           $RANGE_SIZE $insertsecs

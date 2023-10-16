@@ -50,6 +50,12 @@ function mtr-result-files() {
   fi
 }
 
+function drop-caches() {
+  sync
+  sudo sh -c 'sysctl -q -w vm.drop_caches=3'
+  sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'
+}
+
 function count-lines() { cat $1 | rev | cut -f 1,2 -d '.' | rev | sort | uniq -c | sort -nr > $1_sorted; }
 function git-worktree() { git worktree add -b $1 ../$1 $2 $3 $4; cd ../$1; }
 function git-mergetool() { git checkout --conflict=merge $1; git mergetool $1; }

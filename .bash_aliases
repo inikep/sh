@@ -1,5 +1,5 @@
-alias vpn="sudo openvpn --config /home/przemek/.ssh/client.ovpn --auth-retry interact --mute-replay-warnings"
-alias ssh13="ssh przemyslaw.skibinski@10.30.3.13 -i /home/przemek/.ssh/inikep.priv"
+alias vpn-import="sudo openvpn3 config-import --config /home/przemek/.ssh/ovpn/profile-902.ovpn"
+alias vpn-start="sudo openvpn3 session-start --config /home/przemek/.ssh/ovpn/profile-902.ovpn"
 alias ssh14="ssh przemyslaw.skibinski@10.30.3.14 -i /home/przemek/.ssh/inikep.priv"
 alias ssh117="ssh przemyslaw.skibinski@10.30.7.117 -i /home/przemek/.ssh/inikep.priv"
 alias ssh134="ssh przemyslaw.skibinski@10.30.7.134 -i /home/przemek/.ssh/inikep.priv"

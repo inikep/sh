@@ -11,26 +11,22 @@ PS_JIRA=$3
 OUTNAME=$4/$2-merge-plan
 
 rm -f $OUTNAME;
-rm -f $OUTNAME-jira;
+rm -f $OUTNAME-markdown;
 
 printf >>$OUTNAME "https://github.com/facebook/mysql-5.6/compare/$FBPROD1...$FBPROD2\n\n"
 printf >>$OUTNAME -- "------------------------------------------------------\n"
-printf >>$OUTNAME "git cherry-pick\n"
-printf >>$OUTNAME "git checkout HEAD . ; git status\n"
-printf >>$OUTNAME "git rm -f\n"
-printf >>$OUTNAME "git cherry-pick --continue\n"
-printf >>$OUTNAME "git commit --allow-empty\n"
-printf >>$OUTNAME -- "------------------------------------------------------\n"
 printf >>$OUTNAME "\nCherry-pick the following commits from \`$FBPROD2\`:\n"
 
-printf >>$OUTNAME-jira "1. Update rocksdb submodule to [XXXXXXXXX Fix build |https://github.com/facebook/rocksdb/commit/XXXXXXXXX] (v5.8-YYYYYYYYY)\n\n"
-printf >>$OUTNAME-jira "2. Add new MyRocks variables \`aaa\` and \`bbb\`.\n\n"
-printf >>$OUTNAME-jira "3. Cherry-pick the following commits from \`$FBPROD2\`:\n"
+printf >>$OUTNAME-markdown "1. Update rocksdb submodule to [8.5.1](https://github.com/facebook/rocksdb/commit/XXXXXXXXX)\n\n"
+printf >>$OUTNAME-markdown "2. Add new MyRocks variables \`aaa\` and \`bbb\`.\n\n"
+printf >>$OUTNAME-markdown "3. Cherry-pick the following commits from \`$FBPROD2\`:\n"
 
 i=1
-for COMMIT in $(git rev-list --first-parent --topo-order --reverse $FBPROD2 ^$FBPROD1)
+for COMMIT in $(git rev-list --first-parent --topo-order --reverse --abbrev-commit $FBPROD2 ^$FBPROD1)
 do
   TITLE=$(git show -s --format=%s $COMMIT)
+  TITLE=${TITLE//]/)}
+  TITLE=${TITLE//[/(}
   ROCKS_FILES=`git diff --name-only $COMMIT~..$COMMIT | grep rocksdb`
   if [[ "$ROCKS_FILES" != "" ]]; then
      MTR_FILES=$(git diff --name-only $COMMIT~..$COMMIT | grep -P ."\.(result|test)" | cut -f 1 -d '.' | rev | cut -f 1 -d '/' | rev | sort | uniq | tr '\n' ' ')
@@ -42,24 +38,26 @@ do
      printf >>$OUTNAME "$PS_JIRA: Merge $FBPROD2 (https://jira.percona.com/browse/$PS_JIRA)\n\n"
      printf >>$OUTNAME "Modified MTR files: $MTR_FILES\n\n"
      echo >>$OUTNAME "$ROCKS_FILES"
-     echo >>$OUTNAME-jira "- [$COMMIT $TITLE|https://github.com/facebook/mysql-5.6/commit/$COMMIT]"
+     echo >>$OUTNAME-markdown "- [$COMMIT $TITLE](https://github.com/facebook/mysql-5.6/commit/$COMMIT)"
      ((i=i+1))
   fi
 done
 
 printf >>$OUTNAME "\nSkipped MyRocks commits:\n"
-printf >>$OUTNAME-jira "\n4. Skipped MyRocks commits:\n\n"
+printf >>$OUTNAME-markdown "\n4. Skipped MyRocks commits:\n\n"
 
 printf >>$OUTNAME "\nSkipped upstream commits:\n"
-printf >>$OUTNAME-jira "\n5. Skipped upstream commits:\n"
+printf >>$OUTNAME-markdown "\n5. Skipped upstream commits:\n"
 i=1
-for COMMIT in $(git rev-list --first-parent --topo-order --reverse $FBPROD2 ^$FBPROD1)
+for COMMIT in $(git rev-list --first-parent --topo-order --reverse --abbrev-commit $FBPROD2 ^$FBPROD1)
 do
   TITLE=$(git show -s --format=%s $COMMIT)
+  TITLE=${TITLE//]/)}
+  TITLE=${TITLE//[/(}
   ROCKS_FILES=`git diff --name-only $COMMIT~..$COMMIT | grep rocksdb`
   if [[ "$ROCKS_FILES" == "" ]]; then
      #echo >>$OUTNAME "COMMIT $i: $COMMIT $TITLE"
-     echo >>$OUTNAME-jira "- [$COMMIT $TITLE|https://github.com/facebook/mysql-5.6/commit/$COMMIT]"
+     echo >>$OUTNAME-markdown "- [$COMMIT $TITLE](https://github.com/facebook/mysql-5.6/commit/$COMMIT)"
      ((i=i+1))
   fi
 done

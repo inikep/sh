@@ -80,7 +80,7 @@ function sync_relay_log() {
   while true; do
     local SECS_BEHIND_SOURCE=$(mysql_client $SLAVE_HOST $SLAVE_PORT "SHOW REPLICA STATUS\G" | grep "Seconds_Behind_Source:" | awk '{print $2}')
     echo -n "$SECS_BEHIND_SOURCE "
-    if [[ "$SECS_BEHIND_SOURCE" == "0" ]]; then break; fi
+    if [[ "$SECS_BEHIND_SOURCE" == "0" ]]; then echo; break; fi
     sleep 1
   done
 }
@@ -95,7 +95,7 @@ function run_sysbench_prepare() {
   local LOG_SYSBENCH=$LOG_PATH/sysbench_prepare.log
   # --time=$SYSBENCH_RUN_TIME
   local SYSBENCH_PARAMS="--table-size=$NUM_ROWS --tables=$NUM_TABLES --threads=$NUM_THREADS --mysql-db=$DATABASE --mysql-user=$MYSQL_USER --mysql-socket=$MASTER_SOCKET --report-interval=10 --db-ps-mode=disable --percentile=99 $MORE_PARAMS"
-  echo "- Starting sysbench with options $SYSBENCH_PARAMS" | tee -a $LOG_SYSBENCH
+  echo "- Starting sysbench with options $SYSBENCH_PARAMS" | tee $LOG_SYSBENCH
   time sysbench $SYSBENCH_DIR/sysbench/oltp_write_only.lua $SYSBENCH_PARAMS prepare 2>&1 | tee -a $LOG_SYSBENCH
 }
 
@@ -146,30 +146,30 @@ function check_slave() {
 function bench_slave() {
   if [ $# -lt 1 ]; then echo "Usage: bench_slave <MORE_PARAMS>"; return 1; fi
   local LOG_BENCH=$LOG_PATH/bench.log
-  start_slave $1 | tee -a $LOG_BENCH
-  (time ( mysql_client $SLAVE_HOST $SLAVE_PORT "START SLAVE"; sync_slave_sql; sync_relay_log )) | tee -a $LOG_BENCH
-  stop_slave | tee -a $LOG_BENCH
+  start_slave $1 2>&1 | tee -a $LOG_BENCH
+  (time ( mysql_client $SLAVE_HOST $SLAVE_PORT "START SLAVE"; sync_slave_sql; sync_relay_log ) 2>&1) | tee -a $LOG_BENCH
+  stop_slave 2>&1 | tee -a $LOG_BENCH
 }
 
 if [ ! -x $BUILD_PATH/bin/mysqld ]; then usage "ERROR: Executable $BUILD_PATH/bin/mysqld not found."; return 1; fi
 if [ ! -f $CONFIG_FILE ]; then usage "ERROR: Config file $CONFIG_FILE not found."; return 1; fi
 
-WORKSPACE=${PWD}
+WORKSPACE=${WORKSPACE:-$PWD}
 LOG_PATH=$WORKSPACE
 DATABASE=sb
 MYSQL_USER=root
-NROWS=1000000
-NTHREADS=16
+NROWS=${NROWS:-1000000}
+NTHREADS=${NTHREADS:-16}
 
-MASTER_HOST=127.0.0.1
-MASTER_PORT=3333
-MASTER_SOCKET=/tmp/mysql_master.sock
-MASTER_DD=${WORKSPACE}/dd_master
+MASTER_HOST=${MASTER_HOST:-127.0.0.1}
+MASTER_PORT=${MASTER_PORT:-3333}
+MASTER_SOCKET=${MASTER_SOCKET:-/tmp/mysql_master.sock}
+MASTER_DD=${MASTER_DD:-${WORKSPACE}/dd_master}
 
-SLAVE_HOST=127.0.0.1
-SLAVE_PORT=4444
-SLAVE_SOCKET=/tmp/mysql_slave.sock
-SLAVE_DD=${WORKSPACE}/dd_slave
+SLAVE_HOST=${SLAVE_HOST:-127.0.0.1}
+SLAVE_PORT=${SLAVE_PORT:-4444}
+SLAVE_SOCKET=${SLAVE_SOCKET:-/tmp/mysql_slave.sock}
+SLAVE_DD=${SLAVE_DD:-${WORKSPACE}/dd_slave}
 
 
 echo "Using WORKSPACE=$WORKSPACE NROWS=$NROWS NTHREADS=$NTHREADS BUILD_PATH=$BUILD_PATH CONFIG_FILE=$CONFIG_FILE"

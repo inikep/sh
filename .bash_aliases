@@ -50,10 +50,26 @@ function mtr-result-files() {
   fi
 }
 
+# INST_LIST="c5.4xlarge c6i.8xlarge" REGION=us-west-2 aws-prices
+function aws-prices() {
+  for inst in ${INST_LIST};
+  do
+    echo $inst;
+    sudo docker run --rm ghcr.io/alexei-led/spotinfo --type="$inst" --region="${REGION}" --os=linux --output=text --sort=interruption;
+    /usr/local/bin/aws ec2 --region="${REGION}" describe-spot-price-history --instance-types "$inst" --product-description "Linux/UNIX (Amazon VPC)" --start-time $(date +%s) --query SpotPriceHistory[].[InstanceType,AvailabilityZone,SpotPrice] --output text;
+  done
+}
+
 function drop-caches() {
   sync
   sudo sh -c 'sysctl -q -w vm.drop_caches=3'
   sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'
+}
+
+function restore-cpu-config() {
+  sudo sh -c "echo 1 > /sys/devices/system/cpu/cpufreq/boost"
+  sudo sh -c "echo 2 > /proc/sys/kernel/randomize_va_space"
+  sudo cpupower frequency-set -g schedutil
 }
 
 function count-lines() { cat $1 | rev | cut -f 1,2 -d '.' | rev | sort | uniq -c | sort -nr > $1_sorted; }

@@ -86,15 +86,17 @@ function sync_relay_log() {
 }
 
 function run_sysbench_prepare() {
-  if [ $# -lt 3 ]; then echo "Usage: run_sysbench <NUM_TABLES> <NUM_ROWS> <NUM_THREADS> <MORE_PARAMS>"; return 1; fi
-  local NUM_TABLES=$1
-  local NUM_ROWS=$2
-  local NUM_THREADS=$3
-  local MORE_PARAMS=$4
+  if [ $# -lt 3 ]; then echo "Usage: run_sysbench <DATABASE> <NUM_TABLES> <NUM_ROWS> <NUM_THREADS> <SOCKET> <LOG_SYSBENCH> <MORE_PARAMS>"; return 1; fi
+  local DATABASE=$1
+  local NUM_TABLES=$2
+  local NUM_ROWS=$3
+  local NUM_THREADS=$4
+  local SOCKET=$5
+  local LOG_SYSBENCH=$6
+  local MORE_PARAMS=$7
   local SYSBENCH_DIR=${SYSBENCH_DIR:-/usr/local/share}
-  local LOG_SYSBENCH=$LOG_PATH/sysbench_prepare.log
   # --time=$SYSBENCH_RUN_TIME
-  local SYSBENCH_PARAMS="--table-size=$NUM_ROWS --tables=$NUM_TABLES --threads=$NUM_THREADS --mysql-db=$DATABASE --mysql-user=$MYSQL_USER --mysql-socket=$MASTER_SOCKET --report-interval=10 --db-ps-mode=disable --percentile=99 $MORE_PARAMS"
+  local SYSBENCH_PARAMS="--table-size=$NUM_ROWS --tables=$NUM_TABLES --threads=$NUM_THREADS --mysql-db=$DATABASE --mysql-user=$MYSQL_USER --mysql-socket=$SOCKET --report-interval=10 --db-ps-mode=disable --percentile=99 $MORE_PARAMS"
   echo "- Starting sysbench with options $SYSBENCH_PARAMS" | tee $LOG_SYSBENCH
   time sysbench $SYSBENCH_DIR/sysbench/oltp_write_only.lua $SYSBENCH_PARAMS prepare 2>&1 | tee -a $LOG_SYSBENCH
 }
@@ -122,7 +124,8 @@ function populate_master() {
   mysql_client $MASTER_HOST $MASTER_PORT "FLUSH PRIVILEGES"
   mysql_client $MASTER_HOST $MASTER_PORT "RESET MASTER"
   mysql_client $MASTER_HOST $MASTER_PORT "DROP DATABASE IF EXISTS $DATABASE; CREATE DATABASE $DATABASE;"
-  run_sysbench_prepare $NTHREADS $NROWS $NTHREADS
+  run_sysbench_prepare $DATABASE $NTHREADS $NROWS $NTHREADS $MASTER_SOCKET $LOG_PATH/sysbench_prepare.log
+
   stop_master
 }
 

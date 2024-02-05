@@ -112,6 +112,7 @@ function stop_master() {
 
 function check_master() {
   mysql_client $MASTER_HOST $MASTER_PORT "select count(*) from $DATABASE.sbtest1"
+  mysql_client $MASTER_HOST $MASTER_PORT "select @@innodb_flush_method"
 }
 
 function populate_master() {
@@ -144,13 +145,19 @@ function stop_slave() {
 
 function check_slave() {
   mysql_client $SLAVE_HOST $SLAVE_PORT "select count(*) from $DATABASE.sbtest1"
+  mysql_client $SLAVE_HOST $SLAVE_PORT "select @@innodb_flush_method"
 }
 
 function bench_slave() {
   if [ $# -lt 1 ]; then echo "Usage: bench_slave <MORE_PARAMS>"; return 1; fi
   local LOG_BENCH=$LOG_PATH/bench.log
+  local SLAVE_DATABASE=sb_slave
   start_slave $1 2>&1 | tee -a $LOG_BENCH
-  (time ( mysql_client $SLAVE_HOST $SLAVE_PORT "START SLAVE"; sync_slave_sql; sync_relay_log ) 2>&1) | tee -a $LOG_BENCH
+  mysql_client $SLAVE_HOST $SLAVE_PORT "DROP DATABASE IF EXISTS $SLAVE_DATABASE; CREATE DATABASE $SLAVE_DATABASE;"
+  mysql_client $SLAVE_HOST $SLAVE_PORT "START SLAVE";
+  run_sysbench_prepare $SLAVE_DATABASE 4 $NROWS $NTHREADS $SLAVE_SOCKET $LOG_PATH/slave_prepare.log &
+  (time ( sync_slave_sql; sync_relay_log ) 2>&1) | tee -a $LOG_BENCH
+  mysql_client $SLAVE_HOST $SLAVE_PORT "select count(*) from $SLAVE_DATABASE.sbtest1" | tee -a $LOG_BENCH
   stop_slave 2>&1 | tee -a $LOG_BENCH
 }
 

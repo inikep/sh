@@ -102,7 +102,8 @@ function run_sysbench_prepare() {
 }
 
 function start_master() {
-  start_mysqld $MASTER_DD $MASTER_SOCKET $MASTER_PORT $LOG_PATH/log_master.err "--log-bin=master-bin --server_id=1"
+  local MORE_PARAMS=$1
+  start_mysqld $MASTER_DD $MASTER_SOCKET $MASTER_PORT $LOG_PATH/log_master.err "--log-bin=master-bin --server_id=1 $MORE_PARAMS"
 }
 
 function stop_master() {
@@ -116,8 +117,9 @@ function check_master() {
 }
 
 function populate_master() {
+  local MORE_PARAMS=$1
   init_datadir $MASTER_DD $LOG_PATH/init_master.err
-  start_master
+  start_master "$MORE_PARAMS"
   mysql_client $MASTER_HOST $MASTER_PORT "CREATE USER 'repl'@'localhost' IDENTIFIED WITH mysql_native_password BY 'slavepass'"
   mysql_client $MASTER_HOST $MASTER_PORT "GRANT REPLICATION SLAVE ON *.* TO 'repl'@'localhost'"
   mysql_client $MASTER_HOST $MASTER_PORT "CREATE USER 'repl'@'127.0.0.1' IDENTIFIED WITH mysql_native_password BY 'slavepass'"
@@ -152,7 +154,7 @@ function bench_slave() {
   if [ $# -lt 1 ]; then echo "Usage: bench_slave <MORE_PARAMS>"; return 1; fi
   local LOG_BENCH=$LOG_PATH/bench.log
   local SLAVE_DATABASE=sb_slave
-  start_slave $1 2>&1 | tee -a $LOG_BENCH
+  start_slave "$1" 2>&1 | tee -a $LOG_BENCH
   mysql_client $SLAVE_HOST $SLAVE_PORT "DROP DATABASE IF EXISTS $SLAVE_DATABASE; CREATE DATABASE $SLAVE_DATABASE;"
   mysql_client $SLAVE_HOST $SLAVE_PORT "START SLAVE";
   run_sysbench_prepare $SLAVE_DATABASE 4 $NROWS $NTHREADS $SLAVE_SOCKET $LOG_PATH/slave_prepare.log &

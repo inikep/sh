@@ -17,7 +17,7 @@ function init_datadir() {
   local BASEDIR=$BUILD_PATH
   rm -rf $DATADIR
   mkdir $DATADIR
-  $BASEDIR/bin/mysqld --no-defaults --initialize-insecure --basedir=$BASEDIR --datadir=$DATADIR --log-error-verbosity=3 >$LOG_INIT 2>&1
+  $MYSQLD_BIN --no-defaults --initialize-insecure --basedir=$BASEDIR --datadir=$DATADIR --log-error-verbosity=3 >$LOG_INIT 2>&1
 }
 
 function start_mysqld() {
@@ -33,7 +33,7 @@ function start_mysqld() {
   # --default-authentication-plugin=mysql_native_password --gtid_mode=ON --enforce_gtid_consistency=ON
   local MYSQLD_PARAMS="--defaults-file=$DEFAULTS_FILE --basedir=$BASEDIR --datadir=$DATADIR --socket=$SOCKET --port=$PORT $MORE_PARAMS --log-error=$LOG_ERROR"
   echo "- Starting Percona Server with options $MYSQLD_PARAMS" | tee -a $LOG_ERROR
-  $BASEDIR/bin/mysqld $MYSQLD_PARAMS >>$LOG_ERROR 2>&1 &
+  $MYSQLD_BIN $MYSQLD_PARAMS >>$LOG_ERROR 2>&1 &
 
   for X in $(seq 0 ${START_TIMEOUT}); do
     sleep 1
@@ -63,12 +63,20 @@ function mysql_client() {
   ${BUILD_PATH}/bin/mysql -u$MYSQL_USER --host=$HOST --port=$PORT -e "$COMMAND"
 }
 
+function mysql_client_master() {
+  mysql_client $MASTER_HOST $MASTER_PORT "$1"
+}
+
+function mysql_client_slave() {
+  mysql_client $SLAVE_HOST $SLAVE_PORT "$1"
+}
+
 function sync_slave_sql() {
-  local MASTER_FILE=$(mysql_client $MASTER_HOST $MASTER_PORT "SHOW MASTER STATUS\G" | grep "File:" | awk '{print $2}')
-  local MASTER_POS=$(mysql_client $MASTER_HOST $MASTER_PORT "SHOW MASTER STATUS\G" | grep "Position:" | awk '{print $2}')
+  local MASTER_FILE=$(mysql_client_master "SHOW MASTER STATUS\G" | grep "File:" | awk '{print $2}')
+  local MASTER_POS=$(mysql_client_master "SHOW MASTER STATUS\G" | grep "Position:" | awk '{print $2}')
   while true; do
-    local SLAVE_FILE=$(mysql_client $SLAVE_HOST $SLAVE_PORT "SHOW REPLICA STATUS\G" | grep "Source_Log_File:" | head -1 | awk '{print $2}')
-    local SLAVE_POS=$(mysql_client $SLAVE_HOST $SLAVE_PORT "SHOW REPLICA STATUS\G" | grep "Read_Source_Log_Pos:" | awk '{print $2}')
+    local SLAVE_FILE=$(mysql_client_slave "SHOW REPLICA STATUS\G" | grep "Source_Log_File:" | head -1 | awk '{print $2}')
+    local SLAVE_POS=$(mysql_client_slave "SHOW REPLICA STATUS\G" | grep "Read_Source_Log_Pos:" | awk '{print $2}')
     echo "MASTER_POS=$MASTER_FILE/$MASTER_POS SLAVE_POS=$SLAVE_FILE/$SLAVE_POS"
     if [[ "$MASTER_FILE" == "$SLAVE_FILE" ]] && [ "$SLAVE_POS" -ge "$MASTER_POS" ]; then break; fi
     sleep 1
@@ -78,7 +86,7 @@ function sync_slave_sql() {
 function sync_relay_log() {
   echo -n "SECS_BEHIND_SOURCE="
   while true; do
-    local SECS_BEHIND_SOURCE=$(mysql_client $SLAVE_HOST $SLAVE_PORT "SHOW REPLICA STATUS\G" | grep "Seconds_Behind_Source:" | awk '{print $2}')
+    local SECS_BEHIND_SOURCE=$(mysql_client_slave "SHOW REPLICA STATUS\G" | grep "Seconds_Behind_Source:" | awk '{print $2}')
     echo -n "$SECS_BEHIND_SOURCE "
     if [[ "$SECS_BEHIND_SOURCE" == "0" ]]; then echo; break; fi
     sleep 1
@@ -112,21 +120,21 @@ function stop_master() {
 }
 
 function check_master() {
-  mysql_client $MASTER_HOST $MASTER_PORT "select count(*) from $DATABASE.sbtest1"
-  mysql_client $MASTER_HOST $MASTER_PORT "select @@innodb_flush_method"
+  mysql_client_master "select count(*) from $DATABASE.sbtest1"
+  mysql_client_master "select @@innodb_flush_method"
 }
 
 function populate_master() {
   local MORE_PARAMS=$1
   init_datadir $MASTER_DD $LOG_PATH/init_master.err
   start_master "$MORE_PARAMS"
-  mysql_client $MASTER_HOST $MASTER_PORT "CREATE USER 'repl'@'localhost' IDENTIFIED WITH mysql_native_password BY 'slavepass'"
-  mysql_client $MASTER_HOST $MASTER_PORT "GRANT REPLICATION SLAVE ON *.* TO 'repl'@'localhost'"
-  mysql_client $MASTER_HOST $MASTER_PORT "CREATE USER 'repl'@'127.0.0.1' IDENTIFIED WITH mysql_native_password BY 'slavepass'"
-  mysql_client $MASTER_HOST $MASTER_PORT "GRANT REPLICATION SLAVE ON *.* TO 'repl'@'127.0.0.1'"
-  mysql_client $MASTER_HOST $MASTER_PORT "FLUSH PRIVILEGES"
-  mysql_client $MASTER_HOST $MASTER_PORT "RESET MASTER"
-  mysql_client $MASTER_HOST $MASTER_PORT "DROP DATABASE IF EXISTS $DATABASE; CREATE DATABASE $DATABASE;"
+  mysql_client_master "CREATE USER 'repl'@'localhost' IDENTIFIED WITH mysql_native_password BY 'slavepass'"
+  mysql_client_master "GRANT REPLICATION SLAVE ON *.* TO 'repl'@'localhost'"
+  mysql_client_master "CREATE USER 'repl'@'127.0.0.1' IDENTIFIED WITH mysql_native_password BY 'slavepass'"
+  mysql_client_master "GRANT REPLICATION SLAVE ON *.* TO 'repl'@'127.0.0.1'"
+  mysql_client_master "FLUSH PRIVILEGES"
+  mysql_client_master "RESET MASTER"
+  mysql_client_master "DROP DATABASE IF EXISTS $DATABASE; CREATE DATABASE $DATABASE;"
   run_sysbench_prepare $DATABASE $NTHREADS $NROWS $NTHREADS $MASTER_SOCKET $LOG_PATH/sysbench_prepare.log
 
   stop_master
@@ -137,7 +145,7 @@ function start_slave() {
   local MORE_PARAMS=$1
   init_datadir $SLAVE_DD $LOG_PATH/init_slave.err
   start_mysqld $SLAVE_DD $SLAVE_SOCKET $SLAVE_PORT $LOG_PATH/log_slave.err "--log-bin=slave-bin --server_id=2 --skip_slave_start $MORE_PARAMS"
-  mysql_client $SLAVE_HOST $SLAVE_PORT "CHANGE MASTER TO MASTER_HOST='localhost', MASTER_PORT=$MASTER_PORT, MASTER_USER='repl', MASTER_PASSWORD='slavepass', MASTER_LOG_FILE='master-bin.000001', MASTER_LOG_POS=0"
+  mysql_client_slave "CHANGE MASTER TO MASTER_HOST='localhost', MASTER_PORT=$MASTER_PORT, MASTER_USER='repl', MASTER_PASSWORD='slavepass', MASTER_LOG_FILE='master-bin.000001', MASTER_LOG_POS=0"
 }
 
 function stop_slave() {
@@ -146,8 +154,8 @@ function stop_slave() {
 }
 
 function check_slave() {
-  mysql_client $SLAVE_HOST $SLAVE_PORT "select count(*) from $DATABASE.sbtest1"
-  mysql_client $SLAVE_HOST $SLAVE_PORT "select @@innodb_flush_method"
+  mysql_client_slave "select count(*) from $DATABASE.sbtest1"
+  mysql_client_slave "select @@innodb_flush_method"
 }
 
 function bench_slave() {
@@ -155,15 +163,22 @@ function bench_slave() {
   local LOG_BENCH=$LOG_PATH/bench.log
   local SLAVE_DATABASE=sb_slave
   start_slave "$1" 2>&1 | tee -a $LOG_BENCH
-  mysql_client $SLAVE_HOST $SLAVE_PORT "DROP DATABASE IF EXISTS $SLAVE_DATABASE; CREATE DATABASE $SLAVE_DATABASE;"
-  mysql_client $SLAVE_HOST $SLAVE_PORT "START SLAVE";
+  mysql_client_slave "DROP DATABASE IF EXISTS $SLAVE_DATABASE; CREATE DATABASE $SLAVE_DATABASE;"
+  mysql_client_slave "START SLAVE";
   run_sysbench_prepare $SLAVE_DATABASE 4 $NROWS $NTHREADS $SLAVE_SOCKET $LOG_PATH/slave_prepare.log &
   (time ( sync_slave_sql; sync_relay_log ) 2>&1) | tee -a $LOG_BENCH
-  mysql_client $SLAVE_HOST $SLAVE_PORT "select count(*) from $SLAVE_DATABASE.sbtest1" | tee -a $LOG_BENCH
+  mysql_client_slave "select count(*) from $SLAVE_DATABASE.sbtest1" | tee -a $LOG_BENCH
   stop_slave 2>&1 | tee -a $LOG_BENCH
 }
 
-if [ ! -x $BUILD_PATH/bin/mysqld ]; then usage "ERROR: Executable $BUILD_PATH/bin/mysqld not found."; return 1; fi
+MYSQLD_BIN=$BUILD_PATH/bin/mysqld
+if [ ! -x $MYSQLD_BIN ]; then
+    MYSQLD_BIN=$BUILD_PATH/bin/mysqld-debug
+    if [ ! -x $MYSQLD_BIN ]; then
+        usage "ERROR: Executable $MYSQLD_BIN not found."; return 1;
+    fi
+    echo "WARNING: using Debug executable"
+fi
 if [ ! -f $CONFIG_FILE ]; then usage "ERROR: Config file $CONFIG_FILE not found."; return 1; fi
 
 WORKSPACE=${WORKSPACE:-$PWD}

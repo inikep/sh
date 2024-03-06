@@ -1,6 +1,7 @@
 # in .bashrc set:
-# source ~/sh/.bash_aliases
-# source ~/sh/set_env.sh ~/sh
+# SH_DIR=~/sh
+# source $SH_DIR/.bash_aliases
+# source $SH_DIR/set_env.sh $SH_DIR
 
 SH_PATH=$1
 

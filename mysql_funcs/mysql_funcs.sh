@@ -93,7 +93,7 @@ function sync_relay_log() {
   done
 }
 
-function run_sysbench_prepare() {
+function run_sysbench() {
   if [ $# -lt 3 ]; then echo "Usage: run_sysbench <DATABASE> <NUM_TABLES> <NUM_ROWS> <NUM_THREADS> <SOCKET> <LOG_SYSBENCH> <MORE_PARAMS>"; return 1; fi
   local DATABASE=$1
   local NUM_TABLES=$2
@@ -106,7 +106,7 @@ function run_sysbench_prepare() {
   # --time=$SYSBENCH_RUN_TIME
   local SYSBENCH_PARAMS="--table-size=$NUM_ROWS --tables=$NUM_TABLES --threads=$NUM_THREADS --mysql-db=$DATABASE --mysql-user=$MYSQL_USER --mysql-socket=$SOCKET --report-interval=10 --db-ps-mode=disable --percentile=99 $MORE_PARAMS"
   echo "- Starting sysbench with options $SYSBENCH_PARAMS" | tee $LOG_SYSBENCH
-  time sysbench $SYSBENCH_DIR/sysbench/oltp_write_only.lua $SYSBENCH_PARAMS prepare 2>&1 | tee -a $LOG_SYSBENCH
+  time sysbench $SYSBENCH_DIR/sysbench/oltp_write_only.lua $SYSBENCH_PARAMS 2>&1 | tee -a $LOG_SYSBENCH
 }
 
 function start_master() {
@@ -125,9 +125,10 @@ function check_master() {
 }
 
 function populate_master() {
-  local MORE_PARAMS=$1
+  local MYSQLD_PARAMS=$1
+  local SYSBENCH_PARAMS=$2
   init_datadir $MASTER_DD $LOG_PATH/init_master.err
-  start_master "$MORE_PARAMS"
+  start_master "$MYSQLD_PARAMS"
   mysql_client_master "CREATE USER 'repl'@'localhost' IDENTIFIED WITH mysql_native_password BY 'slavepass'"
   mysql_client_master "GRANT REPLICATION SLAVE ON *.* TO 'repl'@'localhost'"
   mysql_client_master "CREATE USER 'repl'@'127.0.0.1' IDENTIFIED WITH mysql_native_password BY 'slavepass'"
@@ -135,9 +136,7 @@ function populate_master() {
   mysql_client_master "FLUSH PRIVILEGES"
   mysql_client_master "RESET MASTER"
   mysql_client_master "DROP DATABASE IF EXISTS $DATABASE; CREATE DATABASE $DATABASE;"
-  run_sysbench_prepare $DATABASE $NTHREADS $NROWS $NTHREADS $MASTER_SOCKET $LOG_PATH/sysbench_prepare.log
-
-  stop_master
+  run_sysbench $DATABASE $NTHREADS $NROWS $NTHREADS $MASTER_SOCKET $LOG_PATH/sysbench_prepare.log "$SYSBENCH_PARAMS prepare"
 }
 
 function start_slave() {
@@ -165,7 +164,7 @@ function bench_slave() {
   start_slave "$1" 2>&1 | tee -a $LOG_BENCH
   mysql_client_slave "DROP DATABASE IF EXISTS $SLAVE_DATABASE; CREATE DATABASE $SLAVE_DATABASE;"
   mysql_client_slave "START SLAVE";
-  run_sysbench_prepare $SLAVE_DATABASE 4 $NROWS $NTHREADS $SLAVE_SOCKET $LOG_PATH/slave_prepare.log &
+  run_sysbench $SLAVE_DATABASE 4 $NROWS $NTHREADS $SLAVE_SOCKET $LOG_PATH/slave_prepare.log "prepare" &
   (time ( sync_slave_sql; sync_relay_log ) 2>&1) | tee -a $LOG_BENCH
   mysql_client_slave "select count(*) from $SLAVE_DATABASE.sbtest1" | tee -a $LOG_BENCH
   stop_slave 2>&1 | tee -a $LOG_BENCH
@@ -183,7 +182,7 @@ if [ ! -f $CONFIG_FILE ]; then usage "ERROR: Config file $CONFIG_FILE not found.
 
 WORKSPACE=${WORKSPACE:-$PWD}
 LOG_PATH=$WORKSPACE
-DATABASE=sb
+DATABASE=${DATABASE:-sb}
 MYSQL_USER=root
 NROWS=${NROWS:-1000000}
 NTHREADS=${NTHREADS:-16}

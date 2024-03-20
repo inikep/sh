@@ -20,6 +20,23 @@ function init_datadir() {
   $MYSQLD_BIN --no-defaults --initialize-insecure --basedir=$BASEDIR --datadir=$DATADIR --log-error-verbosity=3 >$LOG_INIT 2>&1
 }
 
+function start_mysqld_gdb() {
+  if [ $# -lt 4 ]; then echo "Usage: start_mysqld <DATADIR> <SOCKET> <PORT> <LOG_ERROR> [MORE_PARAMS]"; return 1; fi
+  local DATADIR=$1
+  local SOCKET=$2
+  local PORT=$3
+  local LOG_ERROR=$4
+  local MORE_PARAMS=$5
+  local BASEDIR=$BUILD_PATH
+  local DEFAULTS_FILE=$CONFIG_FILE
+  local START_TIMEOUT=300
+  # --default-authentication-plugin=mysql_native_password --gtid_mode=ON --enforce_gtid_consistency=ON
+  local MYSQLD_PARAMS="--defaults-file=$DEFAULTS_FILE --basedir=$BASEDIR --datadir=$DATADIR --socket=$SOCKET --port=$PORT $MORE_PARAMS --log-error=$LOG_ERROR"
+  echo "- Starting Percona Server with options $MYSQLD_PARAMS" | tee -a $LOG_ERROR
+  #$MYSQLD_BIN $MYSQLD_PARAMS >>$LOG_ERROR 2>&1 &
+  gdb -ex "handle SIGPIPE nostop" -ex run --args $MYSQLD_BIN $MYSQLD_PARAMS
+}
+
 function start_mysqld() {
   if [ $# -lt 4 ]; then echo "Usage: start_mysqld <DATADIR> <SOCKET> <PORT> <LOG_ERROR> [MORE_PARAMS]"; return 1; fi
   local DATADIR=$1
@@ -112,6 +129,11 @@ function run_sysbench() {
 function start_master() {
   local MORE_PARAMS=$1
   start_mysqld $MASTER_DD $MASTER_SOCKET $MASTER_PORT $LOG_PATH/log_master.err "--log-bin=master-bin --server_id=1 $MORE_PARAMS"
+}
+
+function start_master_gdb() {
+  local MORE_PARAMS=$1
+  start_mysqld_gdb $MASTER_DD $MASTER_SOCKET $MASTER_PORT $LOG_PATH/log_master.err "--log-bin=master-bin --server_id=1 $MORE_PARAMS"
 }
 
 function stop_master() {

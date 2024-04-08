@@ -128,12 +128,12 @@ function run_sysbench() {
 
 function start_master() {
   local MORE_PARAMS=$1
-  start_mysqld $MASTER_DD $MASTER_SOCKET $MASTER_PORT $LOG_PATH/log_master.err "--log-bin=master-bin --server_id=1 $MORE_PARAMS"
+  start_mysqld $MASTER_DD $MASTER_SOCKET $MASTER_PORT $LOG_PATH/log_master.err "--server_id=1 $MORE_PARAMS"
 }
 
 function start_master_gdb() {
   local MORE_PARAMS=$1
-  start_mysqld_gdb $MASTER_DD $MASTER_SOCKET $MASTER_PORT $LOG_PATH/log_master.err "--log-bin=master-bin --server_id=1 $MORE_PARAMS"
+  start_mysqld_gdb $MASTER_DD $MASTER_SOCKET $MASTER_PORT $LOG_PATH/log_master.err "--server_id=1 $MORE_PARAMS"
 }
 
 function stop_master() {
@@ -146,9 +146,8 @@ function check_master() {
   mysql_client_master "select @@innodb_flush_method"
 }
 
-function populate_master() {
+function init_master() {
   local MYSQLD_PARAMS=$1
-  local SYSBENCH_PARAMS=$2
   init_datadir $MASTER_DD $LOG_PATH/init_master.err
   start_master "$MYSQLD_PARAMS"
   mysql_client_master "CREATE USER 'repl'@'localhost' IDENTIFIED WITH mysql_native_password BY 'slavepass'"
@@ -158,6 +157,12 @@ function populate_master() {
   mysql_client_master "FLUSH PRIVILEGES"
   mysql_client_master "RESET MASTER"
   mysql_client_master "DROP DATABASE IF EXISTS $DATABASE; CREATE DATABASE $DATABASE;"
+}
+
+function populate_master() {
+  local MYSQLD_PARAMS=$1
+  local SYSBENCH_PARAMS=$2
+  init_master "$MYSQLD_PARAMS"
   run_sysbench $DATABASE $NTHREADS $NROWS $NTHREADS $MASTER_SOCKET $LOG_PATH/sysbench_prepare.log "$SYSBENCH_PARAMS prepare"
 }
 
@@ -165,7 +170,7 @@ function start_slave() {
   if [ $# -lt 1 ]; then echo "Usage: start_slave <MORE_PARAMS>"; return 1; fi
   local MORE_PARAMS=$1
   init_datadir $SLAVE_DD $LOG_PATH/init_slave.err
-  start_mysqld $SLAVE_DD $SLAVE_SOCKET $SLAVE_PORT $LOG_PATH/log_slave.err "--log-bin=slave-bin --server_id=2 --skip_slave_start $MORE_PARAMS"
+  start_mysqld $SLAVE_DD $SLAVE_SOCKET $SLAVE_PORT $LOG_PATH/log_slave.err "--server_id=2 --skip_slave_start $MORE_PARAMS"
   mysql_client_slave "CHANGE MASTER TO MASTER_HOST='localhost', MASTER_PORT=$MASTER_PORT, MASTER_USER='repl', MASTER_PASSWORD='slavepass', MASTER_LOG_FILE='master-bin.000001', MASTER_LOG_POS=0"
 }
 

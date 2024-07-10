@@ -4,6 +4,7 @@ alias ssh14="ssh przemyslaw.skibinski@10.30.3.14 -i /home/przemek/.ssh/inikep.pr
 alias ssh117="ssh przemyslaw.skibinski@10.30.7.117 -i /home/przemek/.ssh/inikep.priv"
 alias ssh134="ssh przemyslaw.skibinski@10.30.7.134 -i /home/przemek/.ssh/inikep.priv"
 function sshini() { ssh przemyslaw.skibinski@$1 -i /home/przemek/.ssh/inikep-rsa4096.priv $2 $3; }
+
 alias cf_on="git config --local include.path /data/mysql-server/percona-8.0/.gitconfig"
 alias cf_off="git config --local --unset include.path"
 alias git-clang-format="cf_off; git clang-format $@; cf_on"
@@ -39,6 +40,24 @@ alias   mtr-sanitize="$MTR_SANITIZE --mysqld-env=LD_PRELOAD=/usr/lib/x86_64-linu
 alias  mtr-sanitize5="$MTR_SANITIZE --mysqld-env=LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libasan.so.5:/usr/lib/x86_64-linux-gnu/libeatmydata.so"
 alias  mtr-sanitize6="$MTR_SANITIZE --mysqld-env=LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libasan.so.6:/usr/lib/x86_64-linux-gnu/libeatmydata.so"
 alias  mtr-sanitize8="$MTR_SANITIZE --mysqld-env=LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libasan.so.8:/usr/lib/x86_64-linux-gnu/libeatmydata.so"
+
+function t() {
+  export PARAMS="$@"
+  echo $PARAMS
+  /usr/bin/time -f "%e" -o ~/time.log bash -c "$PARAMS"
+  CMD_TIME=$(cat ~/time.log)
+  echo $CMD_TIME $@ >> ~/cmd_time.log
+}
+
+function get-gca() {
+  if [ $# -lt 2 ]; then
+    echo "usage: $0 <lower_branch> <higher_branch>"
+  else
+    gca_rev="$(git rev-list "$1" ^"$2" --first-parent --topo-order | tail -1)^"
+    echo "GCA of '$1' and '^$2' = $gca_rev"
+    git-log -1 $gca_rev
+  fi
+}
 
 function mtr-result-files() {
   if [ $# -lt 1 ]; then

@@ -44,9 +44,10 @@ alias  mtr-sanitize8="$MTR_SANITIZE --mysqld-env=LD_PRELOAD=/usr/lib/x86_64-linu
 function t() {
   export PARAMS="$@"
   echo $PARAMS
-  /usr/bin/time -f "%e" -o ~/time.log bash -c "$PARAMS"
+  /usr/bin/time --quiet -f "%e" -o ~/time.log bash -c "$PARAMS"
   CMD_TIME=$(cat ~/time.log)
-  echo $CMD_TIME $@ >> ~/cmd_time.log
+  TIME_ROOT=${TIME_ROOT:-/data}
+  echo $CMD_TIME $@ | tee -a $TIME_ROOT/cmd_time.log
 }
 
 function get-gca() {

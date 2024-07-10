@@ -82,7 +82,7 @@ do
   STATS=( $STATSLINE )
   MODIFICATIONS="${STATS[0]} files ${STATS[3]}+ ${STATS[5]:-0}-"
   DIFF_REV=$(git show -s $COMMIT --format=%B | grep -zioP 'Differential revision[: \n]*(https://reviews.facebook.net/|https://phabricator.intern.facebook.com/|)\K[[:alnum:] ,]*' | tr '\0' ',' | head --bytes -1)
-  SQUASH=$(git show -s $COMMIT --format=%B | grep -zioP 'Squash with[: \n]*(https://reviews.facebook.net/|https://phabricator.intern.facebook.com/|)\K.*' | tr '\0' ',' | head --bytes -1)
+  SQUASH=$(git show -s $COMMIT --format=%B | grep -zioP 'Squash( with|)[: \n]*(https://reviews.facebook.net/|https://phabricator.intern.facebook.com/|)\K.*' | tr '\0' ',' | head --bytes -1)
   UPSTREAM_BUG=$(git show -s $COMMIT --format=%B | grep -zioP 'https://bugs\.mysql\.com/(bug\.php\?id=|)[0-9]*' | tr '\0' ',' | head --bytes -1)
   GIT_TAG=$(git tag --contains $COMMIT | head -1)
   if [[ "$SQUASH" != "" ]]; then SQUASH="Squash with $SQUASH"; fi;

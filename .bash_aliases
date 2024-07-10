@@ -19,21 +19,16 @@ alias zenfs-free-zones="zbd report /dev/nvme1n2 | grep em | wc -l"
 alias hibernate="systemctl hibernate"
 
 MTR_BASE="./mysql-test/mtr --debug-server --retry-failure=0 --mysqld-env=LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libeatmydata.so --mysqld=--replica-parallel-workers=4"
-MTR_BASE_OLD="./mysql-test/mtr --debug-server --retry-failure=0 --mysqld-env=LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libeatmydata.so --mysqld=--slave-parallel-workers=4"
-MTR_PARALLEL_OLD="$MTR_BASE_OLD --parallel=auto --force --max-test-fail=0"
 MTR_PARALLEL="$MTR_BASE --parallel=auto --force --max-test-fail=0"
 MTR_SANITIZE="$MTR_PARALLEL --sanitize"
-MTR_SANITIZE_OLD="$MTR_PARALLEL_OLD --sanitize --big-test"
-alias   mtr-sanitize-old="$MTR_SANITIZE_OLD"
-alias   mtr-parallel-old="$MTR_PARALLEL_OLD"
-alias     mtr-single-old="$MTR_BASE_OLD"
 alias     mtr-single="$MTR_BASE"
 alias      mtr-zenfs="sudo $MTR_BASE --mysqld=--rocksdb_fs_uri=zenfs://dev:nvme1n2"
 alias   mtr-jemalloc="$MTR_BASE --mysqld-env=LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so:/usr/lib/x86_64-linux-gnu/libeatmydata.so"
 alias   mtr-valgrind="$MTR_PARALLEL --shutdown-timeout=150 --valgrind --valgrind-clients --valgrind-option=--num-callers=32 --valgrind-option=--show-leak-kinds=all --valgrind-option=--leak-check=full"
 alias     mtr-massif="$MTR_BASE --shutdown-timeout=150 --valgrind --valgrind-clients --valgrind-option=--tool=massif"
-alias   mtr-parallel="$MTR_PARALLEL"
-alias        mtr-big="$MTR_PARALLEL --big-test"
+function mtr-parallel() { t $MTR_PARALLEL $@; }
+function      mtr-rec() { t $MTR_PARALLEL --record $@; }
+function      mtr-big() { t $MTR_PARALLEL --big-test $@; }
 alias       mtr-fb56="$MTR_PARALLEL --mysqld=--default-storage-engine=rocksdb --mysqld=--rocksdb=1 --mysqld=--skip-innodb --mysqld=--default-tmp-storage-engine=MyISAM"
 alias       mtr-fb80="$MTR_PARALLEL --mysqld=--default-storage-engine=rocksdb --charset-for-testdb=latin1"
 alias   mtr-sanitize="$MTR_SANITIZE --mysqld-env=LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libasan.so"
@@ -44,7 +39,7 @@ alias  mtr-sanitize8="$MTR_SANITIZE --mysqld-env=LD_PRELOAD=/usr/lib/x86_64-linu
 function t() {
   export PARAMS="$@"
   echo $PARAMS
-  /usr/bin/time --quiet -f "%e" -o ~/time.log bash -c "$PARAMS"
+  /usr/bin/time --quiet -f "%e" -o ~/time.log $PARAMS
   CMD_TIME=$(cat ~/time.log)
   TIME_ROOT=${TIME_ROOT:-/data}
   echo $CMD_TIME $@ | tee -a $TIME_ROOT/cmd_time.log
@@ -66,7 +61,7 @@ function mtr-result-files() {
   else
     if [ "$2" = "" ]; then PREV=$1~; else PREV=$2; fi
     echo "commits $PREV..$1"
-    printf "mtr-parallel " && git diff $PREV..$1 --name-only | grep -Po "[[:alnum:]_-]*(?=(\.result|\.test|-master\.opt))" | sort | uniq | tr '\n' ' '; echo;
+    printf "mtr-rec " && git diff $PREV..$1 --name-only | grep -Po "[[:alnum:]_-]*(?=(\.result|\.test|-master\.opt))" | sort | uniq | tr '\n' ' '; echo;
   fi
 }
 

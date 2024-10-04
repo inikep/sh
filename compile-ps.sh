@@ -309,8 +309,9 @@ CMAKE_FACEBOOK_80="
  -DMYSQL_GITHASH=mysqlHash -DMYSQL_GITDATE=mysqlDate
  -DROCKSDB_GITHASH=rocksdbHash -DROCKSDB_GITDATE=rocksdbDate
  -DENABLE_EXPERIMENT_SYSVARS=1
+ -DWITH_HYPERGRAPH_OPTIMIZER=1
  -DWITH_FB_VECTORDB=1
- -DWITH_OPENMP=/usr/lib/llvm-17
+ -DWITH_OPENMP=`dirname $(dirname "$(readlink -f /usr/lib/x86_64-linux-gnu/libomp.so.5)")`
 ";
 
 

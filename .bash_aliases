@@ -50,8 +50,10 @@ function get-gca() {
     echo "usage: $0 <lower_branch> <higher_branch>"
   else
     gca_rev="$(git rev-list "$1" ^"$2" --first-parent --topo-order | tail -1)^"
-    echo "GCA of '$1' and '^$2' = $gca_rev"
-    git-log -1 $gca_rev
+    gca_num="$(git rev-list "$1" ^"$2" --first-parent --topo-order | wc -l)"
+    echo "The number of commits from '$1' missing in '$2' = $gca_num"
+    echo "GCA of '$1' and '$2' = $gca_rev"
+    git log --oneline -1 $gca_rev
   fi
 }
 

@@ -51,7 +51,7 @@ esac
 done
 
 SRV_ROOT=${SRV_ROOT:-/data/mysql-server}
-SRV_PATH=$SRV_ROOT/$1
+SRV_PATH=${SRV_PATH:-$SRV_ROOT/$1}
 
 OS_VERSION=$(lsb_release -d -s)
 if [[ "${OS_VERSION}" = *"CentOS release 6."* ]] || [[ "${OS_VERSION}" = *"CentOS Linux release 7."* ]]; then

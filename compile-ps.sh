@@ -101,6 +101,7 @@ case $var in
   gcc*) CC=gcc-${var:3:4}; CXX=g++-${var:3:4}; BUILD_PATH+=-$var ;;
   noerr) STOP_ON_WARN=OFF; BUILD_PATH+=-noerr ;;
   g1) OPT_G1=1; BUILD_PATH+=-g1 ;;
+  ninja) NINJA_BUILD=1; BUILD_PATH+=-ninja ;;
 
   *) ADDITIONAL_OPTS+="$var " ;;
 esac
@@ -391,6 +392,10 @@ fi
 
 if [ "$VALGRIND" == "1" ]; then
    CMAKE_OPT="$CMAKE_OPT -DWITH_VALGRIND=ON";
+fi
+
+if [ "$NINJA_BUILD" == "1" ]; then
+   CMAKE_OPT="$CMAKE_OPT -G Ninja";
 fi
 
 if [ "$JENKINS" == "1" ]; then

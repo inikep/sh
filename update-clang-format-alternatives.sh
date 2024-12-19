@@ -20,5 +20,9 @@ update_clang_format 12   120
 update_clang_format 13   130
 update_clang_format 14   140
 update_clang_format 15   150
+update_clang_format 16   160
+update_clang_format 17   170
+update_clang_format 18   180
+update_clang_format 19   190
 
 sudo update-alternatives --config clang-format

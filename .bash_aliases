@@ -26,6 +26,7 @@ alias      mtr-zenfs="sudo $MTR_BASE --mysqld=--rocksdb_fs_uri=zenfs://dev:nvme1
 alias   mtr-jemalloc="$MTR_BASE --mysqld-env=LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so:/usr/lib/x86_64-linux-gnu/libeatmydata.so"
 alias   mtr-valgrind="$MTR_PARALLEL --shutdown-timeout=150 --valgrind --valgrind-clients --valgrind-option=--num-callers=32 --valgrind-option=--show-leak-kinds=all --valgrind-option=--leak-check=full"
 alias     mtr-massif="$MTR_BASE --shutdown-timeout=150 --valgrind --valgrind-clients --valgrind-option=--tool=massif"
+function mtr-parallel-aio() { t $MTR_PARALLEL --mysqld=--innodb_use_native_aio=0 $@; }
 function mtr-parallel() { t $MTR_PARALLEL $@; }
 function      mtr-rec() { t $MTR_PARALLEL --record $@; }
 function      mtr-big() { t $MTR_PARALLEL --big-test $@; }
@@ -83,12 +84,6 @@ function drop-caches() {
   sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'
 }
 
-function restore-cpu-config() {
-  sudo sh -c "echo 1 > /sys/devices/system/cpu/cpufreq/boost"
-  sudo sh -c "echo 2 > /proc/sys/kernel/randomize_va_space"
-  sudo cpupower frequency-set -g schedutil
-}
-
 function count-lines() { cat $1 | rev | cut -f 1,2 -d '.' | rev | sort | uniq -c | sort -nr > $1_sorted; }
 function git-worktree() { git worktree add -b $1 ../$1 $2 $3 $4; cd ../$1; }
 function git-mergetool() { git checkout --conflict=merge $1; git mergetool $1; }
@@ -125,3 +120,71 @@ function git-unmerge() {
 
 function fb-worktree() { git fetch facebook && cd ../fb-8.0.13 && git checkout fb-8.0.13 && git pull && git worktree add -b $@ ../$@ facebook/fb-mysql-8.0.13; cd ../$@; }
 function fb-update() { MYPWD=`pwd`; git fetch facebook && cd ../fb-8.0.13 && git checkout fb-8.0.13 && git pull; cd $MYPWD; }
+
+
+function disable_address_randomization(){
+    PREVIOUS_ASLR=`cat /proc/sys/kernel/randomize_va_space`
+    sudo sh -c "echo 0 > /proc/sys/kernel/randomize_va_space"
+    echo "Changing /proc/sys/kernel/randomize_va_space from $PREVIOUS_ASLR to `cat /proc/sys/kernel/randomize_va_space`"
+}
+
+function restore_address_randomization(){
+    local CURRENT_ASLR=`cat /proc/sys/kernel/randomize_va_space`
+    sudo sh -c "echo $PREVIOUS_ASLR > /proc/sys/kernel/randomize_va_space"
+    echo "Resoring /proc/sys/kernel/randomize_va_space from $CURRENT_ASLR to `cat /proc/sys/kernel/randomize_va_space`"
+}
+
+function disable_turbo_boost(){
+  SCALING_DRIVER=`cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver`
+  echo "Using $SCALING_DRIVER scaling driver"
+
+  if [[ ${SCALING_DRIVER} == "intel_pstate" || ${SCALING_DRIVER} == "intel_cpufreq" ]]; then
+    PREVIOUS_TURBO=`cat /sys/devices/system/cpu/intel_pstate/no_turbo`
+    sudo sh -c "echo 1 > /sys/devices/system/cpu/intel_pstate/no_turbo"
+    echo "Changing /sys/devices/system/cpu/intel_pstate/no_turbo from $PREVIOUS_TURBO to `cat /sys/devices/system/cpu/intel_pstate/no_turbo`"
+  else
+    PREVIOUS_TURBO=`cat /sys/devices/system/cpu/cpufreq/boost`
+    sudo sh -c "echo 0 > /sys/devices/system/cpu/cpufreq/boost"
+    echo "Changing /sys/devices/system/cpu/cpufreq/boost from $PREVIOUS_TURBO to `cat /sys/devices/system/cpu/cpufreq/boost`"
+  fi
+}
+
+function restore_turbo_boost(){
+  echo "Restore turbo boost with $SCALING_DRIVER scaling driver"
+
+  if [[ ${SCALING_DRIVER} == "intel_pstate" || ${SCALING_DRIVER} == "intel_cpufreq" ]]; then
+    CURRENT_TURBO=`cat /sys/devices/system/cpu/intel_pstate/no_turbo`
+    sudo sh -c "echo $PREVIOUS_TURBO > /sys/devices/system/cpu/intel_pstate/no_turbo"
+    echo "Resoring /sys/devices/system/cpu/intel_pstate/no_turbo from $CURRENT_TURBO to $PREVIOUS_TURBO"
+  else
+    CURRENT_TURBO=`cat /sys/devices/system/cpu/cpufreq/boost`
+    sudo sh -c "echo $PREVIOUS_TURBO > /sys/devices/system/cpu/cpufreq/boost"
+    echo "Resoring /sys/devices/system/cpu/cpufreq/boost from $CURRENT_TURBO to $PREVIOUS_TURBO"
+  fi
+}
+
+function change_scaling_governor(){
+  PREVIOUS_GOVERNOR=`cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor`
+  sudo cpupower frequency-set -g $1
+  echo "Changing scaling governor from $PREVIOUS_GOVERNOR to `cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor`"
+  sudo cpupower frequency-info
+}
+
+function restore_scaling_governor(){
+  local CURRENT_GOVERNOR=`cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor`
+  sudo cpupower frequency-set -g $PREVIOUS_GOVERNOR
+  echo "Restoring scaling governor from $CURRENT_GOVERNOR to `cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor`"
+  sudo cpupower frequency-info
+}
+
+function set_performance(){
+  disable_address_randomization
+  disable_turbo_boost
+  change_scaling_governor performance
+}
+
+function restore_from_performance(){
+  restore_address_randomization
+  restore_turbo_boost
+  restore_scaling_governor
+}

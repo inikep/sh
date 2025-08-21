@@ -13,18 +13,13 @@ ROOTDIR=$BENCH_PATH/$SERVER_BUILD
 MYSQLDIR=$ROOTDIR/mysqld
 DATADIR=${DATADIR:-${ROOTDIR}/data-${FILE_SYSTEM}}
 SYSBENCH_DIR=${SYSBENCH_DIR:-/usr/local}
-ZENFS_DEV=${ZENFS_DEV:-nvme1n2}
 DISKNAME=${DISKNAME:-nvme0n1}
 WORKLOAD_SCRIPT=${WORKLOAD_SCRIPT:=all_percona.sh}
 
-if [ "$FILE_SYSTEM" == "zenfs" ]; then
-  ENGINE=rocksdb
-else
-  ENGINE=$FILE_SYSTEM
-  [ ! -d "$DATADIR" ] && mkdir -p $DATADIR
-  DATADIR_TYPE=`stat -f -c %T $DATADIR`
-  if [ ! -z "$DATADIR_TYPE" ]; then FILE_SYSTEM=${DATADIR_TYPE##*/}; fi
-fi
+ENGINE=$FILE_SYSTEM
+[ ! -d "$DATADIR" ] && mkdir -p $DATADIR
+DATADIR_TYPE=`stat -f -c %T $DATADIR`
+if [ ! -z "$DATADIR_TYPE" ]; then FILE_SYSTEM=${DATADIR_TYPE##*/}; fi
 
 # params for benchmarking
 NTABS=${NTABS:-16}
@@ -46,7 +41,6 @@ dbAndCreds=mysql,root,pw,127.0.0.1,test,$ENGINE # dbAndCreds=mysql,user,password
 
 CLIENT_OPT_NOPASS="-hlocalhost -uroot"
 CLIENT_OPT="$CLIENT_OPT_NOPASS -ppw"
-ZENFS_TOOL=$MYSQLDIR/bin/zenfs
 MYSQLD_TOOL=$MYSQLDIR/bin/mysqld
 
 # HOST="--mysql-socket=/tmp/mysql.sock"
@@ -59,7 +53,7 @@ print_usage() {
   echo "where:"
   echo "[SERVER_BUILD] - directory name of server build/binaries (please set also \$BUILDDIR)"
   echo "[CONFIG_FILE] - full path to Percona Server's configuration file"
-  echo "[ENGINE] - 'innodb' or 'rocksdb' or 'zenfs'"
+  echo "[ENGINE] - 'innodb' or 'rocksdb'"
   echo "[COMMANDS]:"
   echo "  init    - copy binaries from \$BUILDDIR to \$ROOTDIR if required, initialize mysqld database and tables"
   echo "  prepare - populate \$NTABS tables with \$NROWS using \$NTHREADS"
@@ -123,9 +117,6 @@ startmysql(){
   else 
       ADDITIONAL_PARAMS+=" --innodb_buffer_pool_size=${MEM}G $3"
   fi
-  if [ "$FILE_SYSTEM" == "zenfs" ]; then
-     ADDITIONAL_PARAMS+=" --rocksdb_fs_uri=zenfs://dev:$ZENFS_DEV"
-  fi
 
   echo "- Starting mysqld with $ADDITIONAL_PARAMS"
   sync
@@ -171,20 +162,9 @@ shutdownmysql(){
 print_database_size(){
   local RESULTS_FILE=$1
   local PRINT_FILES=$2
-  if [ "$FILE_SYSTEM" == "zenfs" ]; then
-    EMPTY_ZONES=`zbd report /dev/$ZENFS_DEV | grep em | wc -l`
-    DATA_SIZE=`$ZENFS_TOOL list --zbd=$ZENFS_DEV --path=./.rocksdb | awk '{sum+=$1;} END {printf "%d\n", sum/1024/1024;}'`
-    FILE_COUNT=`$ZENFS_TOOL list --zbd=$ZENFS_DEV --path=./.rocksdb | wc -l`
-    if [ "$PRINT_FILES" == "1" ]; then $ZENFS_TOOL list --zbd=$ZENFS_DEV --path=./.rocksdb >>$RESULTS_FILE; fi
-    echo "- Number of empty zones is $EMPTY_ZONES"
-    echo "- Number of empty zones is $EMPTY_ZONES" >>$RESULTS_FILE
-    $ZENFS_TOOL df --zbd=$ZENFS_DEV
-    $ZENFS_TOOL df --zbd=$ZENFS_DEV >>$RESULTS_FILE
-  else
-    DATA_SIZE=`du -s $DATADIR | awk '{sum+=$1;} END {printf "%d\n", sum/1024;}'`
-    if [ "$PRINT_FILES" == "1" ]; then ls -alR $DATADIR >>$RESULTS_FILE; fi
-    FILE_COUNT=`ls -aR $DATADIR | wc -l`
-  fi
+  DATA_SIZE=`du -s $DATADIR | awk '{sum+=$1;} END {printf "%d\n", sum/1024;}'`
+  if [ "$PRINT_FILES" == "1" ]; then ls -alR $DATADIR >>$RESULTS_FILE; fi
+  FILE_COUNT=`ls -aR $DATADIR | wc -l`
   echo "- Size of database is $DATA_SIZE MB in $FILE_COUNT files"
   echo "- Size of database is $DATA_SIZE MB in $FILE_COUNT files" >>$RESULTS_FILE
 }
@@ -200,15 +180,7 @@ init_db(){
 
   echo "- Initialize mysqld at $(date '+%H:%M:%S')"
   rm -rf $DATADIR
-  if [ "$FILE_SYSTEM" == "zenfs" ]; then
-    export ZENFS_DEV
-    sudo -E bash -c 'echo mq-deadline > /sys/block/$ZENFS_DEV/queue/scheduler'
-    sudo chmod o+rw /dev/$ZENFS_DEV
-    sudo zbd reset /dev/$ZENFS_DEV
-    $ZENFS_TOOL mkfs --zbd=$ZENFS_DEV --aux_path=$DATADIR --finish_threshold=0 --force || exit
-  else
-    mkdir -p $DATADIR
-  fi
+  mkdir -p $DATADIR
 #  cp ${MYSQLD_TOOL}-debug $MYSQLD_TOOL
   $MYSQLD_TOOL --initialize-insecure --basedir=$MYSQLDIR --datadir=$DATADIR --log-error-verbosity=2 --log-error=$ROOTDIR/log.err
 

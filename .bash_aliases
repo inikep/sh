@@ -74,7 +74,7 @@ function aws-prices() {
   do
     echo $inst;
     sudo docker run --rm ghcr.io/alexei-led/spotinfo --type="$inst" --region="${REGION}" --os=linux --output=text --sort=interruption;
-    /usr/local/bin/aws ec2 --region="${REGION}" describe-spot-price-history --instance-types "$inst" --product-description "Linux/UNIX (Amazon VPC)" --start-time $(date +%s) --query SpotPriceHistory[].[InstanceType,AvailabilityZone,SpotPrice] --output text;
+    aws ec2 --region="${REGION}" describe-spot-price-history --instance-types "$inst" --product-description "Linux/UNIX (Amazon VPC)" --start-time $(date +%s) --query SpotPriceHistory[].[InstanceType,AvailabilityZone,SpotPrice] --output text;
   done
 }
 
@@ -117,6 +117,13 @@ function git-unmerge() {
   fi
 }
 
+function git-unmerge-plan() {
+  if [ $# -lt 2 ]; then
+    echo usage: $0 [start_commit] [end_commit]
+  else
+    git log --oneline --topo-order $1..$2 --reverse
+  fi
+}
 
 function fb-worktree() { git fetch facebook && cd ../fb-8.0.13 && git checkout fb-8.0.13 && git pull && git worktree add -b $@ ../$@ facebook/fb-mysql-8.0.13; cd ../$@; }
 function fb-update() { MYPWD=`pwd`; git fetch facebook && cd ../fb-8.0.13 && git checkout fb-8.0.13 && git pull; cd $MYPWD; }

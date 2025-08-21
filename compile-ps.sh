@@ -11,29 +11,24 @@
 
 case $1 in
   "") SRV_VER="unknown" ;;
-  wdc-*) SRV_VER="WDC8" ;;
-  FB56-*) SRV_VER="FB56" ;;
-  fb-prod*) SRV_VER="FB56" ;;
-  fb-5.*) SRV_VER="FB56" ;;
-  FB8-*) SRV_VER="FB8" ;;
-  fb-8.*) SRV_VER="FB8" ;;
+  fb-5.*)     SRV_VER="FB56" ;;
+  fb-8.*)     SRV_VER="FB8" ;;
   mysql-5.7*) SRV_VER="MS57" ;;
-  mysql-8.*) SRV_VER="MS8" ;;
-  *5.6*) SRV_VER="5.6" ;;
-  *5.7*) SRV_VER="5.7" ;;
-  *8.0*) SRV_VER="8.0" ;;
-  *) SRV_VER="8.0" ;;
+  mysql-8.*)  SRV_VER="MS8" ;;
+  *5.7*)      SRV_VER="5.7" ;;
+  *8.0*)      SRV_VER="8.0" ;;
+  *)          SRV_VER="8.0" ;;
 esac
 
 
-if [[ "$SRV_VER" != +(5.6|5.7|8.0|WDC8) ]] && [[ "$SRV_VER" != +(FB56|FB8) ]] && [[ "$SRV_VER" != +(MS57|MS8) ]]; then
+if [[ "$SRV_VER" != +(5.7|8.0) ]] && [[ "$SRV_VER" != +(FB56|FB8) ]] && [[ "$SRV_VER" != +(MS57|MS8) ]]; then
    echo Unknown SRV_VER=$SRV_VER;
    echo "Usage: compile-ps.sh <server_dir> <debug/rel/asan/valgrind/rocksdb/tokudb/additional_options>";
    echo "  e.g. compile-ps.sh mysql-8.0 rel";
    echo "  or   compile-ps.sh percona-5.7 asan";
    echo "       compile-ps.sh 5.7";
    echo "       compile-ps.sh 8.0 valgrind";
-   echo "       compile-ps.sh fb-5.6.35 rocksdb -DMYSQL_MAINTAINER_MODE=0 -DENABLED_LOCAL_INFILE=1 -DENABLE_DTRACE=0";
+   echo "       compile-ps.sh fb-8.4.6 rocksdb -DMYSQL_MAINTAINER_MODE=0 -DENABLED_LOCAL_INFILE=1 -DENABLE_DTRACE=0";
    echo "       compile-ps.sh fb-8.0 clang8";
    echo "       compile-ps.sh percona-5.7 gcc9";
    echo "       export LD_LIBRARY_PATH=/usr/local/lib/; compile-ps.sh FB8-153 -DCMAKE_CXX_FLAGS=-DHAVE_JEMALLOC=1 -DCMAKE_CXX_LINK_FLAGS=\\\"-L/usr/local/lib/ -ljemalloc\\\"";
@@ -60,7 +55,7 @@ if [[ "${OS_VERSION}" = *"CentOS release 6."* ]] || [[ "${OS_VERSION}" = *"CentO
 else
    BUILD_PATH=$SRV_PATH
 #   JOB_CMAKE='cmake --trace-source=/data/mysql-server/fb-8.0.28/storage/rocksdb/CMakeLists.txt'
-   JOB_CMAKE='cmake'
+   JOB_CMAKE=${JOB_CMAKE:-cmake}
 fi
 
 if [ "$DOCKER" != "1" ]; then
@@ -94,6 +89,7 @@ case $var in
   noccache*) NOCCACHE=1; BUILD_PATH+=-noccache ;;
   asan) ASAN=1; BUILD_PATH+=-asan ;;
   msan) MSAN=1; BUILD_PATH+=-msan ;;
+  gprof) GPROF=1; BUILD_PATH+=-gprof ;;
   valgrind) VALGRIND=1; BUILD_PATH+=-valgrind ;;
   rocks*) ROCKSDB=1; BUILD_PATH+=-rocks ;;
   toku*) TOKUDB=1; BUILD_PATH+=-toku ;;
@@ -135,6 +131,7 @@ CMAKE_OPT_COMMON="
  -DBUILD_CONFIG=mysql_release
  -DDOWNLOAD_BOOST=1
  -DWITH_BOOST=../_deps
+ -DCMAKE_INSTALL_PREFIX=../${BUILD_PATH##*/}-install
 ";
 #-DCMAKE_INSTALL_PREFIX=/
 
@@ -174,6 +171,7 @@ CMAKE_PERCONA_LIBS_80="
  -DWITH_KEYRING_VAULT=ON
  -DWITH_KEYRING_VAULT_TEST=ON
  -DWITH_PERCONA_AUTHENTICATION_LDAP=ON
+ -DWITH_PERCONA_TELEMETRY=ON
 ";
 
 CMAKE_PERCONA_80="
@@ -332,9 +330,6 @@ case $SRV_VER in
      FB8)
           CMAKE_OPT="$CMAKE_FACEBOOK_80";
           ;;
-     WDC8)
-          CMAKE_OPT="$CMAKE_WDC_80";
-          ;;
      MS57)
           CMAKE_OPT="$CMAKE_MYSQL_57";
           ;;
@@ -360,11 +355,8 @@ if [ "$OPT_G1" == "1" ]; then
    )
 fi
 
-if [ "$CC" == "clang-4.0" ] || [ "$CC" == "clang-5.0" ]; then
-      COMPILE_OPT+=(
-       '-DCMAKE_C_FLAGS=-isystem /usr/include/c++/9 -isystem /usr/include'
-       '-DCMAKE_CXX_FLAGS=-isystem /usr/include/c++/9 -isystem /usr/include'
-      )
+if [ "$GPROF" == "1" ]; then
+   CMAKE_OPT="$CMAKE_OPT -DENABLE_GPROF=ON";
 fi
 
 if [ "$ROCKSDB" == "1" ]; then
@@ -382,7 +374,14 @@ if [ "$TOKUDB" == "1" ]; then
 fi
 
 if [ "$ASAN" == "1" ]; then
-   CMAKE_OPT="$CMAKE_OPT -DWITH_ASAN=ON -DWITH_ASAN_SCOPE=ON";
+#   CMAKE_OPT="$CMAKE_OPT -DWITH_ASAN=ON -DWITH_ASAN_SCOPE=ON";
+   CMAKE_OPT="$CMAKE_OPT -DWITH_ASAN=ON";
+   COMPILE_OPT+=(
+        '-DCMAKE_C_FLAGS_DEBUG=-O0 -ggdb3'
+        '-DCMAKE_CXX_FLAGS_DEBUG=-O0 -ggdb3'
+        '-DCMAKE_C_FLAGS_RELWITHDEBINFO=-O2 -ggdb3 -DNDEBUG'
+        '-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O2 -ggdb3 -DNDEBUG'
+   )
 fi
 # -DWITH_UBSAN=ON
 
@@ -414,6 +413,9 @@ fi
 if [ "$INVERTED" == "1" ]; then
    CMAKE_OPT="$CMAKE_OPT $OPTIONS_INVERTED $OPTIONS_SE_INVERTED";
 fi
+
+# Azure pipelines
+#CMAKE_OPT="-DCMAKE_BUILD_TYPE=Debug -DBUILD_CONFIG=mysql_release -DWITH_PACKAGE_FLAGS=OFF -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20 -DWITH_ROCKSDB=ON -DWITH_COREDUMPER=ON -DWITH_COMPONENT_KEYRING_VAULT=ON -DWITH_PAM=ON -DMYSQL_MAINTAINER_MODE=ON -DWITH_MECAB=system -DWITH_NUMA=ON -DWITH_SYSTEM_LIBS=ON -DWITH_EDITLINE=system -DCMAKE_C_FLAGS_DEBUG=-g1 -DCMAKE_CXX_FLAGS_DEBUG=-g1"
 
 mkdir $BUILD_PATH;
 cd $BUILD_PATH && rm -rf * &&

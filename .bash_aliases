@@ -195,3 +195,21 @@ function restore_from_performance(){
   restore_turbo_boost
   restore_scaling_governor
 }
+
+function check_errors() {
+    local target_dir="$1"
+    # save the current directory
+    local orig_dir="$PWD"
+
+    # go to target directory
+    cd "$target_dir" || { echo "Cannot cd into $target_dir"; return 1; }
+
+    # loop through subdirectories
+    for dir in */ ; do
+        echo "${dir%/}"
+        grep -iE "sanit|terribly wrong|ERROR|seqno|Assertion|loose" "$dir/log/master.err"
+    done
+
+    # return to original directory
+    cd "$orig_dir" || { echo "Cannot return to $orig_dir"; return 1; }
+}

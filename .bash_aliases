@@ -205,7 +205,7 @@ function check_errors() {
     cd "$target_dir" || { echo "Cannot cd into $target_dir"; return 1; }
 
     # loop through subdirectories
-    for dir in */ ; do
+    for dir in $(ls -d */ | sort -V); do
         echo "${dir%/}"
         grep -iE "sanit|terribly wrong|ERROR|seqno|Assertion|loose" "$dir/log/master.err"
     done

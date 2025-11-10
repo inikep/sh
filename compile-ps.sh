@@ -61,9 +61,10 @@ fi
 if [ "$DOCKER" != "1" ]; then
    BUILD_PATH=$SRV_PATH
 else
+   PRETTY_NAME=$(grep '^PRETTY_NAME=' /etc/os-release | cut -d '=' -f2 | tr -d '"' | tr ' ' '-')
    VERSION_CODENAME=`grep '^VERSION_CODENAME' /etc/os-release | cut -d "=" -f 2`
    ARCH=`uname -m`
-   BUILD_PATH=/data/docker/${VERSION_CODENAME}-$ARCH-$1
+   BUILD_PATH=/data/docker/${PRETTY_NAME}-$ARCH-$1
 fi
 
 if [ "$RELEASE" == "1" ]; then
@@ -109,16 +110,6 @@ if [[ "${OS_VERSION}" = *"CentOS release 6."* ]] || [[ "${OS_VERSION}" = *"CentO
    ADDITIONAL_OPTS+="-DWITH_PROTOBUF=bundled -DWITH_MECAB= -DWITH_LIBEVENT=bundled -DWITH_EDITLINE=bundled -DWITH_ICU=bundled"
 fi
 
-if [ "$CC" == "clang-4" ] || [ "$CC" == "clang-5" ] || [ "$CC" == "clang-6" ]; then
-   CC=$CC.0; CXX=$CXX.0;
-fi
-
-if [ "$CC" == "gcc-4" ]; then
-   CC=$CC.8; CXX=$CXX.8;
-fi
-
-if [[ "${CC}x" == "x" ]]; then echo "need compiler e.g. gcc12 or clang14"; exit 1; fi
-
 echo CC=$CC CXX=$CXX SRV_VER=$SRV_VER DEBUG=$DEBUG RELEASE=$RELEASE ASAN=$ASAN MSAN=$MSAN VALGRIND=$VALGRIND ROCKSDB=$ROCKSDB TOKUDB=$TOKUDB JENKINS=$JENKINS JEMALLOC=$JEMALLOC NOCCACHE=$NOCCACHE
 echo BUILD_PATH=$BUILD_PATH
 echo ADDITIONAL_OPTS="'$ADDITIONAL_OPTS'"
@@ -126,8 +117,6 @@ echo ADDITIONAL_OPTS="'$ADDITIONAL_OPTS'"
 CMAKE_OPT_COMMON="
  -DCMAKE_BUILD_TYPE=$BUILD
  -DMYSQL_MAINTAINER_MODE=$STOP_ON_WARN
- -DCMAKE_C_COMPILER=$CC
- -DCMAKE_CXX_COMPILER=$CXX
  -DBUILD_CONFIG=mysql_release
  -DDOWNLOAD_BOOST=1
  -DWITH_BOOST=../_deps
@@ -137,8 +126,6 @@ CMAKE_OPT_COMMON="
 CMAKE_OPT_COMMON_84="
  -DCMAKE_BUILD_TYPE=$BUILD
  -DMYSQL_MAINTAINER_MODE=$STOP_ON_WARN
- -DCMAKE_C_COMPILER=$CC
- -DCMAKE_CXX_COMPILER=$CXX
  -DBUILD_CONFIG=mysql_release
  -DCMAKE_INSTALL_PREFIX=../${BUILD_PATH##*/}-install
 ";
@@ -349,6 +336,10 @@ fi
 
 if [ "$GPROF" == "1" ]; then
    CMAKE_OPT="$CMAKE_OPT -DENABLE_GPROF=ON";
+fi
+
+if [[ "${CC}x" != "x" ]]; then
+   CMAKE_OPT+=" -DCMAKE_C_COMPILER=$CC -DCMAKE_CXX_COMPILER=$CXX"
 fi
 
 if [ "$ROCKSDB" == "1" ]; then

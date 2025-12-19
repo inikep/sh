@@ -17,7 +17,7 @@ case $1 in
   mysql-8.*)  SRV_VER="MS8" ;;
   *5.7*)      SRV_VER="5.7" ;;
   *8.0*)      SRV_VER="8.0" ;;
-  *)          SRV_VER="8.4" ;;
+  *)          SRV_VER="8.0" ;;
 esac
 
 

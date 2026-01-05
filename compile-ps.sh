@@ -2,6 +2,10 @@
 
 #set -o errexit
 #set -o xtrace
+set -o pipefail
+
+# This script uses extended globs like +(a|b|c) in [[ ... ]].
+shopt -s extglob
 
 # PATH=/github/sh:/home/inikep/bin:/home/inikep/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
 # PATH=/github/sh:/usr/lib/ccache:/home/inikep/bin:/home/inikep/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
@@ -9,7 +13,21 @@
 # SRV_VER=$(echo ${1//[^0-9.]/ })
 # SRV_VER=${1:(-3)}
 
-case $1 in
+usage() {
+   echo "Usage: compile-ps.sh <server_dir> <debug/rel/asan/valgrind/rocksdb/tokudb/additional_options>"
+   echo "  e.g. compile-ps.sh mysql-8.0 rel"
+   echo "  or   compile-ps.sh percona-5.7 asan"
+   echo "       compile-ps.sh 5.7"
+   echo "       compile-ps.sh 8.0 valgrind"
+   echo "       compile-ps.sh fb-8.4.6 rocksdb -DMYSQL_MAINTAINER_MODE=0 -DENABLED_LOCAL_INFILE=1 -DENABLE_DTRACE=0"
+   echo "       compile-ps.sh fb-8.0 clang8"
+   echo "       compile-ps.sh percona-5.7 gcc9"
+   echo "       export LD_LIBRARY_PATH=/usr/local/lib/; compile-ps.sh FB8-153 -DCMAKE_CXX_FLAGS=-DHAVE_JEMALLOC=1 -DCMAKE_CXX_LINK_FLAGS=\\\"-L/usr/local/lib/ -ljemalloc\\\""
+}
+
+SERVER_DIR=${1:-}
+
+case "$SERVER_DIR" in
   "") SRV_VER="unknown" ;;
   fb-5.*)     SRV_VER="FB56" ;;
   fb-8.*)     SRV_VER="FB8" ;;
@@ -23,15 +41,7 @@ esac
 
 if [[ "$SRV_VER" != +(5.7|8.0|8.4) ]] && [[ "$SRV_VER" != +(FB56|FB8) ]] && [[ "$SRV_VER" != +(MS57|MS8) ]]; then
    echo Unknown SRV_VER=$SRV_VER;
-   echo "Usage: compile-ps.sh <server_dir> <debug/rel/asan/valgrind/rocksdb/tokudb/additional_options>";
-   echo "  e.g. compile-ps.sh mysql-8.0 rel";
-   echo "  or   compile-ps.sh percona-5.7 asan";
-   echo "       compile-ps.sh 5.7";
-   echo "       compile-ps.sh 8.0 valgrind";
-   echo "       compile-ps.sh fb-8.4.6 rocksdb -DMYSQL_MAINTAINER_MODE=0 -DENABLED_LOCAL_INFILE=1 -DENABLE_DTRACE=0";
-   echo "       compile-ps.sh fb-8.0 clang8";
-   echo "       compile-ps.sh percona-5.7 gcc9";
-   echo "       export LD_LIBRARY_PATH=/usr/local/lib/; compile-ps.sh FB8-153 -DCMAKE_CXX_FLAGS=-DHAVE_JEMALLOC=1 -DCMAKE_CXX_LINK_FLAGS=\\\"-L/usr/local/lib/ -ljemalloc\\\"";
+   usage
    exit 1
 fi
 
@@ -46,7 +56,7 @@ esac
 done
 
 SRV_ROOT=${SRV_ROOT:-/data/mysql-server}
-SRV_PATH=${SRV_PATH:-$SRV_ROOT/$1}
+SRV_PATH=${SRV_PATH:-$SRV_ROOT/$SERVER_DIR}
 
 OS_VERSION=$(lsb_release -d -s)
 if [[ "${OS_VERSION}" = *"CentOS release 6."* ]] || [[ "${OS_VERSION}" = *"CentOS Linux release 7."* ]]; then
@@ -400,12 +410,12 @@ fi
 # Azure pipelines
 #CMAKE_OPT="-DCMAKE_BUILD_TYPE=Debug -DBUILD_CONFIG=mysql_release -DWITH_PACKAGE_FLAGS=OFF -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20 -DWITH_ROCKSDB=ON -DWITH_COREDUMPER=ON -DWITH_COMPONENT_KEYRING_VAULT=ON -DWITH_PAM=ON -DMYSQL_MAINTAINER_MODE=ON -DWITH_MECAB=system -DWITH_NUMA=ON -DWITH_SYSTEM_LIBS=ON -DWITH_EDITLINE=system -DCMAKE_C_FLAGS_DEBUG=-g1 -DCMAKE_CXX_FLAGS_DEBUG=-g1"
 
-mkdir $BUILD_PATH;
-cd $BUILD_PATH && rm -rf * &&
+mkdir -p -- "$BUILD_PATH";
+cd "$BUILD_PATH" && find . -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + &&
    echo CMAKE_OPT=${CMAKE_OPT} &&
    echo COMPILE_OPT=\"${COMPILE_OPT[@]}\" &&
    echo ADDITIONAL_OPTS="$ADDITIONAL_OPTS" &&
-   $JOB_CMAKE ${CMAKE_OPT} "${COMPILE_OPT[@]}" $ADDITIONAL_OPTS $SRV_PATH &&
+   $JOB_CMAKE ${CMAKE_OPT} "${COMPILE_OPT[@]}" $ADDITIONAL_OPTS "$SRV_PATH" &&
    echo CMAKE_OPT=${CMAKE_OPT} &&
    echo COMPILE_OPT=\"${COMPILE_OPT[@]}\" &&
    echo ADDITIONAL_OPTS="$ADDITIONAL_OPTS"

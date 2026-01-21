@@ -46,12 +46,16 @@ if [[ "$SRV_VER" != +(5.7|8.0|8.4) ]] && [[ "$SRV_VER" != +(FB56|FB8) ]] && [[ "
 fi
 
 DEBUG=1;
+STOP_ON_WARN=ON;
+PACKAGE_FLAGS=OFF;
+
 for var in "${@:2}"
 do
 case $var in
   debug) DEBUG=1; RELEASE=0 ;;
   rel) DEBUG=0; RELEASE=1 ;;
   docker) DOCKER=1 ;;
+  lto) STOP_ON_WARN=OFF; PACKAGE_FLAGS=ON; DEBUG=0; RELEASE=0; LTO=1 ;;
 esac
 done
 
@@ -77,20 +81,25 @@ else
    BUILD_PATH=/data/docker/${PRETTY_NAME}-$ARCH-$1
 fi
 
-if [ "$RELEASE" == "1" ]; then
-   BUILD=RelWithDebInfo;
-   BUILD_PATH+=-rel;
+if [ "$LTO" == "1" ]; then
+   BUILD=Release;
+   BUILD_PATH+=-lto;
 else
-   BUILD=Debug;
-   BUILD_PATH+=-deb;
+   if [ "$RELEASE" == "1" ]; then
+      BUILD=RelWithDebInfo;
+      BUILD_PATH+=-rel;
+   else
+      BUILD=Debug;
+      BUILD_PATH+=-deb;
+   fi
 fi
 
-STOP_ON_WARN=ON;
 for var in "${@:2}"
 do
 case $var in
   deb*) ;;
   rel) ;;
+  lto) ;;
   docker) ;;
   zenfs*) ZENFS=1; BUILD_PATH+=-zenfs ;;
   invert*) INVERTED=1; BUILD_PATH+=-inverted ;;
@@ -143,7 +152,7 @@ CMAKE_OPT_COMMON_84="
 
 CMAKE_MYSQL_57="
  $CMAKE_OPT_COMMON
- -DWITH_PACKAGE_FLAGS=OFF
+ -DWITH_PACKAGE_FLAGS=$PACKAGE_FLAGS
  -DWITH_ZLIB=bundled
  -DWITH_EMBEDDED_SERVER=ON
  -DWITH_SCALABILITY_METRICS=ON
@@ -163,7 +172,7 @@ CMAKE_PERCONA_57="
 
 CMAKE_MYSQL_80="
  $CMAKE_OPT_COMMON
- -DWITH_PACKAGE_FLAGS=OFF
+ -DWITH_PACKAGE_FLAGS=$PACKAGE_FLAGS
  -DWITH_NDB=OFF
  -DWITH_NDBCLUSTER=OFF
  -DWITH_MECAB=system
@@ -177,7 +186,7 @@ CMAKE_MYSQL_80="
 
 CMAKE_MYSQL_84="
  $CMAKE_OPT_COMMON_84
- -DWITH_PACKAGE_FLAGS=OFF
+ -DWITH_PACKAGE_FLAGS=$PACKAGE_FLAGS
  -DWITH_NDB=OFF
  -DWITH_NDBCLUSTER=OFF
  -DWITH_MECAB=system
@@ -205,7 +214,7 @@ CMAKE_PERCONA_LIBS_84="
 
 
 CMAKE_PERCONA_80_BUNDLED="
- -DWITH_PACKAGE_FLAGS=OFF
+ -DWITH_PACKAGE_FLAGS=$PACKAGE_FLAGS
 
  -DWITH_AUTHENTICATION_CLIENT_PLUGINS=ON
  -DWITH_AUTHENTICATION_FIDO=ON
@@ -334,6 +343,13 @@ case $SRV_VER in
          ;;
 esac
 
+if [ "$LTO" == "1" ]; then
+   COMPILE_OPT+=(
+    -DWITH_LTO=ON
+    #-DCMAKE_C_FLAGS="-O3 -march=x86-64-v3 -mtune=native"
+    #-DCMAKE_CXX_FLAGS="-O3 -march=x86-64-v3 -mtune=native"
+   )
+fi
 
 if [ "$OPT_G1" == "1" ]; then
    COMPILE_OPT+=(

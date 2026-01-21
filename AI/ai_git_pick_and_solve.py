@@ -26,44 +26,56 @@ def get_commit_list(commit_range):
     return commits
 
 def wait_for_user_to_continue():
-    user_input = input("Press Enter to continue, or 'q' to quit: ")
-    if user_input.lower() == 'q':
-        print("Aborting script at user request.")
-        sys.exit(0)
+    while True:
+        user_input = input("Press 'c' or Enter to continue, 'q' to quit, or enter a number for new chunk size: ").strip().lower()
+        if user_input == 'q':
+            print("Aborting script at user request.")
+            sys.exit(0)
+        elif user_input == 'c' or user_input == '':
+            return None
+        elif user_input.isdigit():
+            return int(user_input)
+        else:
+            print("Invalid input. Please try again.")
 
 def process_commits(commits, model, log_dir):
-    found_marker = False
+    marker_title = "Make MyRocks buildable"
+    marker_index = -1
+
+    # At start check if marker is in batch (globally)
+    for idx, commit in enumerate(commits):
+        if marker_title in commit["title"]:
+            marker_index = idx
+            break
+
+    override_chunk_size = None
     i = 0
     while i < len(commits):
-        # Adjust chunk size based on whether we passed the marker commit
-        if found_marker:
-            current_chunk_size = 16
-        else:
+        # If there is a marker then use current_chunk_size = 128 before marker
+        # and current_chunk_size = 16 after marker (or if no marker found)
+        if override_chunk_size is not None:
+            current_chunk_size = override_chunk_size
+        elif marker_index != -1 and i <= marker_index:
             current_chunk_size = 128
+            # Check if the marker is within this potential chunk
+            if i + current_chunk_size > marker_index:
+                current_chunk_size = marker_index - i + 1
+                print(f"Found marker commit. Adjusting batch size to finish this commit, then switching to 16.")
+        else:
+            # If there in no marker current_chunk_size = 16
+            current_chunk_size = 16
         
         chunk_end = min(i + current_chunk_size, len(commits))
         current_batch = commits[i:chunk_end]
-        
-        # Check for marker in this batch if not yet found
-        marker_index_in_batch = -1
-        if not found_marker:
-            for idx, commit in enumerate(current_batch):
-                if "Make MyRocks buildable" in commit["title"]:
-                    marker_index_in_batch = idx
-                    found_marker = True
-                    break
-        
-        if marker_index_in_batch != -1:
-            # Resize this batch to end at the marker commit
-            current_batch = current_batch[:marker_index_in_batch + 1]
-            chunk_end = i + len(current_batch)
-            print(f"Found marker commit. Adjusting batch size to finish this commit, then switching to 16.")
             
         cherry_pick_batch(current_batch, model, len(commits) - i - len(current_batch), log_dir)
 
         # Wait for user acceptance
         print(f"Batch completed. {len(commits) - chunk_end} commits remaining.")
-        wait_for_user_to_continue()
+        res = wait_for_user_to_continue()
+        if res is not None:
+            override_chunk_size = res
+            print(f"Chunk size set to {override_chunk_size} for next batches.")
 
         i = chunk_end
 

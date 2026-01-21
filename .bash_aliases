@@ -1,9 +1,9 @@
 alias vpn-import="sudo openvpn3 config-import --config /home/przemek/.ssh/ovpn/profile-902.ovpn"
 alias vpn-start="sudo openvpn3 session-start --config /home/przemek/.ssh/ovpn/profile-902.ovpn"
-alias ssh14="ssh przemyslaw.skibinski@10.30.3.14 -i /home/przemek/.ssh/inikep.priv"
-alias ssh117="ssh przemyslaw.skibinski@10.30.7.117 -i /home/przemek/.ssh/inikep.priv"
-alias ssh134="ssh przemyslaw.skibinski@10.30.7.134 -i /home/przemek/.ssh/inikep.priv"
+alias ssh117="ssh przemyslaw.skibinski@10.30.7.117 -i /home/przemek/.ssh/inikep-rsa4096.priv"
+alias ssh134="ssh przemyslaw.skibinski@10.30.7.134 -i /home/przemek/.ssh/inikep-rsa4096.priv"
 function sshini() { ssh przemyslaw.skibinski@$1 -i /home/przemek/.ssh/inikep-rsa4096.priv $2 $3; }
+alias sshkvm="ssh -p 2222 -i /home/przemek/.ssh/inikep-rsa4096.priv przemek@10.30.2.13"
 
 alias cf_on="git config --local include.path /data/mysql-server/percona-8.0/.gitconfig"
 alias cf_off="git config --local --unset include.path"

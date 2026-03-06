@@ -63,7 +63,7 @@ def process_commits(commits, model, log_dir):
                 print(f"Found marker commit. Adjusting batch size to finish this commit, then switching to 16.")
         else:
             # If there in no marker current_chunk_size = 16
-            current_chunk_size = 16
+            current_chunk_size = 8
         
         chunk_end = min(i + current_chunk_size, len(commits))
         current_batch = commits[i:chunk_end]
@@ -144,7 +144,36 @@ def cherry_pick_batch(current_batch, model, commits_remaining, log_dir):
                 break
             except subprocess.CalledProcessError:
                 print("Conflict detected.")
-                handle_conflict(model, log_dir)
+                subprocess.run("git status", shell=True)
+                
+                action = None
+                while True:
+                    print("s) skip commit (git cherry-pick --skip)")
+                    print("c) solve Conflict manually and continue")
+                    print("q) quit (git cherry-pick --quit)")
+                    print("l) solve Conflict with LLM")
+                    ans = input("Choose option: ").strip().lower()
+                    
+                    if ans == 'q':
+                        subprocess.run("git cherry-pick --quit", shell=True)
+                        sys.exit(0)
+                    elif ans == 's':
+                        action = 'skip'
+                        break
+                    elif ans == 'c':
+                        action = 'continue'
+                        break
+                    elif ans == 'l':
+                        handle_conflict(model, log_dir)
+                        print("LLM resolution completed.")
+                        action = 'continue'
+                        break
+                
+                if action == 'skip':
+                     cmd = "git cherry-pick --skip"
+                     env["GIT_EDITOR"] = "true"
+                     continue
+
                 ensure_git_has_only_staged_changes()
                 if not is_cherry_pick_in_progress():
                     print("Cherry-pick state cleared (likely finished or aborted by user). Stopping this batch.")

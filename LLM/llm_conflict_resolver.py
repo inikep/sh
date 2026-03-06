@@ -2,7 +2,7 @@
 import argparse
 import subprocess
 import sys
-from ai_utils import resolve_conflicts, run_command
+from llm_utils import resolve_conflicts, run_command
 
 def main():
     parser = argparse.ArgumentParser(description="Check out to base commit and cherry-pick a commit (if params provided). Then resolve conflicts using AI.")

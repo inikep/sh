@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 
 # Import resolve_conflicts from the provided module
-from ai_utils import resolve_conflicts, run_command
+from llm_utils import resolve_conflicts, run_command
 
 
 def get_commit_list(commit_range):

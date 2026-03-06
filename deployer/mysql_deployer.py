@@ -41,6 +41,14 @@ if __name__ == "__main__":
     if args.init:
         init_datadir(mysqld_path, args.basedir, args.datadir, err_log)
 
+    if not os.path.exists(args.datadir):
+        answer = input(f"[WARN] Datadir '{args.datadir}' not found. Initialize it? [y/N] ").strip().lower()
+        if answer == "y":
+            init_datadir(mysqld_path, args.basedir, args.datadir, err_log)
+        else:
+            print("[ERROR] Datadir does not exist. Exiting.")
+            exit(1)
+
     conn = None
     with open(output_file, "w") as outfile:
         try:

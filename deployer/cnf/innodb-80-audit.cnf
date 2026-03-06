@@ -1,0 +1,74 @@
+[mysqld]
+# binary log
+binlog_row_image=minimal
+#loose-binlog_space_limit=4G
+
+# connections
+connect_timeout=120
+back_log=4K
+max_connections=4K
+max_prepared_stmt_count=4M
+
+# general
+table_open_cache=256K
+table_open_cache_instances=64
+
+# InnoDB
+innodb_open_files=4K
+innodb_redo_log_capacity=16G
+innodb_fast_shutdown=0
+
+# Defaults from MySQL 8.0
+innodb_doublewrite_files=16
+innodb_doublewrite_pages=4
+innodb_page_cleaners=4
+innodb_parallel_read_threads=4
+innodb_read_io_threads=4
+innodb_log_buffer_size=16M
+innodb_use_fdatasync=OFF
+innodb_buffer_pool_instances=8
+#temptable_max_ram=1G
+#temptable_max_mmap=1G
+#temptable_use_mmap=ON
+
+# Defaults from MySQL 8.4
+innodb_change_buffering=none
+innodb_flush_method=O_DIRECT
+innodb_adaptive_hash_index=OFF
+innodb_numa_interleave=1
+innodb_io_capacity=10000
+gtid_mode=OFF
+enforce_gtid_consistency=OFF
+
+# audit_log_filter PLUGIN
+loose-audit_log_filter_disable        = OFF
+loose-audit_log_filter_database       = mysql
+loose-audit_log_filter_format         = JSON
+#loose-audit_log_filter_format         = NEW
+#loose-audit_log_filter_format         = OLD
+loose-audit_log_filter_rotate_on_size = 4G
+loose-audit_log_filter_max_size       = 16G
+#loose-audit_log_filter_strategy       = SYNCHRONOUS
+loose-audit_log_filter_strategy       = ASYNCHRONOUS
+loose-audit_log_filter_compression    = NONE
+#loose-audit_log_filter_compression    = GZIP
+#loose-audit_log_filter_buffer_size     = 256M
+#loose-audit_log_filter_read_buffer_size = 1M
+#loose-audit_log_filter_handler=SYSLOG
+
+# audit_log_filter COMPONENT
+loose-audit_log_filter.disable        = OFF
+loose-audit_log_filter.database       = mysql
+loose-audit_log_filter.format         = JSON
+loose-audit_log_filter.rotate_on_size = 4G
+loose-audit_log_filter.max_size       = 16G
+loose-audit_log_filter.strategy       = ASYNCHRONOUS
+loose-audit_log_filter.compression    = NONE
+
+# audit_log COMMERCIAL or OLD PERCONA PLUGIN
+#loose-audit_log_format = NEW
+loose-audit_log_format = JSON
+loose-audit_log_buffer_size = 256M
+loose-audit_log_rotate_on_size = 4G
+loose-audit-log=FORCE_PLUS_PERMANENT
+loose-audit_log_strategy=ASYNCHRONOUS

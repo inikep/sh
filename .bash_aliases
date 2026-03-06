@@ -19,19 +19,22 @@ alias zenfs-free-zones="zbd report /dev/nvme1n2 | grep em | wc -l"
 alias hibernate="systemctl hibernate"
 
 MTR_BASE="./mysql-test/mtr --debug-server --retry-failure=0 --mysqld-env=LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libeatmydata.so --mysqld=--replica-parallel-workers=4"
-MTR_PARALLEL="$MTR_BASE --parallel=auto --force --max-test-fail=0"
-MTR_SANITIZE="$MTR_PARALLEL --sanitize"
+MTR_FORCE="$MTR_BASE --force --max-test-fail=0"
+MTR_SANITIZE="$MTR_FORCE --sanitize"
 alias     mtr-single="$MTR_BASE"
 alias      mtr-zenfs="sudo $MTR_BASE --mysqld=--rocksdb_fs_uri=zenfs://dev:nvme1n2"
 alias   mtr-jemalloc="$MTR_BASE --mysqld-env=LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so:/usr/lib/x86_64-linux-gnu/libeatmydata.so"
-alias   mtr-valgrind="$MTR_PARALLEL --shutdown-timeout=150 --valgrind --valgrind-clients --valgrind-option=--num-callers=32 --valgrind-option=--show-leak-kinds=all --valgrind-option=--leak-check=full"
+alias   mtr-valgrind="$MTR_FORCE --shutdown-timeout=150 --valgrind --valgrind-clients --valgrind-option=--num-callers=32 --valgrind-option=--show-leak-kinds=all --valgrind-option=--leak-check=full"
 alias     mtr-massif="$MTR_BASE --shutdown-timeout=150 --valgrind --valgrind-clients --valgrind-option=--tool=massif"
-function mtr-parallel-aio() { t $MTR_PARALLEL --mysqld=--innodb_use_native_aio=0 $@; }
-function mtr-parallel() { t $MTR_PARALLEL $@; }
-function      mtr-rec() { t $MTR_PARALLEL --record $@; }
-function      mtr-big() { t $MTR_PARALLEL --big-test $@; }
-alias       mtr-fb56="$MTR_PARALLEL --mysqld=--default-storage-engine=rocksdb --mysqld=--rocksdb=1 --mysqld=--skip-innodb --mysqld=--default-tmp-storage-engine=MyISAM"
-alias       mtr-fb80="$MTR_PARALLEL --mysqld=--default-storage-engine=rocksdb --charset-for-testdb=latin1"
+function mtr-parallel-aio() { t $MTR_FORCE --parallel=64 --mysqld=--innodb_use_native_aio=0 $@; }
+function mtr-parallel() { t $MTR_FORCE --parallel=auto --mysqld=--innodb_read_io_threads=4 $@; }
+function mtr-parallel32() { t $MTR_FORCE --parallel=32 --mysqld=--innodb_read_io_threads=4 $@; }
+function mtr-parallel64() { t $MTR_FORCE --parallel=64 --mysqld=--innodb_read_io_threads=4 $@; }
+function      mtr-rec() { t $MTR_FORCE --parallel=32 --record $@; }
+function      mtr-rec64() { t $MTR_FORCE --parallel=64 --record $@; }
+function      mtr-big() { t $MTR_FORCE --big-test $@; }
+alias       mtr-fb56="$MTR_FORCE --mysqld=--default-storage-engine=rocksdb --mysqld=--rocksdb=1 --mysqld=--skip-innodb --mysqld=--default-tmp-storage-engine=MyISAM"
+alias       mtr-fb80="$MTR_FORCE --mysqld=--default-storage-engine=rocksdb --charset-for-testdb=latin1"
 alias   mtr-sanitize="$MTR_SANITIZE --mysqld-env=LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libasan.so"
 alias  mtr-sanitize5="$MTR_SANITIZE --mysqld-env=LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libasan.so.5:/usr/lib/x86_64-linux-gnu/libeatmydata.so"
 alias  mtr-sanitize6="$MTR_SANITIZE --mysqld-env=LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libasan.so.6:/usr/lib/x86_64-linux-gnu/libeatmydata.so"

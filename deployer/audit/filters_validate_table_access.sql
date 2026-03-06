@@ -369,3 +369,52 @@ SELECT audit_log_filter_set_filter('filter_broken_emptyField', '{"filter": { "cl
       }
   }
 ] } }');
+
+# ---------------------------------------------------------------
+# Broken multi-field filters: first field valid, second broken
+# ---------------------------------------------------------------
+
+# BROKEN: nonexistent field name after valid field
+SELECT audit_log_filter_set_filter('filter_broken_and_badField', '{"filter": { "class": [
+  { "name": "table_access",
+      "event": {
+        "name": [ "read" ],
+        "log": {
+          "and": [
+            { "field": { "name": "connection_id", "value": 1 } },
+            { "field": { "name": "NONEXISTENT.str", "value": "x" } }
+          ]
+        }
+      }
+  }
+] } }');
+
+# BROKEN: field from wrong class after valid field (general_command.str belongs to "general")
+SELECT audit_log_filter_set_filter('filter_broken_and_wrongClass', '{"filter": { "class": [
+  { "name": "table_access",
+      "event": {
+        "name": [ "read" ],
+        "log": {
+          "and": [
+            { "field": { "name": "connection_id", "value": 1 } },
+            { "field": { "name": "general_command.str", "value": "Query" } }
+          ]
+        }
+      }
+  }
+] } }');
+
+# BROKEN: integer value for string field after valid field
+SELECT audit_log_filter_set_filter('filter_broken_and_strAsInt', '{"filter": { "class": [
+  { "name": "table_access",
+      "event": {
+        "name": [ "read" ],
+        "log": {
+          "and": [
+            { "field": { "name": "connection_id", "value": 1 } },
+            { "field": { "name": "query.str", "value": 42 } }
+          ]
+        }
+      }
+  }
+] } }');

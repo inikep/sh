@@ -236,6 +236,56 @@ SELECT audit_log_filter_set_filter('filter_bad1', '{"filter": { "class": [
 ] } }');
 
 
+SELECT audit_log_filter_set_filter('filter_gen_AND', '{"filter": { "class": [
+  { "name": "general",
+      "event": {
+        "name": "status",
+        "log": {
+          "and": [
+            { "field": { "name": "general_command.str", "value": "Query" } },
+            { "field": { "name": "general_sql_command.str", "value": "select" } }
+          ]
+        }
+      }
+  }
+] } }');   
+
+SELECT audit_log_filter_set_filter('filter_gen_OR', '{"filter": { "class": [
+  { "name": "general",
+      "event": {
+        "name": "status",
+        "log": {
+          "or": [
+            { "field": { "name": "general_sql_command.str", "value": "create_table" } },
+            { "field": { "name": "general_sql_command.str", "value": "select" } }
+          ]
+        }
+      }
+  }
+] } }');
+
+SELECT audit_log_filter_set_filter('filter_broken_queryLen_str', '{"filter": { "class": [
+  { "name": "table_access",
+      "event": {
+        "name": [ "read" ],
+        "log": {
+          "field": { "name": "query.length", "value": "aa8" }
+        }
+      }
+  }
+] } }');
+
+SELECT audit_log_filter_set_filter('filter_con_connType', '{"filter": { "class": [
+  { "name": "connection",
+      "event": {
+        "name": [ "connect", "change_user", "disconnect" ],
+        "log": {
+          "field": { "name": "connection_type", "value": "aa8"}
+        }
+      }
+  }
+] } }');
+
 
 SELECT PLUGIN_NAME, PLUGIN_STATUS FROM INFORMATION_SCHEMA.PLUGINS WHERE PLUGIN_NAME LIKE 'audit%';
 SHOW GLOBAL VARIABLES LIKE 'audit%';
@@ -250,4 +300,7 @@ SHOW GLOBAL VARIABLES LIKE 'audit%';
 # SELECT audit_log_filter_set_user('%', 'filter_all'); # 8 records/query 
 # SELECT audit_log_filter_set_user('%', 'filter_gen_que'); # 5 records/query 
 # SELECT audit_log_filter_set_user('%', 'filter_gen'); # 3 records/query 
-# SELECT audit_log_filter_set_user('%', 'filter_genQuery'); # 1 records/query 
+# SELECT audit_log_filter_set_user('%', 'filter_genQuery'); # 1 records/query
+
+#SELECT audit_log_filter_set_user('%', 'filter_gen_OR');
+SELECT audit_log_filter_set_user('%', 'filter_all');

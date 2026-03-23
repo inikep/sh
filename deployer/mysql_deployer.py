@@ -28,6 +28,7 @@ if __name__ == "__main__":
     parser.add_argument("--password", default="", help="MySQL base password")
     parser.add_argument("--charset", default="utf8", help="Change client charset")
     parser.add_argument("--cnf", default=None, help="Path to MySQL config file (my.cnf)")
+    parser.add_argument("--database", default=None, help="Default database to USE after connecting")
     args = parser.parse_args()
 
     base_name = os.path.splitext(os.path.abspath(args.datadir))[0]
@@ -56,7 +57,7 @@ if __name__ == "__main__":
             proc = start_mysqld(mysqld_path, args.basedir, temp_datadir, args.port, socket_path, err_log, args.params, args.gdb, args.rocks, cnf_file=args.cnf)
 
             wait_for_mysql_or_crash(args.basedir, err_log, args.port, user=args.user, password=args.password, timeout=60)
-            conn = open_mysql_connection(args, socket_path)
+            conn = open_mysql_connection(args, socket_path, database=args.database)
 
             if args.sql:
                 for sql_path in args.sql:
@@ -64,7 +65,7 @@ if __name__ == "__main__":
                         print(f"[INFO] Running SQL file: {sql_path}")
                         execute_sql_file(conn, sql_path, args.charset)
                         close_mysql_connection(conn)
-                        conn = open_mysql_connection(args, socket_path)
+                        conn = open_mysql_connection(args, socket_path, database=args.database)
                     else:
                         print(f"[WARN] SQL file not found: {sql_path}")
 

@@ -227,44 +227,127 @@ def open_mysql_connection(args, socket_path, database=None):
     except Exception as e:
         raise RuntimeError(f"Failed to connect to MySQL: {e}") from e
 
+def _consume_connection(conn):
+    """Drain any pending result sets left on the connection."""
+    try:
+        while conn.unread_result:
+            conn.get_rows()
+    except Exception:
+        pass
+
+
 def execute_query(conn, query, params=None):
     """
     Execute a SQL query on the given connection.
-    Returns fetched results for queries that return rows, otherwise returns affected row count.
+
+    Handles multiple result sets (e.g. CALL to a stored procedure that
+    contains SELECTs).  Returns a list of rows for the *first* result set
+    that has columns, or the affected-row count when there are none.
     """
     if conn is None or not conn.is_connected():
         raise RuntimeError("MySQL connection is not open.")
 
-    cursor = conn.cursor()
+    _consume_connection(conn)
+
+    cursor = conn.cursor(buffered=True)
     try:
         cursor.execute(query, params or ())
-        # Queries that return results
-        if cursor.description:  # SELECT or similar
+
+        result = None
+
+        if cursor.description:
             result = cursor.fetchall()
         else:
-            conn.commit()
             result = cursor.rowcount
+
+        while True:
+            try:
+                if not cursor.nextset():
+                    break
+                if cursor.description:
+                    rows = cursor.fetchall()
+                    if result is None:
+                        result = rows
+            except Exception:
+                break
+
+        if not isinstance(result, list):
+            conn.commit()
     finally:
         cursor.close()
+        _consume_connection(conn)
     return result
+
+def _split_sql_with_delimiter(sql_text):
+    """
+    Split SQL text into executable statements, honouring DELIMITER directives.
+
+    DELIMITER is a mysql-client command, not real SQL.  This parser strips
+    DELIMITER lines and uses whatever delimiter is currently active to split
+    statements, so stored procedures / triggers that contain semicolons in
+    their body are kept intact.
+    """
+    delimiter = ";"
+    statements = []
+    current = []
+
+    for line in sql_text.splitlines():
+        stripped = line.strip()
+
+        # Skip pure comments
+        if stripped.startswith("--") or stripped.startswith("#"):
+            continue
+
+        # Handle DELIMITER directives (e.g. "DELIMITER //" or "DELIMITER ;")
+        if stripped.upper().startswith("DELIMITER"):
+            parts = stripped.split(None, 1)
+            if len(parts) == 2:
+                delimiter = parts[1].strip()
+            current = []
+            continue
+
+        if delimiter == ";":
+            # Fast path: standard semicolon delimiter — split within the line
+            current.append(line)
+            joined = "\n".join(current)
+            parts = joined.split(delimiter)
+            # Everything except the last fragment is a complete statement
+            for part in parts[:-1]:
+                stmt = part.strip()
+                if stmt:
+                    statements.append(stmt)
+            # The last fragment is the start of the next (possibly incomplete) stmt
+            remainder = parts[-1].strip()
+            current = [remainder] if remainder else []
+        else:
+            # Custom delimiter — look for it at the end of the line
+            if stripped.endswith(delimiter):
+                current.append(line[:line.rfind(delimiter)])
+                stmt = "\n".join(current).strip()
+                if stmt:
+                    statements.append(stmt)
+                current = []
+            else:
+                current.append(line)
+
+    # Anything left over (no trailing delimiter)
+    leftover = "\n".join(current).strip()
+    if leftover:
+        statements.append(leftover)
+
+    return statements
+
 
 def execute_sql_file(conn, sql_path, charset):
     """
-    Reads a .sql file, splits on semicolons, executes each SQL statement,
-    and prints results or affected rows depending on query type.
+    Reads a .sql file, splits it into statements (respecting DELIMITER
+    directives for stored programs), executes each statement, and prints
+    results or affected rows.
     """
     with open(sql_path, "r", encoding=charset) as fh:
         sql_text = fh.read()
 
-    # Remove lines starting with optional spaces followed by "-- " or "#"
-    sql_lines = [
-        line for line in sql_text.splitlines()
-        if not line.lstrip().startswith(("--", "#"))
-    ]
-    cleaned_sql = "\n".join(sql_lines)
-
-    # Split on semicolon, discard blank statements
-    statements = [s.strip() for s in cleaned_sql.split(";") if s.strip()]
+    statements = _split_sql_with_delimiter(sql_text)
 
     for stmt in statements:
         print(f"[SQL] Executing: {stmt}")
@@ -272,33 +355,24 @@ def execute_sql_file(conn, sql_path, charset):
         try:
             result = execute_query(conn, stmt)
 
-            # SELECT-like queries return a list of rows
             if isinstance(result, list):
                 if result:
                     print("[SQL] Result rows:")
                     for row in result:
                         print("   ", row)
-                        #print("==========")
-                        #data_list = json.loads(row[0])
-                        ## Print each record on a single line
-                        #for record in data_list:
-                        #    if record is not None:  # Skip the trailing null
-                        #        print(json.dumps(record, separators=(',', ':')))
                 else:
                     print("[SQL] (No rows returned)")
 
-            # Non-SELECT queries return an integer rowcount
             elif isinstance(result, int):
                 print(f"[SQL] Query OK, affected rows: {result}")
 
-            # Fallback (should not happen)
             else:
                 print(f"[SQL] Raw result: {result}")
 
         except Exception as e:
             print(f"[SQL ERROR] {e}")
 
-        print()  # blank line for readability
+        print()
 
 def close_mysql_connection(conn):
     """

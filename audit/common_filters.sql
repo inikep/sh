@@ -2,6 +2,10 @@ SELECT audit_log_filter_set_filter('filter_all', '{
   "filter": { "log": true } 
 }');
 
+SELECT audit_log_filter_set_filter('filter_none', '{
+  "filter": { "log": false } 
+}');
+
 SELECT audit_log_filter_set_filter('filter_empty', '{
   "filter": { } 
 }');
@@ -304,3 +308,4 @@ SHOW GLOBAL VARIABLES LIKE 'audit%';
 
 #SELECT audit_log_filter_set_user('%', 'filter_gen_OR');
 SELECT audit_log_filter_set_user('%', 'filter_all');
+#SELECT audit_log_filter_set_user('%', 'filter_none');

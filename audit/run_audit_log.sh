@@ -40,7 +40,7 @@ case "$AUDIT_FORMAT" in
         ;;
 esac
 
-LOGS_DIR=$AUDIT_DIR/logs_audit_${AUDIT_FORMAT}
+LOGS_DIR=$AUDIT_DIR/logs/$(basename "${SQL_FILE}" .sql)_${AUDIT_FORMAT}
 mkdir -p $LOGS_DIR
 
 case "$MODE" in
@@ -113,17 +113,11 @@ echo "[INFO] INSTALL:  $INSTALL_FILE"
 echo "[INFO] SQL:      $SQL_FILE"
 echo "[INFO] LOGS_DIR: $LOGS_DIR"
 
-# Bound this run's audit output: the newest path in LOGS_DIR may be from another
-# mysqld that shares the same directory, not from mysql_deployer.py below.
-AUDIT_RUN_MARKER="$LOGS_DIR/.audit_run_marker.$$.$RANDOM"
-touch "$AUDIT_RUN_MARKER"
-trap 'rm -f -- "$AUDIT_RUN_MARKER" 2>/dev/null' EXIT
-
 $DEPLOYER_DIR/mysql_deployer.py \
    --basedir $BASEDIR \
    --datadir $DATA_DIR \
    --cnf $CNF_FILE \
-   --params="$MYSQLD_PARAMS $FILTER_FORMAT" \
+   --params="$MYSQLD_PARAMS $FILTER_FORMAT --loose-audit_log_filter.event_mode=FULL" \
    --sql $AUDIT_DIR/$INSTALL_FILE  \
    --sql $AUDIT_DIR/$COMMON_SQL  \
    --sql $AUDIT_DIR/$SQL_FILE
@@ -132,96 +126,27 @@ $DEPLOYER_DIR/mysql_deployer.py \
 #  --socket
 #  --sh $DEPLOYER_DIR/run_mysqlslap.sh \
 
-# Server rotates the active log on shutdown to TAG.<timestamp>.<ext>_ (rename).
-# On Linux, rename updates ctime but not mtime, so mtime can stay *before* the
-# pre-run marker while ctime reflects this shutdown — use max(mtime, ctime).
-# Then max embedded time (YYYYMMDDTHHMMSS[-N]). AUDIT_LOG_DEBUG=1 for stderr trace.
-AUDIT_LOG_PATH="$(
-  LOGS_DIR="$LOGS_DIR" TAG="$TAG" LOG_BASENAME_EXT="$LOG_BASENAME_EXT" \
-  AUDIT_RUN_MARKER="$AUDIT_RUN_MARKER" \
-  AUDIT_LOG_DEBUG="${AUDIT_LOG_DEBUG:-}" \
-  python3 - <<'PY'
-import glob, os, re, sys
+# Deployer can return before the audit component finishes renaming TAG.<ext>_ to
+# TAG.<timestamp>.<ext>_ (async strategy / shutdown ordering). Wait until the
+# active basename disappears or timeout, so the picker sees the final rotation.
+AUDIT_ACTIVE_LOG="$LOGS_DIR/${TAG}.${LOG_BASENAME_EXT}_"
+_audit_wait_until=$((SECONDS + 30))
+while [[ -e "$AUDIT_ACTIVE_LOG" ]] && (( SECONDS < _audit_wait_until )); do
+  sleep 0.2
+done
+if [[ -e "$AUDIT_ACTIVE_LOG" ]]; then
+  echo "[WARN] Active audit log still present after 30s wait: $AUDIT_ACTIVE_LOG"
+fi
 
-log_dir = os.environ["LOGS_DIR"]
-tag = os.environ["TAG"]
-ext = os.environ["LOG_BASENAME_EXT"]
-marker_path = os.environ.get("AUDIT_RUN_MARKER", "")
-debug = os.environ.get("AUDIT_LOG_DEBUG", "").lower() in ("1", "yes", "true")
-
-def dbg(*a):
-    if debug:
-        print(*a, file=sys.stderr)
-
-suffix = "." + ext + "_"
-paths = glob.glob(os.path.join(log_dir, f"{tag}.*{suffix}"))
-paths = [p for p in paths if p.endswith(suffix) and not p.endswith(suffix + "2")]
-rx = re.compile(r"\.(\d{8}T\d{6})(?:-(\d+))?" + re.escape(suffix) + r"$")
-
-def sort_key(path):
-    m = rx.search(os.path.basename(path))
-    if not m:
-        return ("", -1)
-    return (m.group(1), int(m.group(2) or 0))
-
-dbg("audit log pick:", "LOGS_DIR=", log_dir, "TAG=", tag, "EXT=", ext)
-dbg("marker=", marker_path, "exists=", os.path.exists(marker_path) if marker_path else False)
-dbg("glob count=", len(paths), "names=", [os.path.basename(p) for p in sorted(paths)])
-
-if not paths:
-    sys.exit(0)
-
-marker_t0 = None
-if marker_path and os.path.exists(marker_path):
-    marker_t0 = os.stat(marker_path).st_mtime
-
-
-def activity_time(path):
-    st = os.stat(path)
-    return max(st.st_mtime, st.st_ctime)
-
-
-scoped = paths
-if marker_t0 is not None:
-    scoped = [p for p in paths if activity_time(p) >= marker_t0]
-    dbg(
-        "after max(mtime,ctime)>=marker:",
-        len(scoped),
-        [os.path.basename(p) for p in sorted(scoped)],
-    )
-    if debug and paths:
-        for p in sorted(paths)[-3:]:
-            st = os.stat(p)
-            dbg(
-                "  ",
-                os.path.basename(p),
-                "mtime",
-                st.st_mtime,
-                "ctime",
-                st.st_ctime,
-                "marker",
-                marker_t0,
-            )
-
-if not scoped:
-    print(
-        "[WARN] run_audit_log.sh: no rotated audit file changed since the run marker "
-        "(max(mtime,ctime)); using newest name in LOGS_DIR (AUDIT_LOG_DEBUG=1 for details).",
-        file=sys.stderr,
-    )
-    dbg("activity filter empty; falling back to all glob matches")
-    scoped = paths
-
-parsed = [p for p in scoped if rx.search(os.path.basename(p))]
-if parsed:
-    chosen = max(parsed, key=sort_key)
-else:
-    chosen = max(scoped)
-dbg("chosen=", os.path.basename(chosen), "key=", sort_key(chosen))
-print(chosen)
-PY
-)"
-if [[ -z "$AUDIT_LOG_PATH" ]]; then
+# Glob TAG.<timestamp>.<ext>_ (not *<ext>_2); newest by mtime. With the active-log
+# wait above this is usually correct; if not, pick by timestamp in the basename instead.
+AUDIT_LOG_PATH=""
+shopt -s nullglob
+ROTATED=( "$LOGS_DIR/${TAG}."*".${LOG_BASENAME_EXT}_" )
+shopt -u nullglob
+if ((${#ROTATED[@]} > 0)); then
+  AUDIT_LOG_PATH="$(ls -t "${ROTATED[@]}" | head -n1)"
+else
   AUDIT_LOG_PATH="$LOGS_DIR/${TAG}.${LOG_BASENAME_EXT}_"
 fi
 
@@ -235,5 +160,28 @@ else
   else
     echo "[INFO] unfold_json.py input: $AUDIT_LOG_PATH"
     /data/sh/utils/unfold_json.py "$AUDIT_LOG_PATH" "$OUT_PATH"
+    python3 - "$OUT_PATH" <<'PY'
+import json, sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as f:
+    data = json.load(f)
+
+pairs = set()
+if isinstance(data, list):
+    for item in data:
+        if isinstance(item, dict):
+            c, e = item.get("class"), item.get("event")
+            if c is not None and e is not None:
+                pairs.add((str(c), str(e)))
+elif isinstance(data, dict):
+    c, e = data.get("class"), data.get("event")
+    if c is not None and e is not None:
+        pairs.add((str(c), str(e)))
+
+print(f"[INFO] unique class/event pairs: {len(pairs)}")
+for c, e in sorted(pairs):
+    print(f"--- {c}/{e} ---")
+PY
   fi
 fi

@@ -11,32 +11,15 @@ USE test;
 
 -- =====================================================================
 -- 1. General  (general_log, general_error, general_result, general_status)
+-- 2. Command  (command_start, command_end)
+-- 3. Parse  (parse_preparse, parse_postparse)
+-- 4. Query  (query_start, query_status_end)
 --    Every SQL statement produces general events.
 -- =====================================================================
 SELECT 1;
 
--- Force a general_error subclass by executing invalid SQL.
--- (Uncomment if you want an error in the log; the client will report it.)
--- DO syntax_error_here;
-
--- =====================================================================
--- 2. Command  (command_start, command_end)
---    Every client command (Query, Quit, Ping, etc.) fires these.
---    Each SQL statement below is itself a "Query" command.
--- =====================================================================
-SELECT 'command event';
-
--- =====================================================================
--- 3. Parse  (parse_preparse, parse_postparse)
---    Fired for every statement the server parses.
--- =====================================================================
-SELECT 'parse event';
-
--- =====================================================================
--- 4. Query  (query_start, query_status_end)
---    Every top-level query fires these.
--- =====================================================================
-SELECT 'query event - top level';
+-- general/error
+SELECT * FROM missing_table_for_audit;
 
 -- =====================================================================
 -- 5. Query – nested  (query_nested_start, query_nested_status_end)
@@ -134,41 +117,15 @@ FLUSH PRIVILEGES;
 -- (cannot be done from within a single SQL script)
 
 -- =====================================================================
--- 11. Message  (message_user)
---     Requires the audit_api_message_emit component.
+-- 11. Message  (message_internal, message_user)
+--     UDFs test_audit_api_message_* are registered by the test component
+--     component_test_audit_api_message (components/test/test_audit_api_message).
+--     For production-style emits use component_audit_api_message_emit and
+--     audit_api_message_emit_udf(...) instead.
 -- =====================================================================
-INSTALL COMPONENT 'file://component_audit_api_message_emit';
+INSTALL COMPONENT 'file://component_test_audit_api_message';
 
-SELECT audit_api_message_emit_udf(
-  'test_component',
-  'test_producer',
-  'trigger all events test',
-  'key1', 'value1',
-  'key2', 123
-) AS message_result;
+SELECT test_audit_api_message_internal();
+SELECT test_audit_api_message_user();
 
-UNINSTALL COMPONENT 'file://component_audit_api_message_emit';
-
--- =====================================================================
--- 12. Server Startup  (startup)
---     Only generated when mysqld starts. Cannot be triggered from SQL.
---     In MTR: --source include/restart_mysqld.inc
--- =====================================================================
--- (requires server restart)
-
--- =====================================================================
--- 13. Server Shutdown  (shutdown)
---     Generated when mysqld shuts down.
---     The SHUTDOWN statement will stop the server.
--- =====================================================================
--- Uncomment to actually shut down the server:
--- SHUTDOWN;
-
--- =====================================================================
--- Summary of events NOT triggerable from plain SQL:
---   - connection (connect / disconnect / change_user / pre_authenticate)
---   - server_startup
---   - server_shutdown  (SHUTDOWN works but terminates the server)
---   - message_internal (only emitted by server components, not the UDF)
---   - Percona-internal audit/noaudit events
--- =====================================================================
+UNINSTALL COMPONENT 'file://component_test_audit_api_message';

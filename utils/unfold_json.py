@@ -17,4 +17,3 @@ if __name__ == "__main__":
 
     unfold_json(sys.argv[1], sys.argv[2])
     print(f"Written pretty JSON to {sys.argv[2]}")
-

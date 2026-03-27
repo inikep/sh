@@ -3,11 +3,10 @@ set -o pipefail
 
 usage() {
     cat <<EOF
-Usage: $0 <mode> [sql_file] [format]
+Usage: $0 <mode> <format> [sql_file1] [sql_file2] .. [sql_fileX]
 
-  sql_file defaults to table_access_field_filters.sql
-  format   defaults to JSON; use NEW for the NEW (XML-based) audit format
-           (pass sql_file before format, e.g. ... table_access_field_filters.sql NEW)
+  format    JSON or NEW (XML-based audit format).
+  sql_files default to table_access_field_filters.sql when none are given.
 
 Modes:
   80old        (a) Old audit_log plugin           – Percona Server 8.0
@@ -20,17 +19,21 @@ EOF
 
 MODE="${1:-}"
 [[ -z "$MODE" ]] && usage
+shift
 
 DEPLOYER_DIR=/data/sh/deployer
 AUDIT_DIR=/data/sh/audit
 CNF_FILE=$AUDIT_DIR/cnf/innodb-84-audit.cnf
 
-COMMON_SQL=sql/filters_simple.sql
-SQL_FILE="${2:-table_access_field_filters.sql}"
-AUDIT_FORMAT_RAW="${3:-JSON}"
-# Bash 4+: uppercase for comparison; strip accidental whitespace
+#COMMON_SQL=sql/filters_simple.sql
+
+DEFAULT_SQL=( "table_access_field_filters.sql" )
+[[ $# -lt 1 ]] && usage
+
+AUDIT_FORMAT_RAW="${1}"
 AUDIT_FORMAT="${AUDIT_FORMAT_RAW^^}"
 AUDIT_FORMAT="${AUDIT_FORMAT//[[:space:]]/}"
+shift
 
 case "$AUDIT_FORMAT" in
     JSON|NEW) ;;
@@ -40,7 +43,18 @@ case "$AUDIT_FORMAT" in
         ;;
 esac
 
-LOGS_DIR=$AUDIT_DIR/logs/$(basename "${SQL_FILE}" .sql)_${AUDIT_FORMAT}
+if (($# == 0)); then
+    SQL_FILES=( "${DEFAULT_SQL[@]}" )
+else
+    SQL_FILES=( "$@" )
+fi
+
+_log_label_parts=()
+for _sf in "${SQL_FILES[@]}"; do
+    _log_label_parts+=( "$(basename "${_sf}" .sql)" )
+done
+LOG_LABEL=$(IFS=+; echo "${_log_label_parts[*]}")
+LOGS_DIR=$AUDIT_DIR/logs/${LOG_LABEL}_${AUDIT_FORMAT}
 mkdir -p $LOGS_DIR
 
 case "$MODE" in
@@ -110,19 +124,23 @@ echo "[INFO] Format: $AUDIT_FORMAT"
 echo "[INFO] BASEDIR:  $BASEDIR"
 echo "[INFO] DATA_DIR: $DATA_DIR"
 echo "[INFO] INSTALL:  $INSTALL_FILE"
-echo "[INFO] SQL:      $SQL_FILE"
+echo "[INFO] SQL:      ${SQL_FILES[*]}"
 echo "[INFO] LOGS_DIR: $LOGS_DIR"
+
+SQL_DEPLOY_ARGS=( )
+for _sf in "${SQL_FILES[@]}"; do
+    SQL_DEPLOY_ARGS+=( --sql "$AUDIT_DIR/$_sf" )
+done
 
 $DEPLOYER_DIR/mysql_deployer.py \
    --basedir $BASEDIR \
    --datadir $DATA_DIR \
    --cnf $CNF_FILE \
    --params="$MYSQLD_PARAMS $FILTER_FORMAT --loose-audit_log_filter.event_mode=FULL" \
-   --sql $AUDIT_DIR/$INSTALL_FILE  \
-   --sql $AUDIT_DIR/$COMMON_SQL  \
-   --sql $AUDIT_DIR/$SQL_FILE
+   --sql "$AUDIT_DIR/$INSTALL_FILE" \
+   "${SQL_DEPLOY_ARGS[@]}"
 
-#  --sql $AUDIT_DIR/$COMMON_SQL \
+#  --sql "$AUDIT_DIR/$COMMON_SQL"
 #  --socket
 #  --sh $DEPLOYER_DIR/run_mysqlslap.sh \
 

@@ -175,7 +175,7 @@ else
   OUT_PATH="${AUDIT_LOG_PATH%.${LOG_BASENAME_EXT}_}.filter.${LOG_BASENAME_EXT}_"
   if [[ "$AUDIT_FORMAT" == "NEW" ]]; then
     echo "[INFO] sort_xml_sibling_tags.py input: $AUDIT_LOG_PATH"
-    /data/sh/utils/sort_xml_sibling_tags.py "$AUDIT_LOG_PATH" -o "$OUT_PATH"
+    /data/sh/utils/sort_xml_sibling_tags.py "$AUDIT_LOG_PATH" -o "$OUT_PATH" --mask-timestamp-connection
   else
     echo "[INFO] unfold_json.py input: $AUDIT_LOG_PATH"
     /data/sh/utils/unfold_json.py --class-event-pairs --mask-timestamp-connection "$AUDIT_LOG_PATH" "$OUT_PATH"

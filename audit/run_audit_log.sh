@@ -3,9 +3,11 @@ set -o pipefail
 
 usage() {
     cat <<EOF
-Usage: $0 <mode> <format> [sql_file1] [sql_file2] .. [sql_fileX]
+Usage: $0 <mode> <format> [FULL] [sql_file1] [sql_file2] .. [sql_fileX]
 
-  format    JSON or NEW (XML-based audit format).
+  format    JSON, JSONL (one JSON object per line), or NEW (XML audit format).
+  FULL      Optional (audit_log_filter component modes only). Sets event_mode=FULL,
+            uses logs dir ..._<FORMAT>-full and file extension e.g. .jsonl-full_
   sql_files default to table_access_field_filters.sql when none are given.
 
 Modes:
@@ -36,12 +38,20 @@ AUDIT_FORMAT="${AUDIT_FORMAT//[[:space:]]/}"
 shift
 
 case "$AUDIT_FORMAT" in
-    JSON|NEW) ;;
+    JSONL|JSON|NEW) ;;
     *)
-        echo "ERROR: unknown format '$AUDIT_FORMAT_RAW' (use JSON or NEW)"
+        echo "ERROR: unknown format '$AUDIT_FORMAT_RAW' (use JSON, JSONL or NEW)"
         usage
         ;;
 esac
+
+EVENT_MODE=REDUCED
+FULL_SUFFIX=""
+if (($# > 0)) && [[ "${1^^}" == "FULL" ]]; then
+    EVENT_MODE=FULL
+    FULL_SUFFIX="-full"
+    shift
+fi
 
 if (($# == 0)); then
     SQL_FILES=( "${DEFAULT_SQL[@]}" )
@@ -54,7 +64,7 @@ for _sf in "${SQL_FILES[@]}"; do
     _log_label_parts+=( "$(basename "${_sf}" .sql)" )
 done
 LOG_LABEL=$(IFS=+; echo "${_log_label_parts[*]}")
-LOGS_DIR=$AUDIT_DIR/logs/${LOG_LABEL}_${AUDIT_FORMAT}
+LOGS_DIR=$AUDIT_DIR/logs/${LOG_LABEL}_${AUDIT_FORMAT}${FULL_SUFFIX}
 mkdir -p $LOGS_DIR
 
 case "$MODE" in
@@ -100,27 +110,36 @@ if [[ "$AUDIT_FORMAT" == "NEW" ]]; then
     TAG="${TAG}_new"
 fi
 
+case "$AUDIT_FORMAT" in
+    JSON)  LOG_BASENAME_EXT=json ;;
+    JSONL) LOG_BASENAME_EXT=jsonl ;;
+    NEW)   LOG_BASENAME_EXT=new ;;
+esac
+LOG_BASENAME_EXT="${LOG_BASENAME_EXT}${FULL_SUFFIX}"
+
 case "$MODE" in
     80o*|84e*)
-        LOG_BASENAME_EXT=$([[ "$AUDIT_FORMAT" == JSON ]] && echo json || echo new)
         MYSQLD_PARAMS="--loose-audit_log_file=$LOGS_DIR/${TAG}.${LOG_BASENAME_EXT}_"
         ;;
     80p*)
-        LOG_BASENAME_EXT=$([[ "$AUDIT_FORMAT" == JSON ]] && echo json || echo new)
         MYSQLD_PARAMS="--loose-audit_log_filter_file=$LOGS_DIR/${TAG}.${LOG_BASENAME_EXT}_"
         ;;
     84entc*|84c*)
-        LOG_BASENAME_EXT=$([[ "$AUDIT_FORMAT" == JSON ]] && echo json || echo new)
         MYSQLD_PARAMS="--loose-audit_log_filter.file=$LOGS_DIR/${TAG}.${LOG_BASENAME_EXT}_"
         ;;
 esac
 
-FILTER_FORMAT="${FILTER_FORMAT_KEY}${AUDIT_FORMAT}"
+if [[ "$MODE" == 84e* ]] && [[ "$AUDIT_FORMAT" == "JSONL" ]]; then
+    FILTER_FORMAT="${FILTER_FORMAT_KEY}JSON"
+else
+    FILTER_FORMAT="${FILTER_FORMAT_KEY}${AUDIT_FORMAT}"
+fi
 
 DATA_DIR=/data/sh/audit/work/datadir_${TAG}
 
 echo "[INFO] Mode:   $MODE"
 echo "[INFO] Format: $AUDIT_FORMAT"
+echo "[INFO] EVENT_MODE: $EVENT_MODE"
 echo "[INFO] BASEDIR:  $BASEDIR"
 echo "[INFO] DATA_DIR: $DATA_DIR"
 echo "[INFO] INSTALL:  $INSTALL_FILE"
@@ -136,11 +155,10 @@ $DEPLOYER_DIR/mysql_deployer.py \
    --basedir $BASEDIR \
    --datadir $DATA_DIR \
    --cnf $CNF_FILE \
-   --params="$MYSQLD_PARAMS $FILTER_FORMAT" \
+   --params="$MYSQLD_PARAMS $FILTER_FORMAT --loose-audit_log_filter.event_mode=$EVENT_MODE" \
    --sql "$AUDIT_DIR/$INSTALL_FILE" \
    "${SQL_DEPLOY_ARGS[@]}"
 
-#  --params="$MYSQLD_PARAMS $FILTER_FORMAT --loose-audit_log_filter.event_mode=FULL"
 #  --sql "$AUDIT_DIR/$COMMON_SQL"
 #  --socket
 #  --sh $DEPLOYER_DIR/run_mysqlslap.sh \

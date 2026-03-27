@@ -136,10 +136,11 @@ $DEPLOYER_DIR/mysql_deployer.py \
    --basedir $BASEDIR \
    --datadir $DATA_DIR \
    --cnf $CNF_FILE \
-   --params="$MYSQLD_PARAMS $FILTER_FORMAT --loose-audit_log_filter.event_mode=FULL" \
+   --params="$MYSQLD_PARAMS $FILTER_FORMAT" \
    --sql "$AUDIT_DIR/$INSTALL_FILE" \
    "${SQL_DEPLOY_ARGS[@]}"
 
+#  --params="$MYSQLD_PARAMS $FILTER_FORMAT --loose-audit_log_filter.event_mode=FULL"
 #  --sql "$AUDIT_DIR/$COMMON_SQL"
 #  --socket
 #  --sh $DEPLOYER_DIR/run_mysqlslap.sh \
@@ -177,29 +178,6 @@ else
     /data/sh/utils/sort_xml_sibling_tags.py "$AUDIT_LOG_PATH" -o "$OUT_PATH"
   else
     echo "[INFO] unfold_json.py input: $AUDIT_LOG_PATH"
-    /data/sh/utils/unfold_json.py "$AUDIT_LOG_PATH" "$OUT_PATH"
-    python3 - "$OUT_PATH" <<'PY'
-import json, sys
-
-path = sys.argv[1]
-with open(path, encoding="utf-8") as f:
-    data = json.load(f)
-
-pairs = set()
-if isinstance(data, list):
-    for item in data:
-        if isinstance(item, dict):
-            c, e = item.get("class"), item.get("event")
-            if c is not None and e is not None:
-                pairs.add((str(c), str(e)))
-elif isinstance(data, dict):
-    c, e = data.get("class"), data.get("event")
-    if c is not None and e is not None:
-        pairs.add((str(c), str(e)))
-
-print(f"[INFO] unique class/event pairs: {len(pairs)}")
-for c, e in sorted(pairs):
-    print(f"--- {c}/{e} ---")
-PY
+    /data/sh/utils/unfold_json.py --class-event-pairs --mask-timestamp-connection "$AUDIT_LOG_PATH" "$OUT_PATH"
   fi
 fi

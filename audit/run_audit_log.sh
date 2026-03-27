@@ -25,7 +25,7 @@ DEPLOYER_DIR=/data/sh/deployer
 AUDIT_DIR=/data/sh/audit
 CNF_FILE=$AUDIT_DIR/cnf/innodb-84-audit.cnf
 
-COMMON_SQL=filter_all.sql
+COMMON_SQL=sql/filters_simple.sql
 SQL_FILE="${2:-table_access_field_filters.sql}"
 AUDIT_FORMAT_RAW="${3:-JSON}"
 # Bash 4+: uppercase for comparison; strip accidental whitespace
@@ -153,7 +153,7 @@ fi
 if [[ ! -s "$AUDIT_LOG_PATH" ]]; then
   echo "[WARN] No audit log to post-process (expected rotated file under $LOGS_DIR or $AUDIT_LOG_PATH)"
 else
-  OUT_PATH="${AUDIT_LOG_PATH}2"
+  OUT_PATH="${AUDIT_LOG_PATH%.${LOG_BASENAME_EXT}_}.filter.${LOG_BASENAME_EXT}_"
   if [[ "$AUDIT_FORMAT" == "NEW" ]]; then
     echo "[INFO] sort_xml_sibling_tags.py input: $AUDIT_LOG_PATH"
     /data/sh/utils/sort_xml_sibling_tags.py "$AUDIT_LOG_PATH" -o "$OUT_PATH"

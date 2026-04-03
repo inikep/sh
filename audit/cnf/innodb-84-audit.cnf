@@ -48,31 +48,31 @@ innodb_use_fdatasync=ON
 
 
 # audit_log_filter PLUGIN
+loose-audit_log_filter_format         = JSON
+loose-audit_log_filter_strategy       = ASYNCHRONOUS
+loose-audit_log_filter_buffer_size    = 8M
+loose-audit_log_filter_rotate_on_size = 8G
 loose-audit_log_filter_disable        = OFF
 loose-audit_log_filter_database       = mysql
-#loose-audit_log_filter_format         = NEW
-#loose-audit_log_filter_format         = OLD
-loose-audit_log_filter_rotate_on_size = 4G
 loose-audit_log_filter_max_size       = 16G
-#loose-audit_log_filter_strategy       = SYNCHRONOUS
-loose-audit_log_filter_strategy       = ASYNCHRONOUS
 loose-audit_log_filter_compression    = NONE
 #loose-audit_log_filter_compression    = GZIP
-#loose-audit_log_filter_buffer_size     = 256M
 #loose-audit_log_filter_read_buffer_size = 1M
 #loose-audit_log_filter_handler=SYSLOG
 
 # audit_log_filter COMPONENT
+loose-audit_log_filter.format         = JSON
+loose-audit_log_filter.strategy       = ASYNCHRONOUS
+loose-audit_log_filter.buffer_size    = 8M
+loose-audit_log_filter.rotate_on_size = 8G
 loose-audit_log_filter.disable        = OFF
 loose-audit_log_filter.database       = mysql
-loose-audit_log_filter.rotate_on_size = 4G
 loose-audit_log_filter.max_size       = 16G
-loose-audit_log_filter.strategy       = ASYNCHRONOUS
 loose-audit_log_filter.compression    = NONE
 
 # audit_log COMMERCIAL or OLD PERCONA PLUGIN
-#loose-audit_log_format = NEW
-loose-audit_log_buffer_size = 256M
-loose-audit_log_rotate_on_size = 4G
-loose-audit-log=FORCE_PLUS_PERMANENT
-loose-audit_log_strategy=ASYNCHRONOUS
+loose-audit_log_format         = JSON
+loose-audit_log_strategy       = ASYNCHRONOUS
+loose-audit_log_buffer_size    = 8M
+loose-audit_log_rotate_on_size = 8G
+#loose-audit-log=FORCE_PLUS_PERMANENT

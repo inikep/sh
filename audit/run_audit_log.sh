@@ -3,12 +3,15 @@ set -o pipefail
 
 usage() {
     cat <<EOF
-Usage: $0 <mode> <format> [FULL] [sql_file1] [sql_file2] .. [sql_fileX]
+Usage: $0 <mode> <format> [sql_file1] [sql_file2] .. [sql_fileX]
 
   format    JSON, JSONL (one JSON object per line), or NEW (XML audit format).
-  FULL      Optional (audit_log_filter component modes only). Sets event_mode=FULL,
-            uses logs dir ..._<FORMAT>-full and file extension e.g. .jsonl-full_
   sql_files default to table_access_field_filters.sql when none are given.
+
+  EVENT_MODE  Optional environment variable (not a CLI argument). For audit_log_filter
+              modes (84c, 84entc) only: passed as --loose-audit_log_filter.event_mode.
+              Default REDUCED. Set EVENT_MODE=FULL for full payloads; also adds -full
+              to the logs directory name and to the log basename extension (e.g. jsonl-full).
 
 Modes:
   80old        (a) Old audit_log plugin           – Percona Server 8.0
@@ -45,12 +48,13 @@ case "$AUDIT_FORMAT" in
         ;;
 esac
 
-EVENT_MODE=REDUCED
+# EVENT_MODE: env-only (export or prefix the command). Default REDUCED. FULL selects
+# full audit payloads where supported and suffixes log paths with -full (see usage).
+EVENT_MODE="${EVENT_MODE:-REDUCED}"
+EVENT_MODE="${EVENT_MODE^^}"
 FULL_SUFFIX=""
-if (($# > 0)) && [[ "${1^^}" == "FULL" ]]; then
-    EVENT_MODE=FULL
+if [[ "$EVENT_MODE" == "FULL" ]]; then
     FULL_SUFFIX="-full"
-    shift
 fi
 
 if (($# == 0)); then
@@ -69,8 +73,14 @@ mkdir -p $LOGS_DIR
 
 case "$MODE" in
     80o*)
-        TAG=alf80old
+        TAG=alog80old
         BASEDIR=/data/mysql-server/percona-8.0-deb-gcc14-rocks
+        FILTER_FORMAT_KEY="--loose-audit_log_format="
+        INSTALL_FILE=install/audit_log_setup.sql
+        ;;
+    84o*)
+        TAG=alog84old
+        BASEDIR=/data/mysql-server/percona-8.4-deb-gcc15-rocks
         FILTER_FORMAT_KEY="--loose-audit_log_format="
         INSTALL_FILE=install/audit_log_setup.sql
         ;;
@@ -118,7 +128,7 @@ esac
 LOG_BASENAME_EXT="${LOG_BASENAME_EXT}${FULL_SUFFIX}"
 
 case "$MODE" in
-    80o*|84e*)
+    80o*|84o*|84e*)
         MYSQLD_PARAMS="--loose-audit_log_file=$LOGS_DIR/${TAG}.${LOG_BASENAME_EXT}_"
         ;;
     80p*)
@@ -155,7 +165,7 @@ $DEPLOYER_DIR/mysql_deployer.py \
    --basedir $BASEDIR \
    --datadir $DATA_DIR \
    --cnf $CNF_FILE \
-   --params="$MYSQLD_PARAMS $FILTER_FORMAT --loose-audit_log_filter.event_mode=$EVENT_MODE" \
+   --params="$MYSQLD_PARAMS $FILTER_FORMAT --loose-audit_log_filter.event_mode=$EVENT_MODE $EXTRA" \
    --sql "$AUDIT_DIR/$INSTALL_FILE" \
    "${SQL_DEPLOY_ARGS[@]}"
 

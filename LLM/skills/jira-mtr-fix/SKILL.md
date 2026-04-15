@@ -4,7 +4,8 @@ description: >
   End-to-end workflow for diagnosing and fixing MySQL/Percona Server bugs from JIRA tickets.
   Given a JIRA ticket number, this skill reads the ticket, creates an MTR (MySQL Test Run)
   test to reproduce the issue, builds MySQL/Percona Server, runs MTR to confirm reproduction,
-  iteratively proposes and applies fixes, and verifies the fix with a passing MTR test.
+  iteratively plans, implements, reviews with Codex CLI (gpt-5.4, high reasoning),
+  verifies fixes with a passing MTR test, and opens a GitHub PR with the result.
   Use this skill whenever a user mentions a JIRA ticket (e.g. PS-1234, PXC-567, PS-####),
   asks to "fix a bug from JIRA", "reproduce a MySQL issue", "write an MTR test for a ticket",
   or wants to debug/patch MySQL or Percona Server from a ticket number. Also trigger when the
@@ -14,22 +15,30 @@ description: >
 # JIRA → MTR → Fix Workflow
 
 A structured, interactive workflow that takes a JIRA ticket number and drives the full
-bug-fix lifecycle: read → reproduce → build → run → fix → verify.
+bug-fix lifecycle: read → branch → reproduce → build → run → plan → implement → review → verify → PR.
 
 ---
 
 ## High-Level Flow
 
 ```
-1. READ JIRA          — Fetch ticket details, understand the bug
-2. CREATE MTR TEST    — Write a .test file that should reproduce the issue
-3. STOP CHECK         — If no reproducible test can be written, explain and stop
-4. BUILD SERVER       — Compile MySQL/Percona Server
-5. RUN MTR            — Execute the test; check for reproduction
-6. PROPOSE FIX        — If not reproduced, suggest fix and ask user to continue
-7. APPLY FIX          — Patch source code
-8. VERIFY             — Re-run MTR; confirm test passes
+ 1. READ JIRA          — Fetch ticket details, understand the bug
+ 2. CREATE BRANCH      — Create a fix branch from the current base before any edits
+ 3. CREATE MTR TEST    — Write a .test file; stop if the bug cannot be reproduced in MTR
+ 4. BUILD SERVER       — Compile MySQL/Percona Server
+ 5. RUN MTR            — Execute the test; check for reproduction
+ 6. BUG NOT REPRODUCED — If MTR passes unexpectedly, analyze, propose, and confirm retry
+ 7. PLAN FIX           — Read source, root cause, fix plan; present plan to the user
+ 8. IMPLEMENT FIX      — Apply patch per agreed plan; rebuild
+ 9. CODEX CLI REVIEW   — Run Codex review; loop to 8 until no important issues
+10. VERIFY             — Re-run MTR and broader suite; confirm no regressions
+11. COMMIT & PR        — Commit relevant files, push branch, open GitHub PR
 ```
+
+Important: proceed with the steps one by one in the order defined above. Don't skip any of them.
+
+If MTR does **not** reproduce the bug, follow **Step 6** and do not proceed to **Step 7**
+until reproduction is confirmed.
 
 ---
 
@@ -55,7 +64,21 @@ If the ticket cannot be fetched, tell the user and stop.
 
 ---
 
-## Step 2 — Create the MTR Test
+## Step 2 — Create Fix Branch
+
+Create the branch before editing any files so both the MTR test and source fix
+land on the same branch. Use the ticket key (lowercased) as the branch name
+prefix.
+
+```bash
+git switch -c fix/<ticket_lower>
+```
+
+If the branch already exists locally, switch to it instead of creating a new one.
+
+---
+
+## Step 3 — Create the MTR Test
 
 ### Locate the test suite
 Determine the appropriate MTR suite from the component:
@@ -114,7 +137,7 @@ and **stop the workflow here**.
 
 ---
 
-## Step 3 — Build MySQL / Percona Server
+## Step 4 — Build MySQL / Percona Server
 
 > Read `references/build.md` for full cmake flags, dependency list, and
 > distro-specific notes before running any build commands.
@@ -128,6 +151,8 @@ mkdir -p build && cd build
 cmake .. \
   -DCMAKE_BUILD_TYPE=Debug \
   -DWITH_DEBUG=1 \
+  -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+  -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
   -DWITH_UNIT_TESTS=0 \
   -DWITHOUT_SERVER=0 \
   -DWITH_BOOST=<path_to_boost> \
@@ -143,7 +168,7 @@ If the build fails:
 
 ---
 
-## Step 4 — Run MTR to Reproduce
+## Step 5 — Run MTR to Reproduce
 
 ```bash
 cd mysql-test
@@ -154,16 +179,17 @@ perl mysql-test-run.pl \
   --mysqld=--innodb-buffer-pool-size=64M \
   --force \
   --retry=0 \
+  --repeat=3 \
   2>&1 | tee /tmp/mtr_repro.log
 ```
 
 Parse `/tmp/mtr_repro.log`:
-- **FAIL / core dump / assertion** → ✅ Bug reproduced → proceed to Step 6 (Fix)
-- **PASS** → ❌ Bug NOT reproduced → proceed to Step 5
+- **FAIL / core dump / assertion** → ✅ Bug reproduced → proceed to Step 7 (Plan)
+- **PASS** → ❌ Bug NOT reproduced → proceed to Step 6
 
 ---
 
-## Step 5 — Bug Not Reproduced: Propose & Confirm
+## Step 6 — Bug Not Reproduced: Propose & Confirm
 
 If MTR passes (bug not yet reproduced or test is incorrect):
 
@@ -175,28 +201,58 @@ If MTR passes (bug not yet reproduced or test is incorrect):
 3. **Present** each hypothesis to the user with a suggested change
 4. **Ask**: _"Should I apply this change and try again?"_
 
-Wait for user confirmation before looping back to Step 3 or Step 4.
+Wait for user confirmation before looping back to Step 4 or Step 5.
 If the user says no or wants to stop, exit gracefully.
 
 ---
 
-## Step 6 — Apply the Fix
+## Step 7 — Plan the Fix
 
 Once the bug is reproduced:
 
-1. **Identify the root cause** from the crash trace, assertion, or wrong behavior
+1. **Trace the failure** — crash trace, assertion, or incorrect result vs expected
 2. **Read** the relevant source files (`storage/innobase/`, `sql/`, `plugin/`, etc.)
-3. **Draft the patch** — prefer minimal, surgical changes
-4. **Apply** using standard `sed`/`patch`/direct edit via `str_replace`
-5. **Show the diff** to the user (`git diff`) and explain the fix
-6. **Rebuild** (only the affected translation units if possible):
+3. **Determine the root cause** — explain the mechanism clearly
+4. **Draft a fix plan** — minimal, surgical approach: which files, what changes, risks, alternatives
+5. **Present the plan** to the user and wait for agreement before **Step 8**
+
+Do not implement code changes in this step—only analysis and planning.
+
+---
+
+## Step 8 — Implement the Fix
+
+Follow the **agreed plan** from Step 7:
+
+1. **Implement** the changes — prefer minimal, surgical edits
+2. **Apply** using standard `sed`/`patch`/direct edit via `str_replace`
+3. **Show the diff** to the user (`git diff`) and explain what changed
+4. **Rebuild** (only the affected translation units if possible):
    ```bash
    cd build && make -j$(nproc) mysqld
    ```
 
 ---
 
-## Step 7 — Verify: MTR Must Pass
+## Step 9 — Codex CLI Code Review
+
+From the MySQL/Percona Server repo root, run Codex as a separate reviewer with
+`gpt-5.4` and high reasoning, passing the ticket ID, one-line summary, agreed
+Step 7 plan, and `git diff` as context.
+
+```bash
+git diff | codex exec --ephemeral --model gpt-5.4 -c 'model_reasoning_effort="high"' \
+  "Adversarially review this diff for <TICKET_NUMBER> (<summary>). Agreed fix plan: <plan>. Classify findings as high, medium, or low importance; focus on correctness, regressions, and MySQL/Percona Server conventions." \
+  | tee /tmp/codex_review.log
+```
+
+If Codex reports any non-low issues, return to **Step 8**, fix them, rebuild, and
+repeat **Step 9**. Stop only when no important issues remain. If `codex` is
+unavailable or authentication fails, report that and stop.
+
+---
+
+## Step 10 — Verify: MTR Must Pass
 
 ```bash
 cd mysql-test
@@ -206,18 +262,64 @@ perl mysql-test-run.pl \
   --do-test=<ticket_lower> \
   --force \
   --retry=0 \
+  --repeat=3 \
   2>&1 | tee /tmp/mtr_verify.log
 ```
 
-- **PASS** → ✅ Fix verified. Report success, show the patch, suggest commit message.
-- **FAIL** → ❌ Fix incomplete. Go back to Step 6 with updated hypothesis.
+- **PASS** → ✅ Fix verified for the targeted test. Run the broader suite below.
+- **FAIL** → ❌ Fix incomplete. Go back to **Step 8** with an updated hypothesis (or **Step 7**
+  if the plan or root cause needs revision).
 
-On success, also run the broader suite to check for regressions:
+Then run the broader suite to check for regressions:
 ```bash
 perl mysql-test-run.pl --suite=<suite> --force --retry=0 2>&1 | tee /tmp/mtr_regression.log
 ```
 
-Report any new failures to the user.
+If the broader suite is clean, proceed to **Step 11**.
+If the broader suite introduces failures, report them and return to **Step 8**
+(or **Step 7** if the plan or root cause needs revision).
+
+---
+
+## Step 11 — Commit, Push & Create PR
+
+Once MTR passes (Step 10) and regressions are clean:
+
+1. **Stage only the files that belong to this fix** (source fix + MTR test +
+   result file). Do not use `git add -A` in a dirty worktree:
+   ```bash
+   git add <changed_source_files> \
+     mysql-test/<suite>/t/<ticket_lower>.test \
+     mysql-test/<suite>/r/<ticket_lower>.result
+   git status --short
+   git commit -m "fix(<component>): <short description> (<TICKET_NUMBER>)
+
+   <root cause explanation>
+   <what was changed and why>"
+   ```
+2. **Push** the branch to the remote:
+   ```bash
+   git push -u origin fix/<ticket_lower>
+   ```
+3. **Create a GitHub PR** using `gh`:
+   ```bash
+   gh pr create \
+     --title "fix(<component>): <short description> (<TICKET_NUMBER>)" \
+     --body "## Summary
+   - **Bug**: <one-line description>
+   - **Root cause**: <explanation>
+   - **Fix**: <what was changed and why>
+   - **Test**: \`mysql-test/<suite>/t/<ticket_lower>.test\`
+   - **JIRA**: <TICKET_NUMBER>
+
+   ## Test plan
+   - [ ] MTR test \`<ticket_lower>\` passes (repeat=3)
+   - [ ] Broader \`<suite>\` regression run clean"
+   ```
+4. **Report** the PR URL to the user.
+
+If `gh` is not available, show the push output and provide a manual PR link
+(`https://github.com/<org>/<repo>/compare/fix/<ticket_lower>?expand=1`).
 
 ---
 
@@ -232,9 +334,7 @@ When the workflow finishes successfully, produce a summary:
 **Root cause**: <explanation>
 **Fix**: <what was changed and why>
 **Test**: mysql-test/<suite>/t/<ticket_lower>.test
-
-### Patch
-<git diff output>
+**PR**: <PR URL>
 
 ### Suggested commit message
 fix(<component>): <short description> (<TICKET_NUMBER>)

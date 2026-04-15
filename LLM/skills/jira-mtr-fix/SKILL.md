@@ -4,7 +4,8 @@ description: >
   End-to-end workflow for diagnosing and fixing MySQL/Percona Server bugs from JIRA tickets.
   Given a JIRA ticket number, this skill reads the ticket, creates an MTR (MySQL Test Run)
   test to reproduce the issue, builds MySQL/Percona Server, runs MTR to confirm reproduction,
-  iteratively proposes and applies fixes, and verifies the fix with a passing MTR test.
+  iteratively plans, implements, reviews with Codex CLI (gpt-5.4, high reasoning),
+  and verifies fixes with a passing MTR test.
   Use this skill whenever a user mentions a JIRA ticket (e.g. PS-1234, PXC-567, PS-####),
   asks to "fix a bug from JIRA", "reproduce a MySQL issue", "write an MTR test for a ticket",
   or wants to debug/patch MySQL or Percona Server from a ticket number. Also trigger when the
@@ -14,7 +15,7 @@ description: >
 # JIRA → MTR → Fix Workflow
 
 A structured, interactive workflow that takes a JIRA ticket number and drives the full
-bug-fix lifecycle: read → reproduce → build → run → fix → verify.
+bug-fix lifecycle: read → reproduce → build → run → plan → implement → review → verify.
 
 ---
 
@@ -22,14 +23,20 @@ bug-fix lifecycle: read → reproduce → build → run → fix → verify.
 
 ```
 1. READ JIRA          — Fetch ticket details, understand the bug
-2. CREATE MTR TEST    — Write a .test file that should reproduce the issue
-3. STOP CHECK         — If no reproducible test can be written, explain and stop
-4. BUILD SERVER       — Compile MySQL/Percona Server
-5. RUN MTR            — Execute the test; check for reproduction
-6. PROPOSE FIX        — If not reproduced, suggest fix and ask user to continue
-7. APPLY FIX          — Patch source code
-8. VERIFY             — Re-run MTR; confirm test passes
+2. CREATE MTR TEST    — Write a .test file; stop if the bug cannot be reproduced in MTR
+3. BUILD SERVER       — Compile MySQL/Percona Server
+4. RUN MTR            — Execute the test; check for reproduction
+5. BUG NOT REPRODUCED — If MTR passes unexpectedly, analyze, propose, and confirm retry
+6. PLAN FIX           — Read source, root cause, fix plan; present plan to the user
+7. IMPLEMENT FIX      — Apply patch per agreed plan; rebuild
+8. CODEX CLI REVIEW   — Run Codex review; loop to 7 until no important issues
+9. VERIFY             — Re-run MTR; confirm test passes
 ```
+
+Important: proceed with the steps one by one in the order defined above. Don't skip any of them.
+
+If MTR does **not** reproduce the bug, follow **Step 5** and do not proceed to **Step 6**
+until reproduction is confirmed.
 
 ---
 
@@ -128,6 +135,8 @@ mkdir -p build && cd build
 cmake .. \
   -DCMAKE_BUILD_TYPE=Debug \
   -DWITH_DEBUG=1 \
+  -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+  -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
   -DWITH_UNIT_TESTS=0 \
   -DWITHOUT_SERVER=0 \
   -DWITH_BOOST=<path_to_boost> \
@@ -154,11 +163,12 @@ perl mysql-test-run.pl \
   --mysqld=--innodb-buffer-pool-size=64M \
   --force \
   --retry=0 \
+  --repeat=3 \
   2>&1 | tee /tmp/mtr_repro.log
 ```
 
 Parse `/tmp/mtr_repro.log`:
-- **FAIL / core dump / assertion** → ✅ Bug reproduced → proceed to Step 6 (Fix)
+- **FAIL / core dump / assertion** → ✅ Bug reproduced → proceed to Step 6 (Plan)
 - **PASS** → ❌ Bug NOT reproduced → proceed to Step 5
 
 ---
@@ -180,23 +190,53 @@ If the user says no or wants to stop, exit gracefully.
 
 ---
 
-## Step 6 — Apply the Fix
+## Step 6 — Plan the Fix
 
 Once the bug is reproduced:
 
-1. **Identify the root cause** from the crash trace, assertion, or wrong behavior
+1. **Trace the failure** — crash trace, assertion, or incorrect result vs expected
 2. **Read** the relevant source files (`storage/innobase/`, `sql/`, `plugin/`, etc.)
-3. **Draft the patch** — prefer minimal, surgical changes
-4. **Apply** using standard `sed`/`patch`/direct edit via `str_replace`
-5. **Show the diff** to the user (`git diff`) and explain the fix
-6. **Rebuild** (only the affected translation units if possible):
+3. **Determine the root cause** — explain the mechanism clearly
+4. **Draft a fix plan** — minimal, surgical approach: which files, what changes, risks, alternatives
+5. **Present the plan** to the user and wait for agreement before **Step 7**
+
+Do not implement code changes in this step—only analysis and planning.
+
+---
+
+## Step 7 — Implement the Fix
+
+Follow the **agreed plan** from Step 6:
+
+1. **Implement** the changes — prefer minimal, surgical edits
+2. **Apply** using standard `sed`/`patch`/direct edit via `str_replace`
+3. **Show the diff** to the user (`git diff`) and explain what changed
+4. **Rebuild** (only the affected translation units if possible):
    ```bash
    cd build && make -j$(nproc) mysqld
    ```
 
 ---
 
-## Step 7 — Verify: MTR Must Pass
+## Step 8 — Codex CLI Code Review
+
+From the MySQL/Percona Server repo root, run Codex as a separate reviewer with
+`gpt-5.4` and high reasoning, passing the ticket ID, one-line summary, agreed
+Step 6 plan, and `git diff` as context.
+
+```bash
+git diff | codex exec --ephemeral --model gpt-5.4 -c 'model_reasoning_effort="high"' \
+  "Adversarially review this diff for <TICKET_NUMBER> (<summary>). Agreed fix plan: <plan>. Classify findings as high, medium, or low importance; focus on correctness, regressions, and MySQL/Percona Server conventions." \
+  | tee /tmp/codex_review.log
+```
+
+If Codex reports any non-low issues, return to **Step 7**, fix them, rebuild, and
+repeat **Step 8**. Stop only when no important issues remain. If `codex` is
+unavailable or authentication fails, report that and stop.
+
+---
+
+## Step 9 — Verify: MTR Must Pass
 
 ```bash
 cd mysql-test
@@ -206,11 +246,13 @@ perl mysql-test-run.pl \
   --do-test=<ticket_lower> \
   --force \
   --retry=0 \
+  --repeat=3 \
   2>&1 | tee /tmp/mtr_verify.log
 ```
 
 - **PASS** → ✅ Fix verified. Report success, show the patch, suggest commit message.
-- **FAIL** → ❌ Fix incomplete. Go back to Step 6 with updated hypothesis.
+- **FAIL** → ❌ Fix incomplete. Go back to **Step 7** with an updated hypothesis (or **Step 6**
+  if the plan or root cause needs revision).
 
 On success, also run the broader suite to check for regressions:
 ```bash

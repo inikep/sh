@@ -1,13 +1,28 @@
 #!/usr/bin/env python3
 """Absorb hunks from one commit into prior first-parent commits.
 
-For each textual hunk in COMMIT, blame the hunk's old-side context and
-deleted lines at COMMIT^, pick the newest blamed commit on the selected
-branch's first-parent chain, and fold the whole hunk into that commit.
+For each textual hunk in COMMIT, pick a target commit on the input branch's
+first-parent chain (strictly between the optional --base-branch tip and
+COMMIT) and fold the hunk into it:
 
-The explicitly selected branch is updated in place only after the rewritten
-candidate tip has a null diff against the original branch tip. Pass
---output-branch to create a separate rewritten branch instead.
+  1. Blame the hunk's old-side context and deleted lines at COMMIT^ and
+     pick the newest blamed commit that lies in the eligible range.
+  2. For pure-addition hunks (no old-side lines to blame), fall back to the
+     newest in-range commit that touched the same file.
+  3. If the only blamed commits are at or before --base-branch, fall back
+     to the newest in-range commit that touched the same file.
+
+Hunks with no eligible target are reported as skipped and left in COMMIT.
+
+The chain from the earliest target through the branch tip is then rebuilt:
+each commit is replayed onto the new parent via `git merge-tree` (with a
+patch-based fallback for replayable modify/delete and rename/delete
+conflicts), absorbed hunks are applied to the matching target's tree, and
+COMMIT itself is dropped if it becomes empty after absorption.
+
+The input branch is updated in place only after the rewritten tip has a
+null diff against the original tip. Pass --output-branch to write the
+rewritten history to a separate branch instead.
 """
 from __future__ import annotations
 
@@ -35,6 +50,57 @@ def configure_standard_streams() -> None:
 
 
 configure_standard_streams()
+
+
+class Style:
+    """ANSI styling for terminal output; a no-op when disabled."""
+
+    def __init__(self, enabled: bool = False) -> None:
+        self.enabled = enabled
+
+    def _wrap(self, code: str, text: str) -> str:
+        if not self.enabled or not text:
+            return text
+        return f"\033[{code}m{text}\033[0m"
+
+    def bold(self, t: str) -> str: return self._wrap("1", t)
+    def dim(self, t: str) -> str: return self._wrap("2", t)
+    def red(self, t: str) -> str: return self._wrap("31", t)
+    def green(self, t: str) -> str: return self._wrap("32", t)
+    def yellow(self, t: str) -> str: return self._wrap("33", t)
+    def blue(self, t: str) -> str: return self._wrap("34", t)
+    def magenta(self, t: str) -> str: return self._wrap("35", t)
+    def cyan(self, t: str) -> str: return self._wrap("36", t)
+
+
+STYLE = Style(False)
+
+
+def configure_style(mode: str) -> None:
+    """Resolve --color {auto,always,never} into STYLE.enabled."""
+    if mode == "always":
+        STYLE.enabled = True
+        return
+    if mode == "never":
+        STYLE.enabled = False
+        return
+    if os.environ.get("NO_COLOR") is not None:
+        STYLE.enabled = False
+        return
+    if os.environ.get("FORCE_COLOR"):
+        STYLE.enabled = True
+        return
+    STYLE.enabled = sys.stderr.isatty()
+
+
+CONFLICT_LINE_RE = re.compile(r"^(CONFLICT \([^)]+\):.*)$", re.MULTILINE)
+
+
+def colorize_conflicts(text: str) -> str:
+    """Highlight `CONFLICT (...): ...` lines in red within multi-line output."""
+    if not STYLE.enabled or not text:
+        return text
+    return CONFLICT_LINE_RE.sub(lambda m: STYLE.red(m.group(1)), text)
 
 
 class AbsorbError(RuntimeError):
@@ -86,6 +152,14 @@ class HunkDecision:
     hunk: Hunk
     target: str | None
     reason: str
+
+
+@dataclass(frozen=True)
+class HunkDisposition:
+    number: int
+    hunk: Hunk
+    target: str | None
+    skip_reason: str | None
 
 
 HUNK_RE = re.compile(
@@ -148,13 +222,118 @@ def tree_of(repo: str | Path, rev: str) -> str:
     return git_text(repo, "rev-parse", f"{rev}^{{tree}}").strip()
 
 
+def short_sha(sha: str) -> str:
+    return STYLE.yellow(sha[:12])
+
+
 def commit_label(meta: CommitMeta) -> str:
-    return f"{meta.sha[:12]} {meta.title}"
+    return f"{short_sha(meta.sha)} {meta.title}"
 
 
-def hunk_label(hunk: Hunk) -> str:
-    path = hunk.new_path or hunk.old_path or "<unknown>"
-    return f"{path} {hunk.hunk_header.rstrip()}"
+def hunk_path(hunk: Hunk) -> str:
+    return hunk.new_path or hunk.old_path or "<unknown>"
+
+
+def hunk_header_text(hunk: Hunk) -> str:
+    return hunk.hunk_header.rstrip()
+
+
+def styled_path(path: str) -> str:
+    return STYLE.magenta(path)
+
+
+def styled_hunk_header(hunk: Hunk) -> str:
+    return STYLE.cyan(hunk_header_text(hunk))
+
+
+def styled_diff_line(line: str) -> str:
+    """Color a single hunk-body line by its diff prefix."""
+    body = line.rstrip("\n").rstrip("\r")
+    if not body:
+        return body
+    prefix = body[0]
+    if prefix == "+":
+        return STYLE.green(body)
+    if prefix == "-":
+        return STYLE.red(body)
+    if prefix == "\\":
+        return STYLE.dim(body)
+    return body
+
+
+def pluralize(count: int, singular: str, plural: str | None = None) -> str:
+    word = singular if count == 1 else (plural or singular + "s")
+    return f"{count} {word}"
+
+
+SHORTSTAT_INSERTIONS_RE = re.compile(r"\d+ insertions?\(\+\)")
+SHORTSTAT_DELETIONS_RE = re.compile(r"\d+ deletions?\(-\)")
+
+
+def commit_shortstat(repo: str | Path, source_meta: CommitMeta) -> str:
+    """Return a single-line `git diff --shortstat` for `source_meta` vs its parent.
+
+    Returns an empty string for merge or root commits, where a single-parent
+    diff isn't well-defined.
+    """
+    if len(source_meta.parents) != 1:
+        return ""
+    out = git_text(
+        repo,
+        "diff",
+        "--shortstat",
+        "--no-renames",
+        source_meta.parents[0],
+        source_meta.sha,
+    )
+    return " ".join(out.split())
+
+
+def styled_shortstat(text: str) -> str:
+    """Colorize the insertion/deletion segments of a `git diff --shortstat` line."""
+    if not text:
+        return text
+    text = SHORTSTAT_INSERTIONS_RE.sub(lambda m: STYLE.green(m.group(0)), text)
+    text = SHORTSTAT_DELETIONS_RE.sub(lambda m: STYLE.red(m.group(0)), text)
+    return text
+
+
+def log_numbered_hunks(
+    repo: str | Path,
+    dispositions: list[HunkDisposition],
+    source_meta: CommitMeta,
+) -> None:
+    """Print every hunk with diff colors, numbered, plus its disposition."""
+    shortstat = commit_shortstat(repo, source_meta)
+    header = (
+        f"{STYLE.bold('Hunks from')} {commit_label(source_meta)} "
+        f"({STYLE.bold(pluralize(len(dispositions), 'hunk'))} total"
+    )
+    if shortstat:
+        header += f"; {styled_shortstat(shortstat)}"
+    header += "):"
+    log(header)
+    log("")
+    for d in dispositions:
+        number_tag = STYLE.bold(f"[{d.number}]")
+        log(
+            f"{number_tag} {styled_path(hunk_path(d.hunk))} "
+            f"{styled_hunk_header(d.hunk)}"
+        )
+        for line in d.hunk.hunk_lines:
+            log(styled_diff_line(line))
+        if d.target:
+            target_meta = load_commit(repo, d.target)
+            log(
+                f"{STYLE.green('-> absorbed into')} "
+                f"{commit_label(target_meta)}"
+            )
+        else:
+            log(
+                f"{STYLE.yellow('-> skipped:')} "
+                f"{STYLE.yellow(d.skip_reason or 'no target')}"
+            )
+        log("")
 
 
 def current_branch(repo: str | Path) -> str:
@@ -376,6 +555,39 @@ def commit_touches_path(repo: str | Path, commit: str, path: str) -> bool:
     return any(line == path for line in out.splitlines())
 
 
+def newest_path_touch_on_chain(
+    repo: str | Path,
+    chain: list[str],
+    path: str,
+    source_index: int,
+) -> str | None:
+    """Newest first-parent ancestor of `chain[source_index]` (exclusive) that touched `path`.
+
+    Backed by a single `git log --first-parent -1 -- <path>` invocation
+    instead of iterating the chain and running `git diff --name-only` per
+    commit, which is O(chain) git calls and very slow on long histories.
+
+    Returns the SHA, or None if no first-parent ancestor ever touched the
+    path. The returned SHA is always on `chain` because we walk from
+    `chain[source_index - 1]` along first parents, which by construction is
+    a prefix of `chain`.
+    """
+    if source_index <= 0:
+        return None
+    out = git_text(
+        repo,
+        "log",
+        "--first-parent",
+        "--pretty=%H",
+        "-1",
+        chain[source_index - 1],
+        "--",
+        path,
+    )
+    sha = out.strip()
+    return sha or None
+
+
 def newest_path_touch_target(
     repo: str | Path,
     chain: list[str],
@@ -383,10 +595,48 @@ def newest_path_touch_target(
     source_index: int,
     min_target_index: int,
 ) -> str | None:
-    for idx in range(source_index - 1, min_target_index - 1, -1):
-        if commit_touches_path(repo, chain[idx], path):
-            return chain[idx]
-    return None
+    sha = newest_path_touch_on_chain(repo, chain, path, source_index)
+    if sha is None:
+        return None
+    chain_index = {s: i for i, s in enumerate(chain)}
+    idx = chain_index.get(sha)
+    if idx is None or idx < min_target_index or idx >= source_index:
+        return None
+    return sha
+
+
+def newest_path_touch_decision(
+    repo: str | Path,
+    chain: list[str],
+    hunk: Hunk,
+    source_index: int,
+    min_target_index: int,
+    target_reason: str,
+) -> HunkDecision:
+    path = hunk.old_path or hunk.new_path
+    if not path:
+        return HunkDecision(hunk, None, "path-touch fallback requires a non-null file path")
+
+    sha = newest_path_touch_on_chain(repo, chain, path, source_index)
+    if sha is None:
+        return HunkDecision(hunk, None, "no prior commit touched the same path")
+    chain_index = {s: i for i, s in enumerate(chain)}
+    idx = chain_index.get(sha)
+    if idx is None:
+        # Defensive: --first-parent should keep us on `chain`, but if a
+        # caller passed a non-matching chain we shouldn't claim a target.
+        return HunkDecision(
+            hunk,
+            None,
+            f"newest path touch {sha[:12]} is not on the input first-parent chain",
+        )
+    if idx < min_target_index:
+        return HunkDecision(
+            hunk,
+            None,
+            f"latest path touch is at or before base boundary: {sha[:12]}",
+        )
+    return HunkDecision(hunk, sha, target_reason)
 
 
 def choose_hunk_target(
@@ -476,17 +726,21 @@ def cherry_pick_tree(repo: str | Path, base: str | None, ours: str | None, their
         if tree and is_replayable_delete_conflict(result.stdout):
             conflict_summary = ", ".join(sorted(set(merge_tree_conflict_types(result.stdout))))
             log(
-                f"  accepting {conflict_summary} replay result for "
-                f"{theirs[:12]} onto {ours[:12]}"
+                f"  {STYLE.yellow('accepting')} {STYLE.red(conflict_summary)} "
+                f"replay result for {short_sha(theirs)} onto {short_sha(ours)}"
             )
             return tree
         try:
-            log(f"  replaying {theirs[:12]} onto {ours[:12]} with patch fallback")
+            log(
+                f"  {STYLE.yellow('replaying')} {short_sha(theirs)} onto "
+                f"{short_sha(ours)} with patch fallback"
+            )
             return patch_cherry_pick_tree(repo, base, ours, theirs)
         except AbsorbError as fallback_exc:
             raise AbsorbError(
                 f"could not replay {theirs[:12]} onto {ours[:12]}\n"
-                f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}\n"
+                f"STDOUT:\n{colorize_conflicts(result.stdout)}\n"
+                f"STDERR:\n{result.stderr}\n"
                 f"FALLBACK:\n{fallback_exc}"
             ) from fallback_exc
     tree = merge_tree_output_tree(result.stdout)
@@ -520,6 +774,10 @@ def apply_hunks_to_tree(repo: str | Path, tree: str, hunks: list[Hunk]) -> str:
         current_tree = tree
         for hunk in hunks:
             git(repo, "read-tree", "--reset", current_tree, env=env)
+            if is_submodule_hunk(hunk):
+                apply_submodule_hunk_to_index(repo, env, hunk)
+                current_tree = git(repo, "write-tree", env=env).stdout.strip()
+                continue
             result = git(
                 repo,
                 "apply",
@@ -536,11 +794,15 @@ def apply_hunks_to_tree(repo: str | Path, tree: str, hunks: list[Hunk]) -> str:
                 git(repo, "read-tree", "--reset", current_tree, env=env)
                 try:
                     apply_hunk_to_index_with_fallback(repo, env, hunk)
-                    log(f"  fallback-applied hunk for {path}")
+                    log(
+                        f"  {STYLE.yellow('fallback-applied')} hunk for "
+                        f"{styled_path(path)}"
+                    )
                 except AbsorbError as fallback_exc:
                     raise AbsorbError(
                         f"could not apply hunk for {path} at {hunk.hunk_header.rstrip()}\n"
-                        f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}\n"
+                        f"STDOUT:\n{colorize_conflicts(result.stdout)}\n"
+                        f"STDERR:\n{result.stderr}\n"
                         f"FALLBACK:\n{fallback_exc}"
                     ) from fallback_exc
             current_tree = git(repo, "write-tree", env=env).stdout.strip()
@@ -582,6 +844,24 @@ def hunk_has_deletions(hunk: Hunk) -> bool:
 
 def hunk_has_additions(hunk: Hunk) -> bool:
     return any(line.startswith("+") for line in hunk.hunk_lines)
+
+
+def is_submodule_hunk(hunk: Hunk) -> bool:
+    """Detect a submodule (gitlink) update hunk.
+
+    Git renders submodule changes as a synthetic single-line diff like:
+
+        @@ -1 +1 @@
+        -Subproject commit <old-sha>
+        +Subproject commit <new-sha>
+
+    These cannot be absorbed into a prior commit because the path is a
+    gitlink rather than a text file, so `git blame` has nothing to attribute.
+    """
+    for line in hunk.hunk_lines:
+        if line.startswith(("-Subproject commit ", "+Subproject commit ")):
+            return True
+    return False
 
 
 def hunk_line_text(line: str) -> str:
@@ -655,7 +935,20 @@ def fallback_apply_hunk(lines: list[str], hunk: Hunk, path: str) -> list[str]:
         if line.startswith((" ", "-"))
     ]
     if not old_side:
-        raise AbsorbError("fallback requires old-side context")
+        if hunk_has_deletions(hunk):
+            raise AbsorbError("fallback requires old-side context")
+        insert_at = hunk.old_start
+        if insert_at < 0 or insert_at > len(lines):
+            raise AbsorbError(
+                f"fallback insertion point {insert_at} is outside {path} "
+                f"with {len(lines)} line(s)"
+            )
+        added = [
+            hunk_line_text(line)
+            for line in hunk.hunk_lines
+            if line.startswith("+")
+        ]
+        return [*lines[:insert_at], *added, *lines[insert_at:]]
 
     # Git reports conflicts when the rewritten side has nearby absorbed lines.
     # Match the old-side hunk as an ordered subsequence so those extra lines
@@ -697,6 +990,59 @@ def index_file_entry(repo: str | Path, env: dict[str, str], path: str) -> tuple[
     return mode, blob
 
 
+SUBPROJECT_PLUS = "+Subproject commit "
+SUBPROJECT_MINUS = "-Subproject commit "
+GITLINK_MODE = "160000"
+
+
+def submodule_hunk_new_sha(hunk: Hunk) -> str | None:
+    """Extract the post-image gitlink SHA from a submodule hunk, or None."""
+    for line in hunk.hunk_lines:
+        body = line.rstrip("\n").rstrip("\r")
+        if body.startswith(SUBPROJECT_PLUS):
+            return body[len(SUBPROJECT_PLUS):].strip()
+    return None
+
+
+def apply_submodule_hunk_to_index(
+    repo: str | Path,
+    env: dict[str, str],
+    hunk: Hunk,
+) -> None:
+    """Apply a gitlink (submodule) hunk by directly updating the index entry.
+
+    `git apply --cached` is unreliable on gitlinks because the index entry
+    holds the submodule's commit SHA rather than a blob, so the standard
+    3-way machinery in `apply_hunks_to_tree` doesn't have the right inputs.
+    Instead we read the new gitlink SHA out of the `+Subproject commit ...`
+    line and update (or remove) the cacheinfo for the path directly.
+    """
+    path = hunk.new_path or hunk.old_path
+    if not path:
+        raise AbsorbError("submodule hunk has no path")
+    new_sha = submodule_hunk_new_sha(hunk)
+    if new_sha is not None:
+        git(
+            repo,
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            GITLINK_MODE,
+            new_sha,
+            path,
+            env=env,
+        )
+        return
+    if any(
+        line.startswith(SUBPROJECT_MINUS) for line in hunk.hunk_lines
+    ):
+        git(repo, "update-index", "--remove", "--", path, env=env)
+        return
+    raise AbsorbError(
+        f"submodule hunk for {path} has neither + nor - Subproject line"
+    )
+
+
 def apply_hunk_to_index_with_fallback(repo: str | Path, env: dict[str, str], hunk: Hunk) -> None:
     path = hunk.new_path or hunk.old_path
     if not path:
@@ -710,14 +1056,15 @@ def apply_hunk_to_index_with_fallback(repo: str | Path, env: dict[str, str], hun
     git(repo, "update-index", "--cacheinfo", mode, new_blob, path, env=env)
 
 
-def build_hunk_groups(
+def build_hunk_dispositions(
     repo: str | Path,
     source: str,
     source_parent: str,
     chain: list[str],
     context: int,
     min_target_index: int = 0,
-) -> tuple[dict[str, list[Hunk]], list[HunkDecision]]:
+) -> list[HunkDisposition]:
+    """Parse COMMIT's diff and decide a target (or skip reason) for every hunk."""
     patch = git_text(
         repo,
         "diff",
@@ -731,10 +1078,9 @@ def build_hunk_groups(
     hunks = parse_unified_diff(patch)
     chain_index = {sha: idx for idx, sha in enumerate(chain)}
     source_index = chain_index[source]
-    groups: dict[str, list[Hunk]] = defaultdict(list)
-    skipped: list[HunkDecision] = []
+    dispositions: list[HunkDisposition] = []
 
-    for hunk in hunks:
+    for number, hunk in enumerate(hunks, start=1):
         decision = choose_hunk_target_decision(
             repo,
             source_parent,
@@ -743,16 +1089,29 @@ def build_hunk_groups(
             source_index,
             min_target_index,
         )
-        hunk_path = hunk.old_path or hunk.new_path
+        hunk_file = hunk.old_path or hunk.new_path
+        # Submodule (gitlink) hunks have old-side lines but `git blame` cannot
+        # attribute them, so blame always fails. Treat them like added-only
+        # hunks and fall back to the newest commit that touched the same
+        # gitlink path. The same applies to genuinely added-only hunks.
+        if decision.target is None and (hunk.is_added_only or is_submodule_hunk(hunk)):
+            decision = newest_path_touch_decision(
+                repo,
+                chain,
+                hunk,
+                source_index,
+                min_target_index,
+                "newest eligible commit that touched the same path",
+            )
         if (
             decision.target is None
-            and hunk_path
+            and hunk_file
             and decision.reason.startswith("only blamed commit(s) are at or before base boundary")
         ):
             fallback_target = newest_path_touch_target(
                 repo,
                 chain,
-                hunk_path,
+                hunk_file,
                 source_index,
                 min_target_index,
             )
@@ -762,12 +1121,26 @@ def build_hunk_groups(
                     fallback_target,
                     "newest eligible commit that touched the same path after base boundary",
                 )
-        if decision.target:
-            groups[decision.target].append(hunk)
-        else:
-            skipped.append(decision)
+        dispositions.append(
+            HunkDisposition(
+                number=number,
+                hunk=hunk,
+                target=decision.target,
+                skip_reason=None if decision.target else decision.reason,
+            )
+        )
 
-    return groups, skipped
+    return dispositions
+
+
+def dispositions_by_target(
+    dispositions: list[HunkDisposition],
+) -> dict[str, list[HunkDisposition]]:
+    grouped: dict[str, list[HunkDisposition]] = defaultdict(list)
+    for d in dispositions:
+        if d.target:
+            grouped[d.target].append(d)
+    return grouped
 
 
 def rewrite_branch(args: argparse.Namespace) -> int:
@@ -813,11 +1186,14 @@ def rewrite_branch(args: argparse.Namespace) -> int:
             raise AbsorbError("--base-branch tip is not on the input branch first-parent chain")
         min_target_index = base_index + 1
 
-    groups, skipped_hunks = build_hunk_groups(repo, source, source_parent, chain, args.context, min_target_index)
+    dispositions = build_hunk_dispositions(
+        repo, source, source_parent, chain, args.context, min_target_index
+    )
+    log_numbered_hunks(repo, dispositions, source_meta)
+
+    groups = dispositions_by_target(dispositions)
     if not groups:
         log("No movable hunks found; branch left unchanged.")
-        for decision in skipped_hunks:
-            log(f"  skipped {hunk_label(decision.hunk)}: {decision.reason}")
         if args.output_branch:
             update_branch_ref(repo, output_branch, original_tip, output_expected_tip)
             log(f"Created {output_branch} at unchanged tip {original_tip}")
@@ -827,17 +1203,10 @@ def rewrite_branch(args: argparse.Namespace) -> int:
     if earliest == 0:
         raise AbsorbError("cannot absorb into the root commit")
 
-    first_meta = load_commit(repo, chain[earliest])
-    log(f"Rebuilding {len(chain) - earliest} commit(s) from {commit_label(first_meta)}...")
-    for target in sorted(groups, key=chain_index.__getitem__):
-        target_meta = load_commit(repo, target)
-        log(f"  target {len(groups[target])} hunk(s): {commit_label(target_meta)}")
-        for hunk in groups[target]:
-            log(f"    {hunk_label(hunk)}")
-    if skipped_hunks:
-        log(f"  skipped {len(skipped_hunks)} hunk(s):")
-        for decision in skipped_hunks:
-            log(f"    {hunk_label(decision.hunk)}: {decision.reason}")
+    log(
+        f"{STYLE.bold('Rewriting')} "
+        f"{STYLE.bold(pluralize(len(chain) - earliest, 'commit'))}..."
+    )
     new_parent = chain[earliest - 1]
     rewritten: dict[str, str] = {}
 
@@ -846,15 +1215,24 @@ def rewrite_branch(args: argparse.Namespace) -> int:
         meta = load_commit(repo, original)
         original_parent = meta.parents[0] if meta.parents else None
         new_tree = cherry_pick_tree(repo, original_parent, new_parent, original)
-        if original in groups:
-            log(f"  absorbing {len(groups[original])} hunk(s) into {commit_label(meta)}")
-            for hunk in groups[original]:
-                log(f"    absorbed {hunk_label(hunk)}")
-            new_tree = apply_hunks_to_tree(repo, new_tree, groups[original])
+        absorbed = groups.get(original, [])
+        if absorbed:
+            new_tree = apply_hunks_to_tree(
+                repo, new_tree, [d.hunk for d in absorbed]
+            )
         if original == source and new_tree == tree_of(repo, new_parent):
-            log(f"  dropping empty absorbed commit {commit_label(meta)}")
+            log(
+                f"  {commit_label(meta)}  "
+                f"{STYLE.yellow('-> dropped (empty after absorption)')}"
+            )
             rewritten[original] = new_parent
             continue
+        if absorbed:
+            numbers = ", ".join(f"#{d.number}" for d in absorbed)
+            absorbed_tag = STYLE.green(
+                f"-> absorbed {pluralize(len(absorbed), 'hunk')} ({numbers})"
+            )
+            log(f"  {commit_label(meta)}  {absorbed_tag}")
         new_commit = commit_tree(repo, new_tree, new_parent, meta)
         rewritten[original] = new_commit
         new_parent = new_commit
@@ -873,18 +1251,31 @@ def rewrite_branch(args: argparse.Namespace) -> int:
     update_branch_ref(repo, output_branch, candidate_tip, output_expected_tip)
 
     moved = sum(len(v) for v in groups.values())
-    log(f"Moved {moved} hunk(s).")
+    not_absorbed = sum(1 for d in dispositions if d.target is None)
+    log("")
+    summary = f"{STYLE.bold('Moved')} {STYLE.bold(pluralize(moved, 'hunk'))}."
+    if not_absorbed:
+        summary += (
+            f" {STYLE.bold(pluralize(not_absorbed, 'hunk'))} not absorbed."
+        )
+    log(summary)
     if args.output_branch:
-        log(f"Created {output_branch} from {input_branch}: {original_tip} -> {candidate_tip}")
+        log(
+            f"{STYLE.bold('Created')} {output_branch} from {input_branch}: "
+            f"{short_sha(original_tip)} -> {short_sha(candidate_tip)}"
+        )
     else:
-        log(f"Updated {input_branch}: {original_tip} -> {candidate_tip}")
-    log("Null diff check passed.")
+        log(
+            f"{STYLE.bold('Updated')} {input_branch}: "
+            f"{short_sha(original_tip)} -> {short_sha(candidate_tip)}"
+        )
+    log(STYLE.green("Null diff check passed."))
     return 0
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Absorb hunks from one commit into prior first-parent commits.",
+        description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("commit", help="Non-merge commit whose hunks should be absorbed.")
@@ -894,16 +1285,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-branch", default=None, help="Create/update this branch with the rewritten history.")
     parser.add_argument("--force", action="store_true", help="Replace an existing --output-branch.")
     parser.add_argument("--context", type=int, default=3, help="Unified diff context for hunk parsing.")
+    parser.add_argument(
+        "--color",
+        choices=("auto", "always", "never"),
+        default="auto",
+        help="Colorize stderr output (default: auto; respects NO_COLOR / FORCE_COLOR).",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+    configure_style(args.color)
     try:
         return rewrite_branch(args)
     except AbsorbError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        text = colorize_conflicts(str(exc))
+        print(f"{STYLE.bold(STYLE.red('ERROR:'))} {text}", file=sys.stderr)
         return 1
 
 

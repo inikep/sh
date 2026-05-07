@@ -143,6 +143,10 @@ def base_index(absorb, repo: Path, chain: list[str], base_branch: str) -> int:
         raise absorb.AbsorbError("--base-branch tip is not on the output branch first-parent chain") from exc
 
 
+def total_commits_after_base(absorb, repo: Path, chain: list[str], base_branch: str) -> int:
+    return len(chain) - base_index(absorb, repo, chain, base_branch) - 1
+
+
 def next_small_commit(
     absorb,
     repo: Path,
@@ -278,7 +282,7 @@ def absorb_small_commits(absorb, args: argparse.Namespace) -> int:
 
     input_tip = absorb.branch_tip(repo, args.input_branch)
     chain = absorb.first_parent_chain(repo, input_tip)
-    base_index(absorb, repo, chain, args.base_branch)
+    total_before = total_commits_after_base(absorb, repo, chain, args.base_branch)
     reset_output_branch(absorb, repo, args.input_branch, args.output_branch, args.force)
 
     ignored_keys: set[str] = set()
@@ -341,6 +345,14 @@ def absorb_small_commits(absorb, args: argparse.Namespace) -> int:
 
     print_absorbed_commits(absorb, absorbed_commits)
     print_unabsorbed_commits(absorb, repo, unabsorbed_commits)
+    output_tip = absorb.branch_tip(repo, args.output_branch)
+    output_chain = absorb.first_parent_chain(repo, output_tip)
+    total_after = total_commits_after_base(absorb, repo, output_chain, args.base_branch)
+    absorb.log(
+        f"{absorb.STYLE.bold('Total commits:')} "
+        f"{pluralize(total_before, 'commit')} before; "
+        f"{pluralize(total_after, 'commit')} after."
+    )
     absorb.log(
         f"{absorb.STYLE.bold('Absorbed')} "
         f"{absorb.STYLE.bold(pluralize(absorbed, 'small commit'))}; "

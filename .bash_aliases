@@ -8,6 +8,7 @@ alias sshkvm="ssh -p 2222 -i /home/przemek/.ssh/inikep-rsa4096.priv przemek@10.3
 
 alias cf_on="git config --local include.path /data/mysql-server/percona-8.0/.gitconfig"
 alias cf_off="git config --local --unset include.path"
+alias claude-yolo="claude --dangerously-skip-permissions"
 alias git-clang-format="cf_off; git clang-format $@; cf_on"
 alias git-log="git log --oneline -10 $@"
 alias git-logfp="git log --first-parent --topo-order --oneline -10 $@"

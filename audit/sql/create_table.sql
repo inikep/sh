@@ -1,0 +1,7 @@
+CREATE DATABASE IF NOT EXISTS test;
+USE test;
+CREATE TABLE IF NOT EXISTS t_access (id INT PRIMARY KEY, data VARCHAR(50));
+INSERT INTO t_access VALUES (1, 'inserted');
+SELECT * FROM t_access WHERE id <> 1;
+SELECT 1;
+SELECT 2;

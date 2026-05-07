@@ -19,11 +19,13 @@ Groups (separated by MARKER commits):
   g3  CI configs      only .travis.yml, .circleci/, azure-pipelines.yml,
                         .cirrus.yml, .clang-tidy
   g4  RocksDB         only storage/rocksdb or mysql-test/suite/rocksdb*
-  g5  MTR tests       whole commits whose subject starts with "[MTR-only]"
+  g5  MTR tests       whole commits whose subject starts with "[MTR-only]",
+                      plus g10 mysql-test-only commits that move cleanly
   g6  Build/Compilation
                       whole commits whose subject starts with "[compilation]"
   g7  Upstream bug fixes
-                      whole commits whose subject starts with "[upstream]"
+                      whole commits whose subject starts with "[upstream]",
+                      plus g10 Remaining commits that move cleanly
   g8  Initial Percona Server tree
                       whole commits whose subject starts with "[init]"
   g9  MyRocks changes in kernel
@@ -47,35 +49,38 @@ Rules implemented (letters match the task):
      the corresponding g1 subcategory
   F) Commits containing g2/g3/g4 files are split; the g2/g3/g4 part goes to
      its bucket, the remainder to g10. For g4+g10 splits, titles get suffixes
-     " [MyRocks part]" and " [non-MyRocks part]"
+     " [MyRocks part]" and " [non-MyRocks part]". When rerunning an already
+     grouped branch, source group 10 files stay in g10 if moving them into an
+     earlier dedicated bucket would be clobbered by a preserved later group.
   G) Squashes keep the position of their first source commit (ordering within
      g1 follows first-seen position)
   H) A Markdown report is written
-  I) Deletion-heavy commits (more deletions than insertions) are listed on
-     the CLI for possible follow-up with a separate absorb helper. The reorder
-     script no longer rewrites commits to absorb removals.
+  I) Deletion-heavy output commits (more deletions than insertions) have their
+     subjects highlighted on the CLI. The reorder script no longer rewrites
+     commits to absorb removals.
   J) Source commits whose subject starts with "[compilation]" are moved to the
      g6 build/compilation group after any g1 paths are extracted for squash.
   K) Source commits whose subject starts with "[MTR-only]" are moved to the g5
      MTR tests group after any g1 paths are extracted for squash and any g4
      RocksDB paths are extracted for the RocksDB bucket. When rerunning an
-     already reordered branch, "[MTR-only]" commits that already appear in
-     source group 10 stay in g10 so prior "marked but not moved" decisions do
-     not create a non-null diff.
-  L) Commits that touch only mysql-test/ files are marked with an "[MTR-only]"
-     subject prefix before other subject-based groups, except for paths that
-     belong to g1 tokudb-test squashes or g4 RocksDB paths. Upstream-bug-fix
-     and Remaining-group mysql-test-only commits are probed with git
+     already reordered branch, commits that already appear before source group
+     10 stay in their source group and "[MTR-only]" commits that already appear
+     in source group 10 stay in g10 so prior "marked but not moved" decisions
+     do not create a non-null diff.
+  L) Commits that touch only mysql-test/ files are eligible for the g5 MTR tests
+     group, except for paths that belong to g1 tokudb-test squashes or g4
+     RocksDB paths. Remaining-group mysql-test-only commits are probed with git
      cherry-pick after existing g5 commits are emitted. Commits that apply
-     without conflict are emitted in g5; conflicted commits stay in their
-     original group with the "[MTR-only]" prefix.
+     without conflict are emitted in g5; g10 commits moved to g5 keep their
+     original subject, while g10 commits that stay in Remaining get an
+     "[MTR-only]" subject prefix.
   M) Source commits whose subject starts with "[upstream]" are moved to the g7
      upstream bug fixes group after any g1 paths are extracted for squash.
   N) Remaining-group commits are probed with git cherry-pick after existing g7
      commits are emitted. Commits that apply without conflict, do not start
      with "[MTR-only]" or "[result-only]", do not match the g9 MyRocks/kernel
      subject rules, and do not patch-overlap later groups are emitted in g7
-     with an "[upstream]" subject prefix; conflicted, MTR-only, result-only,
+     with their original subject; conflicted, MTR-only, result-only,
      g9-subject, or later-patch-overlapped commits stay in Remaining.
   O) Paths deleted by INPUT_BRANCH are handled outside the normal buckets.
      If the path exists in BASE_BRANCH, all normal references to it are
@@ -88,22 +93,26 @@ Rules implemented (letters match the task):
   Q) Source commits whose subject contains "MYR" or "rocks"
      (case-insensitive) are moved intact to the g9 MyRocks changes in kernel
      group unless a git cherry-pick probe reports a conflict or a later g10
-     commit touches the same patch. When such a commit also contains g4 RocksDB
-     paths, the g4 portion stays in the RocksDB group and the non-g4 portion is
-     queued for g9. Conflicted or later-patch-overlapped commits stay in the
-     remaining group. When rerunning an already reordered branch, commits that
-     already appear in source group 9 stay in g9.
+     commit touches the same patch. When such a commit also contains g2/g3/g4
+     paths, those dedicated portions are split first and only the remaining
+     non-dedicated portion is queued for g9. Conflicted or
+     later-patch-overlapped commits stay in the remaining group. When rerunning
+     an already reordered branch, commits that already appear in source group 9
+     stay in g9.
   R) Commits whose remaining files all end in ".result" are squashed file by
      file into the previous in-range planned item that touched each file. If a
      file's previous occurrence is only in BASE_BRANCH, it remains in the
      current commit, and that commit is kept in Remaining with a
      "[result-only]" subject prefix.
+  S) The report lists source commits that were removed or elided, with the
+     source hash, subject, and reason.
 
 Usage:
   ps-reorder-py --input-branch <branch|hash> \
                      --output-branch <new_branch> \
                      --base-branch  <base>
-                     [--report <path>] [--force-output]
+                     [--force-output]
+                     [--color auto|always|never]
 """
 
 import argparse
@@ -123,10 +132,109 @@ MAX_TITLE_LEN = 91
 LARGE_COMMIT_THRESHOLD = 10000
 BATCH_SIZE = 500            # max paths per git invocation
 PROGRESS_EVERY = 25         # print a progress line every N split commits
+OUTPUT_STAT_LINE_LEN = 104
+OUTPUT_STAT_FILES_WIDTH = 5
+OUTPUT_STAT_COUNT_WIDTH = 5
+
+
+class Style:
+    """ANSI styling for terminal output; a no-op when disabled."""
+
+    def __init__(self, enabled=False):
+        self.enabled = enabled
+
+    def _wrap(self, code, text):
+        if not self.enabled or not text:
+            return text
+        return f"\033[{code}m{text}\033[0m"
+
+    def bold(self, t): return self._wrap("1", t)
+    def dim(self, t): return self._wrap("2", t)
+    def red(self, t): return self._wrap("31", t)
+    def green(self, t): return self._wrap("32", t)
+    def yellow(self, t): return self._wrap("33", t)
+    def blue(self, t): return self._wrap("34", t)
+    def magenta(self, t): return self._wrap("35", t)
+    def cyan(self, t): return self._wrap("36", t)
+    def default(self, t): return self._wrap("39", t)
+    def bold_default(self, t): return self._wrap("1;39", t)
+    def bold_red(self, t): return self._wrap("1;31", t)
+    def bold_magenta(self, t): return self._wrap("1;35", t)
+
+
+STYLE = Style(False)
+
+
+def configure_style(mode):
+    """Resolve --color {auto,always,never} into STYLE.enabled."""
+    if mode == "always":
+        STYLE.enabled = True
+        return
+    if mode == "never":
+        STYLE.enabled = False
+        return
+    if os.environ.get("NO_COLOR") is not None:
+        STYLE.enabled = False
+        return
+    if os.environ.get("FORCE_COLOR"):
+        STYLE.enabled = True
+        return
+    STYLE.enabled = sys.stderr.isatty()
+
+
+CONFLICT_LINE_RE = re.compile(r"^(CONFLICT \([^)]+\):.*)$", re.MULTILINE)
+SECTION_LINE_RE = re.compile(r"^=== .+ ===$")
+SHORT_HASH_RE = re.compile(r"\b[0-9a-f]{12,40}\b")
+TAG_RE = re.compile(r"(^|\s)(\[[A-Za-z0-9_.:<>\-]+(?:->[A-Za-z0-9_.:<>\-]+)?\])")
+SHORTSTAT_INSERTIONS_RE = re.compile(
+    r"(^|[\s/])(\+\d+[KM]?|\d+[KM]?\+)(?=[\s/]|$)")
+SHORTSTAT_DELETIONS_RE = re.compile(
+    r"(^|[\s/])(-\d+[KM]?|\d+[KM]?-)(?=\s|$)")
+RED_STATUS_RE = re.compile(r"\b(conflict(?:ed)?|failed|failure|MISMATCH)\b")
+YELLOW_STATUS_RE = re.compile(r"\b(skipped|dropped|empty|none)\b")
+GREEN_STATUS_RE = re.compile(r"\b(emitted|promoted|clean|ready|passed|OK)\b")
+
+
+def colorize_conflicts(text):
+    """Highlight `CONFLICT (...): ...` lines in red within multi-line output."""
+    if not STYLE.enabled or not text:
+        return text
+    return CONFLICT_LINE_RE.sub(lambda m: STYLE.red(m.group(1)), text)
+
+
+def colorize_log_message(msg):
+    if not STYLE.enabled or not msg:
+        return msg
+    if SECTION_LINE_RE.match(msg):
+        return STYLE.bold(STYLE.cyan(msg))
+    msg = colorize_conflicts(msg)
+    msg = SHORTSTAT_INSERTIONS_RE.sub(
+        lambda m: m.group(1) + STYLE.green(m.group(2)), msg)
+    msg = SHORTSTAT_DELETIONS_RE.sub(
+        lambda m: m.group(1) + STYLE.red(m.group(2)), msg)
+    msg = SHORT_HASH_RE.sub(lambda m: STYLE.yellow(m.group(0)), msg)
+    msg = TAG_RE.sub(lambda m: m.group(1) + STYLE.cyan(m.group(2)), msg)
+    msg = RED_STATUS_RE.sub(lambda m: STYLE.red(m.group(0)), msg)
+    msg = YELLOW_STATUS_RE.sub(lambda m: STYLE.yellow(m.group(0)), msg)
+    msg = GREEN_STATUS_RE.sub(lambda m: STYLE.green(m.group(0)), msg)
+    return msg
+
+
+def short_sha(sha):
+    return STYLE.yellow(sha[:12])
+
+
+def styled_path(path):
+    return STYLE.magenta(path)
 
 
 def log(msg):
-    print(msg, file=sys.stderr, flush=True)
+    print(colorize_log_message(msg), file=sys.stderr, flush=True)
+
+
+def log_error(msg):
+    print(f"{STYLE.bold(STYLE.red('error:'))} {colorize_conflicts(msg)}",
+          file=sys.stderr, flush=True)
 
 G1_DOC = 'doc'
 G1_MAN = 'man'
@@ -144,6 +252,12 @@ G1_SUBJECTS = {
     G1_STORAGE_TOKUDB:  'Squash: storage/tokudb/',
     G1_VERSION_UNIV:    'Squash: MYSQL_VERSION, VERSION and storage/innobase/include/univ.i',
     G1_TOKUDB_TESTS:    'Squash: mysql-test/suite/tokudb* and MTR *toku* tests',
+}
+
+DEDICATED_GROUP_NUMBERS = {
+    'g2': 2,
+    'g3': 3,
+    'g4': 4,
 }
 
 # ---------------------------------------------------------------------------
@@ -342,23 +456,81 @@ def get_commit_shortstat_text(ch):
 
 def get_commit_shortstat_details(ch):
     text = get_commit_shortstat_text(ch)
+    files = 0
     ins = 0
     dele = 0
+    m = re.search(r'(\d+) files? changed', text)
+    if m:
+        files = int(m.group(1))
     m = re.search(r'(\d+) insertion', text)
     if m:
         ins = int(m.group(1))
     m = re.search(r'(\d+) deletion', text)
     if m:
         dele = int(m.group(1))
-    return text, ins, dele
+    return files, ins, dele
+
+
+def compact_count(n):
+    if n >= 1000000:
+        return f"{n // 1000000}M"
+    if n >= 10000:
+        return f"{n // 1000}K"
+    return str(n)
+
+
+def truncate_line(line, max_len=MAX_TITLE_LEN):
+    return line[:max_len]
+
+
+def format_output_commit_stats_line(files, ins, dele, ch, subject):
+    files_field = f"{compact_count(files)}f".ljust(OUTPUT_STAT_FILES_WIDTH)
+    ins_field = f"{compact_count(ins)}+".rjust(OUTPUT_STAT_COUNT_WIDTH)
+    del_field = f"{compact_count(dele)}-".rjust(OUTPUT_STAT_COUNT_WIDTH)
+    line = f"{files_field}{ins_field} {del_field} {ch[:12]} {subject}"
+    return truncate_line(line, OUTPUT_STAT_LINE_LEN)
+
+
+def subject_style(text, bold=False, red=False, blue=False, magenta=False):
+    if magenta and bold:
+        return STYLE.bold_magenta(text)
+    if magenta:
+        return STYLE.magenta(text)
+    if blue:
+        return STYLE.blue(text)
+    if red and bold:
+        return STYLE.bold_red(text)
+    if red:
+        return STYLE.red(text)
+    return STYLE.bold_default(text) if bold else STYLE.default(text)
+
+
+def colorize_output_commit_stats_line(line, bold_subject=False,
+                                      red_subject=False, blue_subject=False,
+                                      magenta_subject=False):
+    if not STYLE.enabled:
+        return line
+    m = re.match(r"^(\S+)(\s+)(\S+)(\s+)(\S+)(\s+)"
+                 r"([0-9a-f]{12})(\s?)(.*)$", line)
+    if not m:
+        return colorize_log_message(line)
+    return (
+        m.group(1) + m.group(2) +
+        STYLE.green(m.group(3)) + m.group(4) +
+        STYLE.red(m.group(5)) + m.group(6) +
+        STYLE.yellow(m.group(7)) + m.group(8) +
+        subject_style(m.group(9), bold_subject, red_subject, blue_subject,
+                      magenta_subject))
 
 
 def log_output_commit_stats(ch):
-    text, ins, dele = get_commit_shortstat_details(ch)
-    log(f"  output {ch[:12]} stats: {text}")
-    if ins + dele < 10:
-        subject = get_commit_subject(ch)
-        log(f"  small output commit {ch[:12]} ({ins + dele} change(s)): {subject}")
+    files, ins, dele = get_commit_shortstat_details(ch)
+    subject = get_commit_subject(ch)
+    line = format_output_commit_stats_line(files, ins, dele, ch, subject)
+    print(colorize_output_commit_stats_line(
+        line, ins + dele <= 8, dele > ins,
+        ins + dele > LARGE_COMMIT_THRESHOLD),
+          file=sys.stderr, flush=True)
 
 
 def get_commit_subject(ch):
@@ -466,12 +638,12 @@ def apply_item_file_states(item):
 # ---------------------------------------------------------------------------
 
 
-def build_full_message(subject, body_rest):
+def build_full_message(subject, body_rest, original_subject=None):
     """Apply Rule D: truncate subjects >91 chars, preserve original in body."""
-    if len(subject) <= MAX_TITLE_LEN:
+    if len(subject) <= MAX_TITLE_LEN and not original_subject:
         return subject + ('\n\n' + body_rest if body_rest.strip() else '')
     truncated = subject[:MAX_TITLE_LEN]
-    body = f"Original title:\n{subject}"
+    body = f"Original title:\n{original_subject or subject}"
     if body_rest.strip():
         body += '\n\n' + body_rest
     return truncated + '\n\n' + body
@@ -484,10 +656,28 @@ def truncate_with_suffix(subject, suffix):
     return subject[:MAX_TITLE_LEN - len(suffix)] + suffix
 
 
-def do_commit(info, subject, body_rest='', allow_empty=False):
+def truncate_with_suffix_and_original(subject, suffix):
+    full_subject = subject + suffix
+    truncated = truncate_with_suffix(subject, suffix)
+    original_subject = full_subject if truncated != full_subject else None
+    return truncated, original_subject
+
+
+SPLIT_SUBJECT_SUFFIXES = (' [MyRocks part]', ' [non-MyRocks part]')
+
+
+def split_preserved_subject_suffix(subject):
+    for suffix in SPLIT_SUBJECT_SUFFIXES:
+        if subject.endswith(suffix):
+            return subject[:-len(suffix)], suffix
+    return subject, ''
+
+
+def do_commit(info, subject, body_rest='', allow_empty=False,
+              original_subject=None):
     """Commit the staged index with author/committer info. Returns True on
     success, False if there was nothing to commit."""
-    message = build_full_message(subject, body_rest)
+    message = build_full_message(subject, body_rest, original_subject)
 
     env = os.environ.copy()
     env['GIT_AUTHOR_NAME']     = info['author_name']
@@ -627,6 +817,16 @@ def is_result_only_item(item):
         item['subject'])
 
 
+def source_group_bucket_name(source_group):
+    if source_group is None or source_group < 2 or source_group > 9:
+        return None
+    return f"g{source_group}_bucket"
+
+
+def is_preserved_source_group_item(item):
+    return source_group_bucket_name(item.get('source_group')) is not None
+
+
 def item_source_cache_key(item):
     source_by_file = item.get('source_by_file') or {}
     source_history_by_file = item.get('source_history_by_file') or {}
@@ -657,6 +857,31 @@ def register_result_file_occurrences(item, result_file_last_item):
 def append_plan_item(bucket, item, result_file_last_item):
     bucket.append(item)
     register_result_file_occurrences(item, result_file_last_item)
+
+
+def record_removed_commit_entry(entries, source_hash, subject, reason):
+    entries.append({
+        'hash': source_hash,
+        'subject': subject,
+        'reason': reason,
+    })
+
+
+def record_removed_commit(plan, info, reason, source_hash=None, subject=None):
+    record_removed_commit_entry(
+        plan['removed_commits'],
+        source_hash or info['hash'],
+        subject if subject is not None else info['subject'],
+        reason)
+
+
+def record_removed_item(entries, item, reason):
+    info = item['info']
+    record_removed_commit_entry(
+        entries,
+        item.get('source_hash') or info['hash'],
+        info['subject'],
+        reason)
 
 
 def squash_result_files_into_previous(files, source_hash, result_file_last_item):
@@ -711,6 +936,42 @@ def analyze_removed_paths(commits, base_hash, input_hash):
     }
 
 
+def collect_later_preserved_group_paths(commits, skipped_paths):
+    """Paths touched by preserved source groups that emit after g2/g3/g4.
+
+    On already grouped input branches, source group 10 commits are final
+    corrections. Pulling their g2/g3/g4 paths before a preserved later group can
+    let that later group's full file-state replay overwrite the correction.
+    """
+    later_paths = {group: set() for group in DEDICATED_GROUP_NUMBERS}
+    source_group = None
+    skipped_paths = set(skipped_paths)
+    for ch in commits:
+        info = get_commit_info(ch)
+        marker_group = marker_group_number(info['subject'])
+        if marker_group is not None:
+            source_group = marker_group
+            continue
+        if source_group_bucket_name(source_group) is None:
+            continue
+        files = [f for f in get_commit_files(ch) if f not in skipped_paths]
+        for group, group_number in DEDICATED_GROUP_NUMBERS.items():
+            if source_group > group_number:
+                later_paths[group].update(files)
+    return later_paths
+
+
+def keep_clobbered_dedicated_paths_in_remaining(files, clobber_paths):
+    dedicated = []
+    remaining = []
+    for path in files:
+        if path in clobber_paths:
+            remaining.append(path)
+        else:
+            dedicated.append(path)
+    return dedicated, remaining
+
+
 def log_removed_paths(removed_paths):
     """Print every removed path, grouped by output handling."""
     base_removed = sorted(removed_paths['base_removed'])
@@ -720,7 +981,7 @@ def log_removed_paths(removed_paths):
         "(will be removed in one commit):")
     if base_removed:
         for path in base_removed:
-            log(f"  {path}")
+            log(f"  {styled_path(path)}")
     else:
         log("  (none)")
 
@@ -728,7 +989,7 @@ def log_removed_paths(removed_paths):
         "(will be skipped entirely):")
     if transient_removed:
         for path in transient_removed:
-            log(f"  {path}")
+            log(f"  {styled_path(path)}")
     else:
         log("  (none)")
 
@@ -738,6 +999,8 @@ def plan_commits(commits, base_hash, removed_paths):
     base_removed = set(removed_paths['base_removed'])
     transient_removed = set(removed_paths['transient_removed'])
     skipped_paths = base_removed.union(transient_removed)
+    later_preserved_group_paths = collect_later_preserved_group_paths(
+        commits, skipped_paths)
     plan = {
         'g1_files':       defaultdict(set),   # cat  -> set(files)
         'g1_first_info':  {},                 # cat  -> info
@@ -761,6 +1024,7 @@ def plan_commits(commits, base_hash, removed_paths):
         'result_only_commits_elided': 0,
         'result_only_base_files_kept': 0,
         'result_only_base_commits_kept': 0,
+        'removed_commits': [],
     }
 
     total = len(commits)
@@ -778,44 +1042,90 @@ def plan_commits(commits, base_hash, removed_paths):
         marker_group = marker_group_number(info['subject'])
         if marker_group is not None:
             source_group = marker_group
+            record_removed_commit(
+                plan, info,
+                f"source marker for group {marker_group} omitted; "
+                "output markers are regenerated")
             continue
         files = get_commit_files(ch)
         if skipped_paths:
-            plan['base_removed_refs_skipped'] += sum(
-                1 for f in files if f in base_removed)
-            plan['transient_removed_refs_skipped'] += sum(
-                1 for f in files if f in transient_removed)
+            base_refs = sum(1 for f in files if f in base_removed)
+            transient_refs = sum(1 for f in files if f in transient_removed)
+            plan['base_removed_refs_skipped'] += base_refs
+            plan['transient_removed_refs_skipped'] += transient_refs
             files = [f for f in files if f not in skipped_paths]
         if not files:
+            if skipped_paths and (base_refs or transient_refs):
+                details = []
+                if base_refs:
+                    details.append(
+                        f"{base_refs} base-removed file reference(s)")
+                if transient_refs:
+                    details.append(
+                        f"{transient_refs} input-only removed file reference(s)")
+                record_removed_commit(
+                    plan, info,
+                    "all modified paths were skipped because they are absent "
+                    f"from INPUT_BRANCH ({', '.join(details)})")
+            else:
+                record_removed_commit(
+                    plan, info,
+                    "source commit has no file changes relative to its first "
+                    "parent")
+            continue
+
+        source_group_bucket = source_group_bucket_name(source_group)
+        if source_group_bucket is not None:
+            append_plan_item(plan[source_group_bucket], {
+                'info': info,
+                'files': list(files),
+                'subject': info['subject'],
+                'body_rest': info['body_rest'],
+                'source_hash': ch,
+                'source_pos': idx,
+                'source_group': source_group,
+            }, result_file_last_item)
             continue
 
         g1_part, non_g1_files = split_out_g1_files(files)
         for cat, fl in g1_part.items():
             add_g1_files_to_plan(plan, cat, fl, info, idx)
         files = non_g1_files
+        if g1_part and not files:
+            cats = ', '.join(sorted(g1_part))
+            record_removed_commit(
+                plan, info,
+                f"all remaining paths were folded into g1 squash(es): {cats}")
+            continue
 
         if is_result_only_commit(files):
+            result_files_before_squash = list(files)
             files, squashed = squash_result_files_into_previous(
                 files, ch, result_file_last_item)
             plan['result_only_files_squashed'] += squashed
             if not files:
                 plan['result_only_commits_elided'] += 1
+                record_removed_commit(
+                    plan, info,
+                    f"all {len(result_files_before_squash)} .result path(s) "
+                    "were squashed into previous in-range commit(s)")
                 continue
             base_result_files, files = base_existence.split(files)
             if base_result_files:
                 plan['result_only_base_files_kept'] += len(base_result_files)
                 plan['result_only_base_commits_kept'] += 1
+                result_subject, original_subject = add_subject_prefix_with_original(
+                    info['subject'], '[result-only]', space_before_plain=True)
                 append_plan_item(plan['g10_bucket'], {
                     'info': info,
                     'files': list(base_result_files),
-                    'subject': add_subject_prefix(
-                        info['subject'], '[result-only]',
-                        space_before_plain=True),
+                    'subject': result_subject,
                     'body_rest': info['body_rest'],
                     'source_hash': ch,
                     'source_pos': idx,
                     'source_group': source_group,
                     'result_only': True,
+                    'original_subject': original_subject,
                 }, result_file_last_item)
             if not files:
                 continue
@@ -864,13 +1174,12 @@ def plan_commits(commits, base_hash, removed_paths):
             append_plan_item(plan['g10_bucket'], {
                 'info': info,
                 'files': list(files),
-                'subject': add_subject_prefix(
-                    info['subject'], '[MTR-only]',
-                    space_before_plain=True),
+                'subject': info['subject'],
                 'body_rest': info['body_rest'],
                 'source_hash': ch,
                 'source_pos': idx,
                 'source_group': source_group,
+                'mtr_only_candidate': True,
             }, result_file_last_item)
             continue
         if is_upstream_bug_fix_group_subject(info['subject']):
@@ -911,7 +1220,21 @@ def plan_commits(commits, base_hash, removed_paths):
                 g10_part.append(f)
 
         myrocks_kernel_subject = is_myrocks_kernel_group_subject(info['subject'])
-        if myrocks_kernel_subject and not g4_part:
+
+        if source_group == 10:
+            g2_part, unsafe = keep_clobbered_dedicated_paths_in_remaining(
+                g2_part, later_preserved_group_paths['g2'])
+            g10_part.extend(unsafe)
+            g3_part, unsafe = keep_clobbered_dedicated_paths_in_remaining(
+                g3_part, later_preserved_group_paths['g3'])
+            g10_part.extend(unsafe)
+            g4_part, unsafe = keep_clobbered_dedicated_paths_in_remaining(
+                g4_part, later_preserved_group_paths['g4'])
+            g10_part.extend(unsafe)
+
+        has_g234 = bool(g2_part or g3_part or g4_part)
+
+        if myrocks_kernel_subject and not has_g234:
             append_plan_item(plan['g9_bucket'], {
                 'info': info,
                 'files': list(files),
@@ -923,11 +1246,10 @@ def plan_commits(commits, base_hash, removed_paths):
             }, result_file_last_item)
             continue
 
-        has_g234 = bool(g2_part or g3_part or g4_part)
-
         if has_g234:
             # Rule F — split g2/g3/g4 as dedicated commits; the remainder stays
-            # in g10 except MYR/rocks subjects whose non-g4 portion belongs in g9.
+            # in g10 except MYR/rocks subjects whose non-dedicated portion
+            # belongs in g9.
             if g2_part:
                 append_plan_item(plan['g2_bucket'], {
                     'info': info,
@@ -949,9 +1271,10 @@ def plan_commits(commits, base_hash, removed_paths):
             if g4_part:
                 # "[MyRocks part]" suffix for the g4+g10 split per rule F.
                 subj = info['subject']
+                original_subject = None
                 if g10_part:
-                    subj = truncate_with_suffix(info['subject'],
-                                                ' [MyRocks part]')
+                    subj, original_subject = truncate_with_suffix_and_original(
+                        info['subject'], ' [MyRocks part]')
                 append_plan_item(plan['g4_bucket'], {
                     'info': info,
                     'files': list(g4_part),
@@ -959,13 +1282,15 @@ def plan_commits(commits, base_hash, removed_paths):
                     'body_rest': info['body_rest'],
                     'source_hash': ch,
                     'source_group': source_group,
+                    'original_subject': original_subject,
                 }, result_file_last_item)
             if g10_part:
                 subj = info['subject']
+                original_subject = None
                 if g4_part:
-                    subj = truncate_with_suffix(info['subject'],
-                                                ' [non-MyRocks part]')
-                target_bucket = 'g9_bucket' if (g4_part and myrocks_kernel_subject) else 'g10_bucket'
+                    subj, original_subject = truncate_with_suffix_and_original(
+                        info['subject'], ' [non-MyRocks part]')
+                target_bucket = 'g9_bucket' if myrocks_kernel_subject else 'g10_bucket'
                 append_plan_item(plan[target_bucket], {
                     'info': info,
                     'files': list(g10_part),
@@ -974,6 +1299,7 @@ def plan_commits(commits, base_hash, removed_paths):
                     'source_hash': ch,
                     'source_pos': idx,
                     'source_group': source_group,
+                    'original_subject': original_subject,
                 }, result_file_last_item)
         elif g10_part:
             # No g2/g3/g4; just emit g10.
@@ -1032,12 +1358,28 @@ def can_move_without_git_conflict(source_hash):
         f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}")
 
 
-def add_subject_prefix(subject, prefix, space_before_plain=False):
+def add_subject_prefix_with_original(subject, prefix, space_before_plain=False,
+                                     original_subject=None):
     if subject.startswith(prefix):
-        return subject
+        return subject, original_subject
     separator = ' ' if space_before_plain and not subject.startswith('[') else ''
-    max_subject_len = MAX_TITLE_LEN - len(prefix) - len(separator)
-    return prefix + separator + subject[:max_subject_len]
+    body, suffix = split_preserved_subject_suffix(subject)
+    max_body_len = MAX_TITLE_LEN - len(prefix) - len(separator) - len(suffix)
+    prefixed = prefix + separator + body[:max_body_len] + suffix
+
+    original_base = original_subject or subject
+    original_separator = (
+        ' ' if space_before_plain and not original_base.startswith('[') else '')
+    full_subject = prefix + original_separator + original_base
+    if prefixed != full_subject:
+        return prefixed, full_subject
+    return prefixed, None
+
+
+def add_subject_prefix(subject, prefix, space_before_plain=False):
+    prefixed, _original_subject = add_subject_prefix_with_original(
+        subject, prefix, space_before_plain)
+    return prefixed
 
 
 _PATCH_HUNK_CACHE = {}
@@ -1225,7 +1567,8 @@ def promote_mysql_test_only_to_mtr(source_bucket, g5_bucket, source_tag,
     candidates = [item for item in source_bucket
                   if (touches_only_mysql_test(item['files']) and
                       not contains_g1_paths(item['files']) and
-                      not is_result_only_item(item))]
+                      not is_result_only_item(item) and
+                      not is_preserved_source_group_item(item))]
     if not candidates:
         log(f"  [g5<-{source_tag}] no mysql-test-only commits to probe")
         return 0, 0, 0
@@ -1257,21 +1600,29 @@ def promote_mysql_test_only_to_mtr(source_bucket, g5_bucket, source_tag,
     for item in source_bucket:
         if (not touches_only_mysql_test(item['files']) or
                 contains_g1_paths(item['files']) or
-                is_result_only_item(item)):
+                is_result_only_item(item) or
+                is_preserved_source_group_item(item)):
             kept.append(item)
             continue
 
         item_id = id(item)
         if item_id not in conflict_ids and item_id not in overlap_ids:
             promoted_item = dict(item)
-            promoted_item['subject'] = add_subject_prefix(
-                item['subject'], '[MTR-only]', space_before_plain=True)
+            if source_tag != 'g10':
+                subject, original_subject = add_subject_prefix_with_original(
+                    item['subject'], '[MTR-only]', space_before_plain=True,
+                    original_subject=item.get('original_subject'))
+                promoted_item['subject'] = subject
+                promoted_item['original_subject'] = original_subject
             g5_bucket.append(promoted_item)
             promoted += 1
         else:
             kept_item = dict(item)
-            kept_item['subject'] = add_subject_prefix(
-                item['subject'], '[MTR-only]', space_before_plain=True)
+            subject, original_subject = add_subject_prefix_with_original(
+                item['subject'], '[MTR-only]', space_before_plain=True,
+                original_subject=item.get('original_subject'))
+            kept_item['subject'] = subject
+            kept_item['original_subject'] = original_subject
             kept.append(kept_item)
             if item_id in conflict_ids:
                 log(f"  [g5<-{source_tag}] keeping "
@@ -1357,8 +1708,6 @@ def promote_remaining_to_upstream(g10_bucket, g7_bucket, protected_items=None):
     for i, (item, result) in enumerate(probe_results, 1):
         if result is True and id(item) not in overlap_ids:
             promoted_item = dict(item)
-            promoted_item['subject'] = add_subject_prefix(
-                item['subject'], '[upstream]')
             g7_bucket.append(promoted_item)
             promoted += 1
         else:
@@ -1395,7 +1744,7 @@ def promote_remaining_to_upstream(g10_bucket, g7_bucket, protected_items=None):
     return promoted, conflict_kept, overlap_kept, mtr_kept, result_kept, myr_kept
 
 
-def emit_split_bucket(bucket, tag):
+def emit_split_bucket(bucket, tag, removed_commits=None):
     """Write individual commits of a split bucket (g2/g3/g4/g6/g7/g8/g9/g10)."""
     emitted = 0
     skipped_empty = 0
@@ -1408,10 +1757,15 @@ def emit_split_bucket(bucket, tag):
     start = time.monotonic()
     for i, item in enumerate(bucket, 1):
         apply_item_file_states(item)
-        if do_commit(item['info'], item['subject'], item['body_rest']):
+        if do_commit(item['info'], item['subject'], item['body_rest'],
+                     original_subject=item.get('original_subject')):
             emitted += 1
         else:
             skipped_empty += 1
+            if removed_commits is not None:
+                record_removed_item(
+                    removed_commits, item,
+                    f"planned {tag} output commit produced no staged changes")
         if i % PROGRESS_EVERY == 0 or i == total:
             elapsed = time.monotonic() - start
             rate = i / elapsed if elapsed > 0 else 0.0
@@ -1421,7 +1775,8 @@ def emit_split_bucket(bucket, tag):
     return emitted, skipped_empty
 
 
-def emit_conflict_aware_split_bucket(bucket, tag, fallback_bucket):
+def emit_conflict_aware_split_bucket(bucket, tag, fallback_bucket,
+                                     removed_commits=None):
     emitted = 0
     skipped_empty = 0
     conflict_fallback = 0
@@ -1440,10 +1795,15 @@ def emit_conflict_aware_split_bucket(bucket, tag, fallback_bucket):
             conflict_fallback += 1
         else:
             apply_item_file_states(item)
-            if do_commit(item['info'], item['subject'], item['body_rest']):
+            if do_commit(item['info'], item['subject'], item['body_rest'],
+                         original_subject=item.get('original_subject')):
                 emitted += 1
             else:
                 skipped_empty += 1
+                if removed_commits is not None:
+                    record_removed_item(
+                        removed_commits, item,
+                        f"planned {tag} output commit produced no staged changes")
         if i % PROGRESS_EVERY == 0 or i == total:
             elapsed = time.monotonic() - start
             rate = i / elapsed if elapsed > 0 else 0.0
@@ -1571,36 +1931,6 @@ def emit_snap_reconciliation_commit(input_hash, output_branch):
     return do_commit(info, subject, body), len(paths), diff_stat, paths
 
 
-MARKER_SUBJECT_PREFIX = '=== MARKER: GROUP '
-
-
-def deletion_heavy_commits(args, base_hash):
-    r = run_git(['rev-list', '--reverse', '--first-parent',
-                 f'{base_hash}..{args.output_branch}'])
-    commits = [c for c in r.stdout.strip().split('\n') if c]
-    heavy = []
-    for c in commits:
-        subject = get_commit_subject(c)
-        if subject.startswith(MARKER_SUBJECT_PREFIX):
-            continue
-        ins, dele = get_commit_shortstat(c)
-        if dele > ins:
-            heavy.append((c, ins, dele, subject))
-    return heavy
-
-
-def log_deletion_heavy_commits(args, base_hash):
-    log("Deletion-heavy commits (deletions > insertions):")
-    heavy = deletion_heavy_commits(args, base_hash)
-    if not heavy:
-        log("  (none)")
-        return 0
-    for c, ins, dele, subject in heavy:
-        log(f"  {c[:12]}  +{ins}/-{dele}  {subject}")
-    log(f"  listed {len(heavy)} deletion-heavy commit(s)")
-    return len(heavy)
-
-
 def build_output_branch(args, input_hash, base_hash, plan):
     # Create / reset the output branch at the base
     if branch_exists(args.output_branch):
@@ -1673,7 +2003,8 @@ def build_output_branch(args, input_hash, base_hash, plan):
     log("=== GROUP 2: build-ps ===")
     marker_commit(2, 'build-ps',
                   'Commits touching only build-ps/.')
-    e, s = emit_split_bucket(plan['g2_bucket'], 'g2')
+    e, s = emit_split_bucket(plan['g2_bucket'], 'g2',
+                             plan['removed_commits'])
     stats['g2_emitted'], stats['g2_skipped'] = e, s
 
     # -- Group 3 ------------------------------------------------------------
@@ -1681,33 +2012,29 @@ def build_output_branch(args, input_hash, base_hash, plan):
     marker_commit(3, 'CI configs',
                   '.travis.yml, .circleci/, azure-pipelines.yml, .cirrus.yml, '
                   '.clang-tidy')
-    e, s = emit_split_bucket(plan['g3_bucket'], 'g3')
+    e, s = emit_split_bucket(plan['g3_bucket'], 'g3',
+                             plan['removed_commits'])
     stats['g3_emitted'], stats['g3_skipped'] = e, s
 
     # -- Group 4 ------------------------------------------------------------
     log("=== GROUP 4: RocksDB ===")
     marker_commit(4, 'RocksDB',
                   'storage/rocksdb and mysql-test/suite/rocksdb*')
-    e, s = emit_split_bucket(plan['g4_bucket'], 'g4')
+    e, s = emit_split_bucket(plan['g4_bucket'], 'g4',
+                             plan['removed_commits'])
     stats['g4_emitted'], stats['g4_skipped'] = e, s
 
     # -- Group 5 ------------------------------------------------------------
     log("=== GROUP 5: MTR tests ===")
     marker_commit(5, 'MTR tests',
                   'Whole commits whose subject starts with "[MTR-only]", plus '
-                  'mysql-test-only Upstream/Remaining commits that '
-                  'cherry-pick cleanly after existing g5 commits without '
-                  'patch-overlapping later groups.')
-    e, s = emit_split_bucket(plan['g5_bucket'], 'g5')
+                  'mysql-test-only Remaining commits that cherry-pick cleanly '
+                  'after existing g5 commits without patch-overlapping later '
+                  'groups; g10 promotions keep their original subjects.')
+    e, s = emit_split_bucket(plan['g5_bucket'], 'g5',
+                             plan['removed_commits'])
     stats['g5_emitted'], stats['g5_skipped'] = e, s
     promoted_g5_bucket = []
-    promoted, conflict_kept, overlap_kept = promote_mysql_test_only_to_mtr(
-        plan['g7_bucket'], promoted_g5_bucket, 'g7',
-        plan['g6_bucket'] + plan['g8_bucket'] + plan['g9_bucket'] +
-        plan['g10_bucket'])
-    stats['g5_promoted_from_upstream'] = promoted
-    stats['g5_upstream_conflict_kept'] = conflict_kept
-    stats['g5_upstream_overlap_kept'] = overlap_kept
     promoted, conflict_kept, overlap_kept = promote_mysql_test_only_to_mtr(
         plan['g10_bucket'], promoted_g5_bucket, 'g10',
         plan['g6_bucket'] + plan['g7_bucket'] + plan['g8_bucket'] +
@@ -1715,7 +2042,8 @@ def build_output_branch(args, input_hash, base_hash, plan):
     stats['g5_promoted_from_remaining'] = promoted
     stats['g5_remaining_conflict_kept'] = conflict_kept
     stats['g5_remaining_overlap_kept'] = overlap_kept
-    e, s = emit_split_bucket(promoted_g5_bucket, 'g5:promoted')
+    e, s = emit_split_bucket(promoted_g5_bucket, 'g5:promoted',
+                             plan['removed_commits'])
     stats['g5_emitted'] += e
     stats['g5_skipped'] += s
 
@@ -1723,7 +2051,8 @@ def build_output_branch(args, input_hash, base_hash, plan):
     log("=== GROUP 6: Build/Compilation ===")
     marker_commit(6, 'Build/Compilation',
                   'Whole commits whose subject starts with "[compilation]".')
-    e, s = emit_split_bucket(plan['g6_bucket'], 'g6')
+    e, s = emit_split_bucket(plan['g6_bucket'], 'g6',
+                             plan['removed_commits'])
     stats['g6_emitted'], stats['g6_skipped'] = e, s
 
     # -- Group 7 ------------------------------------------------------------
@@ -1732,8 +2061,10 @@ def build_output_branch(args, input_hash, base_hash, plan):
                   'Whole commits whose subject starts with "[upstream]", plus '
                   'Remaining commits that cherry-pick cleanly after existing '
                   'g7 commits without patch-overlapping later groups or '
-                  'matching g9 MyRocks/kernel subject rules.')
-    e, s = emit_split_bucket(plan['g7_bucket'], 'g7')
+                  'matching g9 MyRocks/kernel subject rules; g10 promotions '
+                  'keep their original subjects.')
+    e, s = emit_split_bucket(plan['g7_bucket'], 'g7',
+                             plan['removed_commits'])
     stats['g7_emitted'], stats['g7_skipped'] = e, s
     promoted_g7_bucket = []
     promoted, conflict_kept, overlap_kept, mtr_kept, result_kept, myr_kept = promote_remaining_to_upstream(
@@ -1745,7 +2076,8 @@ def build_output_branch(args, input_hash, base_hash, plan):
     stats['g7_remaining_mtr_kept'] = mtr_kept
     stats['g7_remaining_result_kept'] = result_kept
     stats['g7_remaining_myr_kept'] = myr_kept
-    e, s = emit_split_bucket(promoted_g7_bucket, 'g7:promoted')
+    e, s = emit_split_bucket(promoted_g7_bucket, 'g7:promoted',
+                             plan['removed_commits'])
     stats['g7_emitted'] += e
     stats['g7_skipped'] += s
 
@@ -1753,7 +2085,8 @@ def build_output_branch(args, input_hash, base_hash, plan):
     log("=== GROUP 8: Initial Percona Server tree ===")
     marker_commit(8, 'Initial Percona Server tree',
                   'Whole commits whose subject starts with "[init]".')
-    e, s = emit_split_bucket(plan['g8_bucket'], 'g8')
+    e, s = emit_split_bucket(plan['g8_bucket'], 'g8',
+                             plan['removed_commits'])
     stats['g8_emitted'], stats['g8_skipped'] = e, s
 
     # -- Group 9 ------------------------------------------------------------
@@ -1766,7 +2099,8 @@ def build_output_branch(args, input_hash, base_hash, plan):
                   'portion here.')
     prepared_g9_bucket, conflict_fallback, overlap_fallback = prepare_g9_bucket(
         plan['g9_bucket'], plan['g10_bucket'], plan['g10_bucket'])
-    e, s = emit_split_bucket(prepared_g9_bucket, 'g9')
+    e, s = emit_split_bucket(prepared_g9_bucket, 'g9',
+                             plan['removed_commits'])
     stats['g9_emitted'], stats['g9_skipped'] = e, s
     stats['g9_conflict_fallback'] = conflict_fallback
     stats['g9_overlap_fallback'] = overlap_fallback
@@ -1776,7 +2110,8 @@ def build_output_branch(args, input_hash, base_hash, plan):
     marker_commit(10, 'Remaining',
                   'Everything not classified into groups 1-9.')
     plan['g10_bucket'].sort(key=lambda item: item.get('source_pos', -1))
-    e, s = emit_split_bucket(plan['g10_bucket'], 'g10')
+    e, s = emit_split_bucket(plan['g10_bucket'], 'g10',
+                             plan['removed_commits'])
     stats['g10_emitted'], stats['g10_skipped'] = e, s
 
     snap_ok, snap_paths, snap_diff_stat, snap_diff_paths = emit_snap_reconciliation_commit(
@@ -1818,11 +2153,9 @@ def _shortstat_one(ch):
 
 def scan_commits(start, end, label=None, jobs=32):
     """Walk every first-parent commit in `start..end` in parallel, summing
-    per-commit insertions/deletions and collecting commits above
-    LARGE_COMMIT_THRESHOLD.
+    per-commit insertions/deletions.
 
-    Returns (large_list, total_ins, total_del). `large_list` entries are
-    (hash, ins, del, subject). Uses a thread pool (default 32 workers) to
+    Returns (total_ins, total_del). Uses a thread pool (default 32 workers) to
     parallelise `git show --shortstat`.
     """
     r = run_git(['log', '--first-parent', '--reverse', '--format=%H',
@@ -1833,11 +2166,10 @@ def scan_commits(start, end, label=None, jobs=32):
         log(f"Scanning {label} for per-commit stats across {total} commits "
             f"(parallel, {jobs} workers)...")
     if not hashes:
-        return [], 0, 0
+        return 0, 0
 
     total_ins = 0
     total_del = 0
-    large = []
     t0 = time.monotonic()
     done = 0
 
@@ -1845,43 +2177,106 @@ def scan_commits(start, end, label=None, jobs=32):
         for ch, ins, dele in ex.map(_shortstat_one, hashes, chunksize=32):
             total_ins += ins
             total_del += dele
-            if ins + dele > LARGE_COMMIT_THRESHOLD:
-                large.append((ch, ins, dele, None))  # subject filled below
             done += 1
             if label and (done % 500 == 0 or done == total):
                 elapsed = time.monotonic() - t0
                 rate = done / elapsed if elapsed > 0 else 0.0
-                log(f"  {label}: scanned {done}/{total}  ({rate:5.1f}/s, "
-                    f"{len(large)} large so far)")
+                log(f"  {label}: scanned {done}/{total}  "
+                    f"({rate:5.1f}/s)")
 
-    # Batch-fetch subjects for the large commits (cheap: N<<total usually).
-    if large:
-        subj_by_hash = {}
-        for (h, _i, _d, _s) in large:
-            subj_by_hash[h] = None
-        # One call per commit still, but there are few; keep it simple.
-        for h in list(subj_by_hash):
-            subj_by_hash[h] = get_commit_subject(h)
-        large = [(h, i, d, subj_by_hash[h]) for (h, i, d, _s) in large]
-
-    return large, total_ins, total_del
+    return total_ins, total_del
 
 
-def write_report(args, input_hash, base_hash, plan, stats, report_path):
+def grouped_removed_commits(entries):
+    grouped = OrderedDict()
+    for entry in entries:
+        source_hash = entry.get('hash', '')
+        subject = entry.get('subject', '')
+        reason = entry.get('reason', '').strip() or "(no reason recorded)"
+        key = (source_hash, subject)
+        grouped.setdefault(key, [])
+        if reason not in grouped[key]:
+            grouped[key].append(reason)
+    return [(source_hash, subject, reasons)
+            for (source_hash, subject), reasons in grouped.items()]
+
+
+def is_source_marker_removed_reason(reason):
+    return (reason.startswith("source marker for group ") and
+            reason.endswith(" omitted; output markers are regenerated"))
+
+
+def removed_reason_group_header(reason):
+    absent_prefix = (
+        "all modified paths were skipped because they are absent from "
+        "INPUT_BRANCH")
+    if reason.startswith(absent_prefix):
+        return "All modified paths were skipped because they are absent from INPUT_BRANCH"
+    if re.match(r"^all \d+ \.result path\(s\) were squashed into "
+                r"previous in-range commit\(s\)$", reason):
+        return "All .result path(s) were squashed into previous in-range commit(s)"
+    if reason.startswith("all modified paths"):
+        return "All" + reason[len("all"):]
+    if reason.startswith("all "):
+        return "All" + reason[len("all"):]
+    return reason
+
+
+def removed_commits_by_reason(entries):
+    grouped = OrderedDict()
+    seen = defaultdict(set)
+    for source_hash, subject, reasons in grouped_removed_commits(entries):
+        for reason in reasons:
+            if is_source_marker_removed_reason(reason):
+                continue
+            reason = removed_reason_group_header(reason)
+            key = (source_hash, subject)
+            if key in seen[reason]:
+                continue
+            grouped.setdefault(reason, []).append(key)
+            seen[reason].add(key)
+    return grouped
+
+
+def print_removed_commit_line(source_hash, subject):
+    files, ins, dele = get_commit_shortstat_details(source_hash)
+    line = format_output_commit_stats_line(files, ins, dele, source_hash,
+                                           subject)
+    print(colorize_output_commit_stats_line(
+        line, ins + dele <= 8, dele > ins,
+        ins + dele > LARGE_COMMIT_THRESHOLD, True),
+        file=sys.stderr, flush=True)
+
+
+def log_removed_commits_by_reason(plan):
+    grouped = removed_commits_by_reason(plan.get('removed_commits', []))
+    log("=== REMOVED COMMITS ===")
+    if not grouped:
+        log("  (none)")
+        return
+    unique_commits = OrderedDict()
+    for commits in grouped.values():
+        for source_hash, subject in commits:
+            unique_commits[(source_hash, subject)] = True
+    total = len(unique_commits)
+    log(f"  {total} source commit(s) removed or elided")
+    for reason, commits in grouped.items():
+        log("")
+        log(f"{reason} ({len(commits)} commit(s))")
+        for source_hash, subject in commits:
+            print_removed_commit_line(source_hash, subject)
+
+
+def log_terminal_summary(args, input_hash, base_hash, plan, stats):
     in_count = int(run_git(['rev-list', '--first-parent', '--count',
                             f'{base_hash}..{input_hash}']).stdout.strip())
     out_count = int(run_git(['rev-list', '--first-parent', '--count',
                              f'{base_hash}..{args.output_branch}']).stdout.strip())
-    log(f"Commit counts: INPUT_BRANCH={in_count}, OUTPUT_BRANCH={out_count}")
 
-    in_large,  in_ins,  in_del  = scan_commits(base_hash, input_hash,
-                                               label='INPUT_BRANCH')
-    out_large, out_ins, out_del = scan_commits(base_hash, args.output_branch,
-                                               label='OUTPUT_BRANCH')
-
-    log(f"Per-commit totals:")
-    log(f"  INPUT_BRANCH  +{in_ins}/-{in_del}  (total {in_ins + in_del})")
-    log(f"  OUTPUT_BRANCH +{out_ins}/-{out_del}  (total {out_ins + out_del})")
+    in_ins, in_del = scan_commits(base_hash, input_hash,
+                                  label='INPUT_BRANCH')
+    out_ins, out_del = scan_commits(base_hash, args.output_branch,
+                                    label='OUTPUT_BRANCH')
 
     diff_stat = run_git(['diff', '--stat', input_hash, args.output_branch],
                         check=False).stdout.strip()
@@ -1889,186 +2284,114 @@ def write_report(args, input_hash, base_hash, plan, stats, report_path):
                            check=False).stdout
     null_diff = not diff_content.strip()
 
-    lines = []
-    lines.append("# ps-reorder report")
-    lines.append("")
-    lines.append("## Summary")
-    lines.append("")
-    lines.append(f"- INPUT_BRANCH:  `{args.input_branch}` ({input_hash})")
-    lines.append(f"- BASE_BRANCH:   `{args.base_branch}`  ({base_hash})")
-    lines.append(f"- OUTPUT_BRANCH: `{args.output_branch}`")
-    lines.append(f"- Source commits considered: {plan['n_source_commits']}")
-    lines.append(f"- Commits on INPUT_BRANCH (first-parent):  {in_count}")
-    lines.append(f"- Commits on OUTPUT_BRANCH (first-parent): {out_count}")
-    lines.append(f"- Per-commit totals on INPUT_BRANCH:  "
-                 f"+{in_ins}/-{in_del}  (total {in_ins + in_del})")
-    lines.append(f"- Per-commit totals on OUTPUT_BRANCH: "
-                 f"+{out_ins}/-{out_del}  (total {out_ins + out_del})")
-    lines.append(f"- Base-branch removed files: "
-                 f"{len(plan['base_removed_files'])}")
-    lines.append(f"- Input-only removed files skipped: "
-                 f"{len(plan['transient_removed_files'])}")
-    lines.append(f"- Removed-file references skipped while planning: "
-                 f"{plan['base_removed_refs_skipped']} base-file, "
-                 f"{plan['transient_removed_refs_skipped']} input-only")
-    lines.append(f"- `.result` file changes squashed into previous "
-                 f"in-range occurrences: "
-                 f"{plan.get('result_only_files_squashed', 0)}")
-    lines.append(f"- `.result`-only commits fully elided by that squash: "
-                 f"{plan.get('result_only_commits_elided', 0)}")
-    lines.append(f"- `.result` files kept as `[result-only]` because their "
-                 f"previous occurrence is in BASE_BRANCH: "
-                 f"{plan.get('result_only_base_files_kept', 0)}")
-    lines.append(f"- `[result-only]` commits kept separate: "
-                 f"{plan.get('result_only_base_commits_kept', 0)}")
-    lines.append("")
-    lines.append("| Group | Emitted | Skipped (empty) |")
-    lines.append("|------:|--------:|----------------:|")
+    visible_removed = OrderedDict()
+    for commits in removed_commits_by_reason(
+            plan.get('removed_commits', [])).values():
+        for source_hash, subject in commits:
+            visible_removed[(source_hash, subject)] = True
+
+    log("=== FINAL SUMMARY ===")
+    log(f"Input:  {args.input_branch}  ({input_hash[:12]})")
+    log(f"Base:   {args.base_branch}   ({base_hash[:12]})")
+    log(f"Output: {args.output_branch}")
+    log(f"Source commits considered: {plan['n_source_commits']}")
+    log(f"Source commits removed or elided: {len(visible_removed)}")
+    log(f"Commits on INPUT_BRANCH (first-parent):  {in_count}")
+    log(f"Commits on OUTPUT_BRANCH (first-parent): {out_count}")
+    log(f"Per-commit totals on INPUT_BRANCH:  "
+        f"+{in_ins}/-{in_del}  (total {in_ins + in_del})")
+    log(f"Per-commit totals on OUTPUT_BRANCH: "
+        f"+{out_ins}/-{out_del}  (total {out_ins + out_del})")
+    log(f"Base-branch removed files: {len(plan['base_removed_files'])}")
+    log(f"Input-only removed files skipped: "
+        f"{len(plan['transient_removed_files'])}")
+    log(f"Removed-file references skipped while planning: "
+        f"{plan['base_removed_refs_skipped']} base-file, "
+        f"{plan['transient_removed_refs_skipped']} input-only")
+    log(f".result file changes squashed into previous in-range occurrences: "
+        f"{plan.get('result_only_files_squashed', 0)}")
+    log(f".result-only commits fully elided by that squash: "
+        f"{plan.get('result_only_commits_elided', 0)}")
+    log(f".result files kept as [result-only] because their previous "
+        f"occurrence is in BASE_BRANCH: "
+        f"{plan.get('result_only_base_files_kept', 0)}")
+    log(f"[result-only] commits kept separate: "
+        f"{plan.get('result_only_base_commits_kept', 0)}")
+
+    log("")
+    log("Group totals:")
+    log("  Group              Emitted  Skipped")
     for g in ('g1', 'g2', 'g3', 'g4', 'g5',
               'g6', 'g7', 'g8', 'g9', 'g10'):
-        lines.append(
-            f"| {g} | {stats[f'{g}_emitted']} | {stats[f'{g}_skipped']} |")
-    lines.append(
-        f"| removed-base-files | {stats['removed_base_emitted']} | "
-        f"{stats['removed_base_skipped']} |")
-    lines.append(
-        f"| snap-reconcile | {stats.get('snap_emitted', 0)} | "
-        f"{stats.get('snap_skipped', 0)} |")
-    lines.append("")
-    lines.append(f"- g7 mysql-test-only commits promoted to g5 with "
-                 f"`[MTR-only]` prefix: "
-                 f"{stats.get('g5_promoted_from_upstream', 0)}")
-    lines.append(f"- g7 mysql-test-only commits kept for g5 cherry-pick "
-                 f"conflicts: {stats.get('g5_upstream_conflict_kept', 0)}")
-    lines.append(f"- g7 mysql-test-only commits kept out of g5 for "
-                 f"later patch overlaps: "
-                 f"{stats.get('g5_upstream_overlap_kept', 0)}")
-    lines.append(f"- g10 mysql-test-only commits promoted to g5 with "
-                 f"`[MTR-only]` prefix: "
-                 f"{stats.get('g5_promoted_from_remaining', 0)}")
-    lines.append(f"- g10 mysql-test-only commits kept for g5 cherry-pick "
-                 f"conflicts: {stats.get('g5_remaining_conflict_kept', 0)}")
-    lines.append(f"- g10 mysql-test-only commits kept out of g5 for "
-                 f"later patch overlaps: "
-                 f"{stats.get('g5_remaining_overlap_kept', 0)}")
-    lines.append(f"- g9 conflict fallbacks emitted in Remaining: "
-                 f"{stats.get('g9_conflict_fallback', 0)}")
-    lines.append(f"- g9 later patch-overlap fallbacks emitted in Remaining: "
-                 f"{stats.get('g9_overlap_fallback', 0)}")
-    lines.append(f"- Final SNAP reconciliation paths applied: "
-                 f"{stats.get('snap_paths', 0)}")
-    lines.append(f"- g10 commits promoted to g7 with `[upstream]` prefix: "
-                 f"{stats.get('g7_promoted_from_remaining', 0)}")
-    lines.append(f"- g10 commits kept for g7 cherry-pick conflicts: "
-                 f"{stats.get('g7_remaining_conflict_kept', 0)}")
-    lines.append(f"- g10 commits kept to avoid later patch overlap: "
-                 f"{stats.get('g7_remaining_overlap_kept', 0)}")
-    lines.append(f"- g10 `[MTR-only]` commits kept out of g7: "
-                 f"{stats.get('g7_remaining_mtr_kept', 0)}")
-    lines.append(f"- g10 `[result-only]` commits kept out of g7: "
-                 f"{stats.get('g7_remaining_result_kept', 0)}")
-    lines.append(f"- g10 MyRocks/kernel-subject commits kept out of g7: "
-                 f"{stats.get('g7_remaining_myr_kept', 0)}")
-    lines.append("")
+        log(f"  {g:<18} {stats[f'{g}_emitted']:>7}  "
+            f"{stats[f'{g}_skipped']:>7}")
+    log(f"  {'removed-base-files':<18} "
+        f"{stats['removed_base_emitted']:>7}  "
+        f"{stats['removed_base_skipped']:>7}")
+    log(f"  {'snap-reconcile':<18} {stats.get('snap_emitted', 0):>7}  "
+        f"{stats.get('snap_skipped', 0):>7}")
 
-    lines.append("### g1 subcategories")
-    lines.append("")
+    log("")
+    log("Promotion and fallback stats:")
+    log(f"g10 mysql-test-only commits promoted to g5 without adding "
+        f"[MTR-only]: {stats.get('g5_promoted_from_remaining', 0)}")
+    log(f"g10 mysql-test-only commits kept for g5 cherry-pick conflicts: "
+        f"{stats.get('g5_remaining_conflict_kept', 0)}")
+    log(f"g10 mysql-test-only commits kept out of g5 for later patch "
+        f"overlaps: {stats.get('g5_remaining_overlap_kept', 0)}")
+    log(f"g9 conflict fallbacks emitted in Remaining: "
+        f"{stats.get('g9_conflict_fallback', 0)}")
+    log(f"g9 later patch-overlap fallbacks emitted in Remaining: "
+        f"{stats.get('g9_overlap_fallback', 0)}")
+    log(f"Final SNAP reconciliation paths applied: "
+        f"{stats.get('snap_paths', 0)}")
+    log(f"g10 commits promoted to g7 without adding [upstream]: "
+        f"{stats.get('g7_promoted_from_remaining', 0)}")
+    log(f"g10 commits kept for g7 cherry-pick conflicts: "
+        f"{stats.get('g7_remaining_conflict_kept', 0)}")
+    log(f"g10 commits kept to avoid later patch overlap: "
+        f"{stats.get('g7_remaining_overlap_kept', 0)}")
+    log(f"g10 [MTR-only] commits kept out of g7: "
+        f"{stats.get('g7_remaining_mtr_kept', 0)}")
+    log(f"g10 [result-only] commits kept out of g7: "
+        f"{stats.get('g7_remaining_result_kept', 0)}")
+    log(f"g10 MyRocks/kernel-subject commits kept out of g7: "
+        f"{stats.get('g7_remaining_myr_kept', 0)}")
+
+    log("")
+    log("g1 subcategories:")
     if plan['g1_files']:
         for cat in sorted(plan['g1_files'].keys(),
                           key=lambda c: plan['g1_first_pos'][c]):
-            lines.append(
-                f"- **{cat}**: {len(plan['g1_files'][cat])} file(s), "
+            log(f"  {cat}: {len(plan['g1_files'][cat])} file(s), "
                 f"first source commit position #{plan['g1_first_pos'][cat]}")
     else:
-        lines.append("(none)")
-    lines.append("")
+        log("  (none)")
 
-    lines.append("### g5 MTR tests")
-    lines.append("")
-    if plan['g5_bucket']:
-        for item in plan['g5_bucket']:
-            lines.append(
-                f"- `{item['source_hash'][:12]}` "
-                f"{len(item['files'])} file(s): {item['subject']}")
-    else:
-        lines.append("(none)")
-    lines.append("")
-
-    lines.append("### Removed files")
-    lines.append("")
-    lines.append("Files present in BASE_BRANCH and absent from INPUT_BRANCH are "
-                 "removed in one dedicated output commit. Files introduced "
-                 "and deleted within INPUT_BRANCH are skipped from all output "
-                 "commits.")
-    lines.append("")
-    lines.append(f"- Base-branch removed files: "
-                 f"{len(plan['base_removed_files'])}")
-    lines.append(f"- Input-only removed files skipped: "
-                 f"{len(plan['transient_removed_files'])}")
-    lines.append(f"- Base-file references skipped: "
-                 f"{plan['base_removed_refs_skipped']}")
-    lines.append(f"- Input-only references skipped: "
-                 f"{plan['transient_removed_refs_skipped']}")
-    lines.append("")
-
-    lines.append(f"## Large commits on INPUT_BRANCH (ins+del > "
-                 f"{LARGE_COMMIT_THRESHOLD}, sorted by size desc)")
-    lines.append("")
-    if in_large:
-        for h, i, d, s in sorted(in_large, key=lambda x: -(x[1] + x[2])):
-            lines.append(f"- `{h[:12]}`  +{i}/-{d}  (total {i + d})  {s}")
-    else:
-        lines.append("(none)")
-    lines.append("")
-
-    lines.append(f"## Large commits on OUTPUT_BRANCH (ins+del > "
-                 f"{LARGE_COMMIT_THRESHOLD}, sorted by size desc)")
-    lines.append("")
-    if out_large:
-        for h, i, d, s in sorted(out_large, key=lambda x: -(x[1] + x[2])):
-            lines.append(f"- `{h[:12]}`  +{i}/-{d}  (total {i + d})  {s}")
-    else:
-        lines.append("(none)")
-    lines.append("")
-
-    lines.append("## Null diff verification")
-    lines.append("")
-    lines.append(f"- Null diff vs INPUT_BRANCH: **{'YES' if null_diff else 'NO'}**")
+    log("")
+    log(f"Null diff vs INPUT_BRANCH: {'YES' if null_diff else 'NO'}")
     if not null_diff:
-        lines.append("")
-        lines.append("### Remaining diff stat")
-        lines.append("```")
-        lines.append(diff_stat if diff_stat else "(no stat available)")
-        lines.append("```")
-        lines.append("")
-        lines.append("### Remaining diff (truncated to 20000 chars)")
-        lines.append("```diff")
-        lines.append(diff_content[:20000])
-        lines.append("```")
-    lines.append("")
+        log("Remaining diff stat:")
+        for line in (diff_stat or "(no stat available)").splitlines():
+            log(f"  {line}")
+        log("Remaining diff (truncated to 20000 chars):")
+        for line in diff_content[:20000].splitlines():
+            log(line)
 
     if stats.get('snap_paths', 0):
-        lines.append("## Final SNAP reconciliation")
-        lines.append("")
-        lines.append("The grouped replay left a residual diff, so a final "
-                     "`SNAP: reconcile remaining diff to INPUT_BRANCH` commit "
-                     "was added before null-diff verification.")
-        lines.append("")
-        lines.append(f"- Paths reconciled: {stats.get('snap_paths', 0)}")
-        lines.append("")
-        lines.append("### SNAP diff stat")
-        lines.append("```")
-        lines.append(stats.get('snap_diff_stat') or "(no stat available)")
-        lines.append("```")
-        lines.append("")
-        lines.append("### SNAP paths")
-        lines.append("```")
-        lines.extend(stats.get('snap_diff_paths') or [])
-        lines.append("```")
-        lines.append("")
-
-    with open(report_path, 'w') as fh:
-        fh.write('\n'.join(lines))
+        log("")
+        log("Final SNAP reconciliation:")
+        log("The grouped replay left a residual diff, so a final "
+            "`SNAP: reconcile remaining diff to INPUT_BRANCH` commit was "
+            "added before null-diff verification.")
+        log(f"Paths reconciled: {stats.get('snap_paths', 0)}")
+        log("SNAP diff stat:")
+        for line in (stats.get('snap_diff_stat') or
+                     "(no stat available)").splitlines():
+            log(f"  {line}")
+        log("SNAP paths:")
+        for path in stats.get('snap_diff_paths') or []:
+            log(f"  {styled_path(path)}")
 
     return null_diff
 
@@ -2088,17 +2411,22 @@ def main():
                         help='New branch name to create.')
     parser.add_argument('--base-branch',   required=True,
                         help='Base branch of INPUT_BRANCH and OUTPUT_BRANCH.')
-    parser.add_argument('--report',        default='ps-reorder-report.md',
-                        help='Path to the Markdown report (default: %(default)s).')
+    parser.add_argument('--report',        help=argparse.SUPPRESS)
     parser.add_argument('--force-output',  action='store_true',
                         help='Delete OUTPUT_BRANCH if it already exists.')
     parser.add_argument('--allow-dirty',   action='store_true',
                         help='Skip the clean-worktree check.')
+    parser.add_argument(
+        '--color',
+        choices=('auto', 'always', 'never'),
+        default='auto',
+        help='Colorize stderr output (default: auto; respects NO_COLOR / FORCE_COLOR).')
     args = parser.parse_args()
+    configure_style(args.color)
 
     # Inside a git repo?
     if run_git(['rev-parse', '--show-toplevel'], check=False).returncode != 0:
-        print("error: not inside a git repository", file=sys.stderr)
+        log_error("not inside a git repository")
         return 1
 
     if not args.allow_dirty:
@@ -2122,32 +2450,29 @@ def main():
             f"Output branch {args.output_branch!r} already exists; pass "
             f"--force-output to overwrite.")
 
-    print(f"Input:  {args.input_branch}  ({input_hash[:12]})",  file=sys.stderr)
-    print(f"Base:   {args.base_branch}   ({base_hash[:12]})",   file=sys.stderr)
-    print(f"Output: {args.output_branch}",                      file=sys.stderr)
+    log(f"{STYLE.bold('Input:')}  {args.input_branch}  ({short_sha(input_hash)})")
+    log(f"{STYLE.bold('Base:')}   {args.base_branch}   ({short_sha(base_hash)})")
+    log(f"{STYLE.bold('Output:')} {args.output_branch}")
 
     commits = get_commit_list(base_hash, input_hash)
-    print(f"Analyzing removed paths across {len(commits)} source commits...",
-          file=sys.stderr)
+    log(f"{STYLE.bold('Analyzing removed paths')} across "
+        f"{len(commits)} source commits...")
     removed_paths = analyze_removed_paths(commits, base_hash, input_hash)
-    print(f"  base-branch removed files: "
-          f"{len(removed_paths['base_removed'])}", file=sys.stderr)
-    print(f"  input-only removed files to skip: "
-          f"{len(removed_paths['transient_removed'])}", file=sys.stderr)
+    log(f"  base-branch removed files: {len(removed_paths['base_removed'])}")
+    log(f"  input-only removed files to skip: "
+        f"{len(removed_paths['transient_removed'])}")
     log_removed_paths(removed_paths)
-    print(f"Planning {len(commits)} source commits...", file=sys.stderr)
+    log(f"{STYLE.bold('Planning')} {len(commits)} source commits...")
     plan = plan_commits(commits, base_hash, removed_paths)
 
-    print("Building output branch...", file=sys.stderr)
+    log(f"{STYLE.bold('Building')} output branch...")
     stats = build_output_branch(args, input_hash, base_hash, plan)
+    log_removed_commits_by_reason(plan)
 
-    log_deletion_heavy_commits(args, base_hash)
+    null_ok = log_terminal_summary(args, input_hash, base_hash, plan, stats)
 
-    print(f"Writing report to {args.report}...", file=sys.stderr)
-    null_ok = write_report(args, input_hash, base_hash, plan, stats, args.report)
-
-    print(f"Done. Null diff to INPUT_BRANCH: "
-          f"{'OK' if null_ok else 'MISMATCH (see report)'}", file=sys.stderr)
+    status = STYLE.green('OK') if null_ok else STYLE.red('MISMATCH')
+    log(f"{STYLE.bold('Done.')} Null diff to INPUT_BRANCH: {status}")
     return 0 if null_ok else 2
 
 
@@ -2155,5 +2480,5 @@ if __name__ == '__main__':
     try:
         sys.exit(main())
     except RuntimeError as e:
-        print(f"error: {e}", file=sys.stderr)
+        log_error(str(e))
         sys.exit(1)

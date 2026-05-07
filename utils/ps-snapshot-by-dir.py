@@ -10,12 +10,13 @@ whole diff as one snapshot commit. With --split-mtr-only, keep non-MTR changes
 in one snapshot commit and emit mysql-test/ changes as [MTR-only] commits.
 Final tree == SOURCE_BRANCH tree (i.e. null diff to SOURCE_BRANCH).
 
-Changed mysql-test/ files are classified by whether they already exist in
-BASE_BRANCH. mysql-test/suite/ paths are emitted as [MTR-only] commits grouped
-by suite subdirectory and classification; other mysql-test/ paths are grouped
-by classification. Every mysql-test/ commit is marked [MTR-only]. The
-mysql-test/ group is processed last, with all upstream commits before all
-Percona commits.
+Changed mysql-test/ files are classified by whether they already exist in the
+latest mysql-M.m.p upstream ref auto-detected from SOURCE_BRANCH ancestry, e.g.
+mysql-5.6.22, mysql-5.7.9, or mysql-8.0.13. mysql-test/suite/ paths are emitted
+as [MTR-only] commits grouped by suite subdirectory and classification; other
+mysql-test/ paths are grouped by classification. Every mysql-test/ commit is
+marked [MTR-only]. The mysql-test/ group is processed last, with all upstream
+commits before all Percona commits.
 
 Usage:
   ps-snapshot-by-dir.py --source-branch <branch|hash> \
@@ -28,6 +29,7 @@ Usage:
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -45,6 +47,7 @@ MYSQL_TEST_SUITE_PREFIX = MYSQL_TEST_PREFIX + 'suite/'
 MTR_ONLY_MARKER = '[MTR-only]'
 UPSTREAM_CLASS = 'upstream'
 NON_UPSTREAM_CLASS = 'non_upstream'
+UPSTREAM_REF_RE = re.compile(r'^mysql-(\d+)\.(\d+)\.(\d+)$')
 CLASS_DISPLAY = {
     UPSTREAM_CLASS: 'upstream',
     NON_UPSTREAM_CLASS: 'Percona',
@@ -102,6 +105,55 @@ def branch_exists(branch):
 def get_current_branch():
     r = run_git(['symbolic-ref', '--short', '-q', 'HEAD'], check=False)
     return r.stdout.strip() or None
+
+
+def short_ref_name(ref):
+    prefixes = ('refs/heads/', 'refs/remotes/', 'refs/tags/')
+    for prefix in prefixes:
+        if ref.startswith(prefix):
+            return ref[len(prefix):]
+    return ref
+
+
+def upstream_ref_priority(ref):
+    if ref.startswith('refs/heads/'):
+        return 0
+    if ref.startswith('refs/remotes/'):
+        return 1
+    if ref.startswith('refs/tags/'):
+        return 2
+    return 3
+
+
+def parse_upstream_ref(ref):
+    name = short_ref_name(ref).rsplit('/', 1)[-1]
+    m = UPSTREAM_REF_RE.match(name)
+    if not m:
+        return None
+    return tuple(int(part) for part in m.groups())
+
+
+def list_upstream_refs():
+    r = run_git(['for-each-ref', '--format=%(refname)',
+                 'refs/heads', 'refs/remotes', 'refs/tags'])
+    refs = []
+    for ref in r.stdout.splitlines():
+        version = parse_upstream_ref(ref)
+        if version is not None:
+            refs.append((version, upstream_ref_priority(ref), ref))
+    refs.sort(key=lambda item: (
+        tuple(-part for part in item[0]), item[1], short_ref_name(item[2])))
+    return refs
+
+
+def detect_latest_upstream_ref(source_hash):
+    for _version, _priority, ref in list_upstream_refs():
+        ref_commit = git_rev_parse(f'{ref}^{{commit}}')
+        if run_git(['merge-base', '--is-ancestor', ref_commit, source_hash],
+                   check=False).returncode == 0:
+            return short_ref_name(ref), ref_commit
+    raise RuntimeError(
+        "No mysql-M.m.p upstream ref is an ancestor of SOURCE_BRANCH.")
 
 
 def ensure_clean_worktree():
@@ -259,16 +311,16 @@ def split_large_subdir_groups(groups, threshold=LARGE_SUBDIR_THRESHOLD):
     return ordered
 
 
-def classify_mysql_test_paths(paths, base_tree_paths):
-    """Split changed mysql-test paths by whether they existed at BASE."""
-    base_tree_path_set = set(base_tree_paths)
+def classify_mysql_test_paths(paths, upstream_tree_paths):
+    """Split changed mysql-test paths by whether they existed upstream."""
+    upstream_tree_path_set = set(upstream_tree_paths)
     changed_paths = sorted(p for p in paths if is_mysql_test_path(p))
     classification = OrderedDict()
     classification[UPSTREAM_CLASS] = [
-        p for p in changed_paths if p in base_tree_path_set
+        p for p in changed_paths if p in upstream_tree_path_set
     ]
     classification[NON_UPSTREAM_CLASS] = [
-        p for p in changed_paths if p not in base_tree_path_set
+        p for p in changed_paths if p not in upstream_tree_path_set
     ]
     return classification
 
@@ -378,16 +430,17 @@ def make_output_branch(args, base_hash):
 # ---------------------------------------------------------------------------
 
 
-def do_diff_mode(args, source_hash, base_hash, report_path):
+def do_diff_mode(args, source_hash, base_hash, upstream_hash, report_path):
     present, absent = list_changed_paths_with_status(base_hash, source_hash)
     all_paths = present + absent
     top_level_groups = group_by_top_level(all_paths)
     present_set = set(present)
     mysql_test_classification = None
     if MYSQL_TEST_KEY in top_level_groups:
-        mysql_test_base_paths = list_tree_paths(base_hash, MYSQL_TEST_KEY)
+        mysql_test_upstream_paths = list_tree_paths(upstream_hash,
+                                                   MYSQL_TEST_KEY)
         mysql_test_classification = classify_mysql_test_paths(
-            top_level_groups[MYSQL_TEST_KEY], mysql_test_base_paths)
+            top_level_groups[MYSQL_TEST_KEY], mysql_test_upstream_paths)
 
     make_output_branch(args, base_hash)
 
@@ -436,7 +489,8 @@ def do_single_commit_mode(args, source_hash, base_hash, report_path):
     return stats, groups, None
 
 
-def do_split_mtr_only_mode(args, source_hash, base_hash, report_path):
+def do_split_mtr_only_mode(args, source_hash, base_hash, upstream_hash,
+                           report_path):
     present, absent = list_changed_paths_with_status(base_hash, source_hash)
     all_paths = sorted(present + absent)
     present_set = set(present)
@@ -444,9 +498,10 @@ def do_split_mtr_only_mode(args, source_hash, base_hash, report_path):
     mysql_test_paths = [p for p in all_paths if is_mysql_test_path(p)]
     mysql_test_classification = None
     if mysql_test_paths:
-        mysql_test_base_paths = list_tree_paths(base_hash, MYSQL_TEST_KEY)
+        mysql_test_upstream_paths = list_tree_paths(upstream_hash,
+                                                   MYSQL_TEST_KEY)
         mysql_test_classification = classify_mysql_test_paths(
-            mysql_test_paths, mysql_test_base_paths)
+            mysql_test_paths, mysql_test_upstream_paths)
 
     make_output_branch(args, base_hash)
 
@@ -483,8 +538,8 @@ def display_group_key(key):
     return key
 
 
-def write_report(args, source_hash, base_hash, mode, stats, groups,
-                 mysql_test_classification, report_path):
+def write_report(args, source_hash, base_hash, upstream_ref, upstream_hash,
+                 mode, stats, groups, mysql_test_classification, report_path):
     log = run_git(['log', '--oneline', '--no-decorate', '--reverse',
                    args.output_branch]).stdout
 
@@ -504,6 +559,7 @@ def write_report(args, source_hash, base_hash, mode, stats, groups,
     lines.append(f"- SOURCE_BRANCH: `{args.source_branch}` ({source_hash})")
     if base_hash:
         lines.append(f"- BASE_BRANCH:   `{args.base_branch}`  ({base_hash})")
+    lines.append(f"- UPSTREAM_REF:  `{upstream_ref}` ({upstream_hash})")
     lines.append(f"- OUTPUT_BRANCH: `{args.output_branch}`")
     lines.append(f"- Commit groups: {len(groups)}")
     lines.append(f"- Total paths:   {sum(len(v) for v in groups.values())}")
@@ -522,7 +578,7 @@ def write_report(args, source_hash, base_hash, mode, stats, groups,
     if mysql_test_classification is not None:
         lines.append("## mysql-test upstream classification")
         lines.append("")
-        lines.append("Files present in BASE_BRANCH are treated as "
+        lines.append(f"Files present in `{upstream_ref}` are treated as "
                      "upstream-introduced.")
         lines.append("")
         report_mysql_test_classification(
@@ -627,6 +683,7 @@ def main():
 
     source_hash = git_rev_parse(args.source_branch)
     base_hash = git_rev_parse(args.base_branch)
+    upstream_ref, upstream_hash = detect_latest_upstream_ref(source_hash)
     if base_hash == source_hash:
         raise RuntimeError("BASE_BRANCH and SOURCE_BRANCH point to the "
                            "same commit -- nothing to apply.")
@@ -646,21 +703,23 @@ def main():
 
     print(f"Source: {args.source_branch} ({source_hash[:12]})", file=sys.stderr)
     print(f"Base:   {args.base_branch}  ({base_hash[:12]})", file=sys.stderr)
+    print(f"Upstream: {upstream_ref} ({upstream_hash[:12]})", file=sys.stderr)
     print(f"Output: {args.output_branch}", file=sys.stderr)
     print(f"Mode:   {mode}", file=sys.stderr)
 
     if args.split_mtr_only:
         stats, groups, mysql_test_classification = do_split_mtr_only_mode(
-            args, source_hash, base_hash, args.report)
+            args, source_hash, base_hash, upstream_hash, args.report)
     elif args.single_commit:
         stats, groups, mysql_test_classification = do_single_commit_mode(
             args, source_hash, base_hash, args.report)
     else:
         stats, groups, mysql_test_classification = do_diff_mode(
-            args, source_hash, base_hash, args.report)
+            args, source_hash, base_hash, upstream_hash, args.report)
 
     print(f"Writing report to {args.report}...", file=sys.stderr)
-    null_ok = write_report(args, source_hash, base_hash, mode, stats, groups,
+    null_ok = write_report(args, source_hash, base_hash, upstream_ref,
+                           upstream_hash, mode, stats, groups,
                            mysql_test_classification, args.report)
 
     print(f"Done. Output tree matches SOURCE: "

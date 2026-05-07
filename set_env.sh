@@ -7,4 +7,9 @@ SH_PATH=$1
 
 export PATH="$SH_PATH:$SH_PATH/sysbench.lua:$PATH"
 export MTR_TERM="gnome-terminal --title %title% --wait --"
-source /home/przemek/.ssh/gemini.inc.sh
+if [ -f /home/przemek/.ssh/llm.inc.sh ]; then
+  source /home/przemek/.ssh/llm.inc.sh
+fi
+if [ -f /home/przemek/.ssh/mcp.inc.sh ]; then
+  source /home/przemek/.ssh/mcp.inc.sh
+fi

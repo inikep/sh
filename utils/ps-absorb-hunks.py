@@ -2,8 +2,10 @@
 """Absorb hunks from one commit into prior first-parent commits.
 
 For each textual hunk in COMMIT, pick a target commit on the input branch's
-first-parent chain (strictly between the optional --base-branch tip and
-COMMIT) and fold the hunk into it:
+first-parent chain (strictly between the --base-branch tip and COMMIT) and
+fold the hunk into it. The base is auto-detected as the highest-versioned
+`mysql-M.m.p` ref (e.g. `mysql-5.6.22`, `mysql-5.7.9`, `mysql-8.0.13`) on
+the chain when --base-branch is omitted; pass --base-branch to override.
 
   1. Blame the hunk's old-side context and deleted lines at COMMIT^ and
      pick the newest blamed commit that lies in the eligible range.
@@ -709,6 +711,74 @@ def first_parent_chain(repo: str | Path, tip: str) -> list[str]:
     ]
 
 
+MYSQL_UPSTREAM_REF_RE = re.compile(r"^mysql-(\d+)\.(\d+)\.(\d+)$")
+
+
+def detect_latest_mysql_base_branch(
+    repo: str | Path, input_tip: str
+) -> tuple[str, str] | None:
+    """Find the highest-version `mysql-M.m.p` ref in the input branch's ancestry.
+    Returns (ref_short, peeled_sha) or None.
+
+    Looks at both `refs/tags/mysql-*` and `refs/heads/mysql-*`. Picks the latest by
+    `(major, minor, patch)` tuple whose tip commit is an ancestor of `input_tip`
+    (general ancestry, not strict first-parent). Branch rewrites can move the
+    upstream-base tag off the first-parent chain even though it still merges
+    into the history; ancestry catches that case.
+    """
+    out = git_text(
+        repo,
+        "for-each-ref",
+        "--format=%(refname:short)\t%(objectname)\t%(*objectname)",
+        "refs/tags/mysql-*",
+        "refs/heads/mysql-*",
+    )
+    candidates: list[tuple[tuple[int, int, int], str, str]] = []
+    for line in out.splitlines():
+        if not line:
+            continue
+        parts = line.split("\t")
+        ref_short = parts[0]
+        m = MYSQL_UPSTREAM_REF_RE.match(ref_short)
+        if not m:
+            continue
+        peeled = parts[2] if len(parts) > 2 and parts[2] else (parts[1] if len(parts) > 1 else "")
+        if not peeled:
+            continue
+        version = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        candidates.append((version, ref_short, peeled))
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    for _version, ref_short, sha in candidates:
+        rc = git(
+            repo, "merge-base", "--is-ancestor", sha, input_tip, check=False
+        ).returncode
+        if rc == 0:
+            return ref_short, sha
+    return None
+
+
+def first_parent_index_after_base(
+    repo: str | Path, chain: list[str], base_sha: str
+) -> int | None:
+    """Translate `base_sha` (an ancestor of the input branch) into the smallest
+    chain index `i` such that `chain[i]` is `base_sha` itself or a descendant of
+    it. Subsequent chain entries are eligible absorption targets; earlier entries
+    forked off before `base_sha` joined and are not.
+    """
+    chain_index = {sha: idx for idx, sha in enumerate(chain)}
+    if base_sha in chain_index:
+        return chain_index[base_sha] + 1
+    # base_sha is reachable via a merge somewhere on the chain. Find the earliest
+    # chain entry that descends from base_sha.
+    for i, sha in enumerate(chain):
+        rc = git(
+            repo, "merge-base", "--is-ancestor", base_sha, sha, check=False
+        ).returncode
+        if rc == 0:
+            return i + 1
+    return None
+
+
 def cherry_pick_tree(repo: str | Path, base: str | None, ours: str | None, theirs: str) -> str:
     if base is None or ours is None:
         return tree_of(repo, theirs)
@@ -1181,10 +1251,22 @@ def rewrite_branch(args: argparse.Namespace) -> int:
     min_target_index = 0
     if args.base_branch:
         base_tip = rev_parse(repo, args.base_branch)
-        base_index = chain_index.get(base_tip)
-        if base_index is None:
-            raise AbsorbError("--base-branch tip is not on the input branch first-parent chain")
-        min_target_index = base_index + 1
+        idx = first_parent_index_after_base(repo, chain, base_tip)
+        if idx is None:
+            raise AbsorbError("--base-branch tip is not in the input branch ancestry")
+        min_target_index = idx
+    else:
+        detected = detect_latest_mysql_base_branch(repo, original_tip)
+        if detected is not None:
+            ref_short, sha = detected
+            idx = first_parent_index_after_base(repo, chain, sha)
+            if idx is not None:
+                min_target_index = idx
+                log(
+                    f"Auto-detected base: {STYLE.bold(ref_short)} ({short_sha(sha)}); "
+                    f"hunks will not be absorbed at or before this tip. "
+                    f"Override with --base-branch."
+                )
 
     dispositions = build_hunk_dispositions(
         repo, source, source_parent, chain, args.context, min_target_index
@@ -1281,7 +1363,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("commit", help="Non-merge commit whose hunks should be absorbed.")
     parser.add_argument("--repo", default=DEFAULT_REPO, help=f"Git repository (default: {DEFAULT_REPO}).")
     parser.add_argument("--input-branch", default=None, help="Input branch to rewrite, updated in place by default.")
-    parser.add_argument("--base-branch", default=None, help="Do not absorb hunks into commits at or before this branch tip.")
+    parser.add_argument(
+        "--base-branch",
+        default=None,
+        help=(
+            "Do not absorb hunks into commits at or before this branch tip. "
+            "If omitted, the script auto-detects the latest mysql-M.m.p ref "
+            "(tags or heads) that lies on the input branch first-parent chain."
+        ),
+    )
     parser.add_argument("--output-branch", default=None, help="Create/update this branch with the rewritten history.")
     parser.add_argument("--force", action="store_true", help="Replace an existing --output-branch.")
     parser.add_argument("--context", type=int, default=3, help="Unified diff context for hunk parsing.")

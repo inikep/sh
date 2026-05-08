@@ -15,26 +15,27 @@ Groups (separated by MARKER commits):
                         - MYSQL_VERSION + VERSION + storage/innobase/include/univ.i
                         - mysql-test/suite/tokudb* and MTR tests whose
                           filename contains "toku"
-  g2  build-ps        all commits that modify only build-ps/
-  g3  CI configs      only .travis.yml, .circleci/, azure-pipelines.yml,
-                        .cirrus.yml, .clang-tidy
-  g4  RocksDB         only storage/rocksdb or mysql-test/suite/rocksdb*
-  g5  MTR tests       whole commits whose subject starts with "[MTR-only]",
-                      plus g10 mysql-test-only commits that move cleanly
+  g2  build-ps        build-ps/ portions split from source commits
+  g3  CI configs      .travis.yml, .circleci/, azure-pipelines.yml,
+                        .cirrus.yml, and .clang-tidy portions
+  g4  RocksDB         storage/rocksdb and mysql-test/suite/rocksdb*
+                        portions; unsafe source-g10 moves stay in Remaining
+  g5  MTR tests       [MTR-only] commits, plus g10 mysql-test-only commits
+                        that cherry-pick cleanly and do not overlap earlier
+                        protected Remaining changes or later groups
   g6  Build/Compilation
-                      whole commits whose subject starts with "[compilation]"
+                      commits whose subject starts with "[compilation]"
   g7  Upstream bug fixes
-                      whole commits whose subject starts with "[upstream]",
-                      plus g10 Remaining commits that move cleanly
+                      [upstream] commits, plus eligible g10 Remaining commits
+                        that cherry-pick cleanly without protected overlaps
   g8  Initial Percona Server tree
-                      whole commits whose subject starts with "[init]"
+                      commits whose subject starts with "[init]"
   g9  MyRocks changes in kernel
-                      whole commits whose subject contains "MYR" or "rocks"
-                      (case-insensitive), unless moving would cause a git
-                      conflict or a later g10 commit would overwrite the same
-                      patch; if such a commit also has g4 RocksDB paths, only
-                      the non-g4 portion is queued here
-  g10 Remaining       everything else
+                      commits whose subject contains "MYR" or "rocks"
+                        (case-insensitive), unless moving would conflict or
+                        overlap protected Remaining changes; mixed RocksDB
+                        commits contribute only their non-g4 portion here
+  g10 Remaining       everything else, plus commits kept to preserve ordering
 
 Rules implemented (letters match the task):
   A) OUTPUT_BRANCH has null diff to INPUT_BRANCH. If the grouped replay still
@@ -73,7 +74,9 @@ Rules implemented (letters match the task):
      cherry-pick after existing g5 commits are emitted. Commits that apply
      without conflict are emitted in g5; g10 commits moved to g5 keep their
      original subject, while g10 commits that stay in Remaining get an
-     "[MTR-only]" subject prefix.
+     "[MTR-only]" subject prefix. Later g10 commits that overlap the same files
+     do not block promotion because they still replay after the promoted commit,
+     matching the source ordering.
   M) Source commits whose subject starts with "[upstream]" are moved to the g7
      upstream bug fixes group after any g1 paths are extracted for squash.
   N) Remaining-group commits are probed with git cherry-pick after existing g7
@@ -106,6 +109,14 @@ Rules implemented (letters match the task):
      "[result-only]" subject prefix.
   S) The report lists source commits that were removed or elided, with the
      source hash, subject, and reason.
+  T) Source commits whose subject contains "===" are locked from any
+     reordering: they skip the g5/g6/g7/g8/g9 subject routings (and the
+     MyRocks/kernel "MYR"/"rocks" match), are not split into g2/g3/g4
+     dedicated commits, and are also skipped by the g10 to g5 and g10 to g7
+     cherry-pick promotions. The whole commit lands in g10 (or in its
+     preserved source bucket when rerunning a grouped branch) as a single
+     item. Only g1 squash extraction still applies, since those paths must
+     be folded into the squash for null diff.
 
 Usage:
   ps-reorder-py --input-branch <branch|hash> \
@@ -765,6 +776,13 @@ def is_myrocks_kernel_group_subject(subject):
     return 'myr' in sl or 'rocks' in sl
 
 
+def is_locked_from_promotion(subject):
+    """Subjects containing '===' opt out of subject-based moves and g10
+    promotions; the commit stays in whichever bucket it would land in by
+    file-content partitioning alone (Rule T)."""
+    return '===' in subject
+
+
 def is_mysql_test_only_commit(files):
     return touches_only_mysql_test(files)
 
@@ -1130,9 +1148,11 @@ def plan_commits(commits, base_hash, removed_paths):
             if not files:
                 continue
 
+        locked_subject = is_locked_from_promotion(info['subject'])
+
         mtr_like_commit = (is_mtr_only_group_subject(info['subject']) or
                            is_mysql_test_only_commit(files))
-        if mtr_like_commit:
+        if mtr_like_commit and not locked_subject:
             g4_files, files = split_out_group_files(files, 'g4')
             if g4_files:
                 append_plan_item(plan['g4_bucket'], {
@@ -1146,7 +1166,7 @@ def plan_commits(commits, base_hash, removed_paths):
             if not files:
                 continue
 
-        if is_compilation_group_subject(info['subject']):
+        if is_compilation_group_subject(info['subject']) and not locked_subject:
             if files:
                 append_plan_item(plan['g6_bucket'], {
                     'info': info,
@@ -1157,7 +1177,7 @@ def plan_commits(commits, base_hash, removed_paths):
                     'source_group': source_group,
                 }, result_file_last_item)
             continue
-        if is_mtr_only_group_subject(info['subject']):
+        if is_mtr_only_group_subject(info['subject']) and not locked_subject:
             if files:
                 target_bucket = plan['g10_bucket'] if source_group == 10 else plan['g5_bucket']
                 append_plan_item(target_bucket, {
@@ -1170,7 +1190,8 @@ def plan_commits(commits, base_hash, removed_paths):
                     'source_group': source_group,
                 }, result_file_last_item)
             continue
-        if is_mysql_test_only_commit(files) and not contains_g1_paths(files):
+        if (is_mysql_test_only_commit(files) and not contains_g1_paths(files)
+                and not locked_subject):
             append_plan_item(plan['g10_bucket'], {
                 'info': info,
                 'files': list(files),
@@ -1182,7 +1203,7 @@ def plan_commits(commits, base_hash, removed_paths):
                 'mtr_only_candidate': True,
             }, result_file_last_item)
             continue
-        if is_upstream_bug_fix_group_subject(info['subject']):
+        if is_upstream_bug_fix_group_subject(info['subject']) and not locked_subject:
             if files:
                 append_plan_item(plan['g7_bucket'], {
                     'info': info,
@@ -1193,7 +1214,7 @@ def plan_commits(commits, base_hash, removed_paths):
                     'source_group': source_group,
                 }, result_file_last_item)
             continue
-        if is_init_group_subject(info['subject']):
+        if is_init_group_subject(info['subject']) and not locked_subject:
             if files:
                 append_plan_item(plan['g8_bucket'], {
                     'info': info,
@@ -1219,7 +1240,9 @@ def plan_commits(commits, base_hash, removed_paths):
             else:
                 g10_part.append(f)
 
-        myrocks_kernel_subject = is_myrocks_kernel_group_subject(info['subject'])
+        myrocks_kernel_subject = (
+            is_myrocks_kernel_group_subject(info['subject'])
+            and not locked_subject)
 
         if source_group == 10:
             g2_part, unsafe = keep_clobbered_dedicated_paths_in_remaining(
@@ -1231,6 +1254,13 @@ def plan_commits(commits, base_hash, removed_paths):
             g4_part, unsafe = keep_clobbered_dedicated_paths_in_remaining(
                 g4_part, later_preserved_group_paths['g4'])
             g10_part.extend(unsafe)
+
+        if locked_subject and (g2_part or g3_part or g4_part):
+            # Rule T — locked commits stay intact, no g2/g3/g4 split.
+            g10_part.extend(g2_part)
+            g10_part.extend(g3_part)
+            g10_part.extend(g4_part)
+            g2_part, g3_part, g4_part = [], [], []
 
         has_g234 = bool(g2_part or g3_part or g4_part)
 
@@ -1554,6 +1584,45 @@ def unsafe_later_overlap_keep_ids(candidates, protected_items):
             full_state_overlap_keep_ids(candidates, protected_items))
 
 
+def item_source_pos(item):
+    return item.get('source_pos', -1)
+
+
+def item_full_state_overlaps_any(item, protected_items):
+    item_paths = set(item['files'])
+    return any(item_paths.intersection(protected['files'])
+               for protected in protected_items)
+
+
+def item_has_unsafe_overlap(item, protected_items):
+    return (patch_overlaps_any(item, protected_items) or
+            item_full_state_overlaps_any(item, protected_items))
+
+
+def promotion_overlap_keep_ids(candidates, external_protected_items,
+                               remaining_protected_items):
+    """Return candidate ids unsafe to promote before Remaining.
+
+    External protected items are emitted after g5 and before Remaining, so any
+    overlap would be reordered. Remaining protected items only block a candidate
+    when they originally came before it; later Remaining commits still replay
+    after a promoted candidate, preserving the original dependency order.
+    """
+    keep_ids = set()
+    remaining_protected = list(remaining_protected_items)
+    for item in sorted(candidates, key=item_source_pos):
+        pos = item_source_pos(item)
+        earlier_remaining = [
+            protected for protected in remaining_protected
+            if item_source_pos(protected) < pos
+        ]
+        if item_has_unsafe_overlap(
+                item, list(external_protected_items) + earlier_remaining):
+            keep_ids.add(id(item))
+            remaining_protected.append(item)
+    return keep_ids
+
+
 def touches_only_mysql_test(paths):
     return bool(paths) and all(p.startswith('mysql-test/') for p in paths)
 
@@ -1568,7 +1637,8 @@ def promote_mysql_test_only_to_mtr(source_bucket, g5_bucket, source_tag,
                   if (touches_only_mysql_test(item['files']) and
                       not contains_g1_paths(item['files']) and
                       not is_result_only_item(item) and
-                      not is_preserved_source_group_item(item))]
+                      not is_preserved_source_group_item(item) and
+                      not is_locked_from_promotion(item['subject']))]
     if not candidates:
         log(f"  [g5<-{source_tag}] no mysql-test-only commits to probe")
         return 0, 0, 0
@@ -1577,7 +1647,8 @@ def promote_mysql_test_only_to_mtr(source_bucket, g5_bucket, source_tag,
         "commit(s)")
     start = time.monotonic()
     candidate_ids = {id(item) for item in candidates}
-    protected_items = list(protected_items or ()) + [
+    external_protected_items = list(protected_items or ())
+    remaining_protected_items = [
         item for item in source_bucket if id(item) not in candidate_ids]
     clean_candidates = []
     conflict_ids = set()
@@ -1586,7 +1657,7 @@ def promote_mysql_test_only_to_mtr(source_bucket, g5_bucket, source_tag,
             clean_candidates.append(item)
         else:
             conflict_ids.add(id(item))
-            protected_items.append(item)
+            remaining_protected_items.append(item)
         if i % PROGRESS_EVERY == 0 or i == len(candidates):
             elapsed = time.monotonic() - start
             rate = i / elapsed if elapsed > 0 else 0.0
@@ -1594,14 +1665,15 @@ def promote_mysql_test_only_to_mtr(source_bucket, g5_bucket, source_tag,
                 f"({len(clean_candidates)} clean, {len(conflict_ids)} "
                 f"conflict)  {rate:5.1f} commits/s")
 
-    overlap_ids = unsafe_later_overlap_keep_ids(clean_candidates,
-                                                protected_items)
+    overlap_ids = promotion_overlap_keep_ids(
+        clean_candidates, external_protected_items, remaining_protected_items)
 
     for item in source_bucket:
         if (not touches_only_mysql_test(item['files']) or
                 contains_g1_paths(item['files']) or
                 is_result_only_item(item) or
-                is_preserved_source_group_item(item)):
+                is_preserved_source_group_item(item) or
+                is_locked_from_promotion(item['subject'])):
             kept.append(item)
             continue
 
@@ -1632,7 +1704,8 @@ def promote_mysql_test_only_to_mtr(source_bucket, g5_bucket, source_tag,
             else:
                 log(f"  [g5<-{source_tag}] keeping "
                     f"{item['source_hash'][:12]} in {source_tag} because "
-                    "a later patch overlaps")
+                    "moving it before Remaining would overlap an earlier "
+                    "protected change")
                 overlap_kept += 1
 
         done = promoted + conflict_kept + overlap_kept
@@ -1656,11 +1729,12 @@ def promote_remaining_to_upstream(g10_bucket, g7_bucket, protected_items=None):
     mtr_kept = 0
     myr_kept = 0
     result_kept = 0
+    locked_kept = 0
     kept = []
     total = len(g10_bucket)
     if total == 0:
         log("  [g7<-g10] no remaining commits to probe")
-        return 0, 0, 0, 0, 0, 0
+        return 0, 0, 0, 0, 0, 0, 0
     log(f"  [g7<-g10] probing {total} remaining commit(s)")
     start = time.monotonic()
     probe_results = []
@@ -1669,8 +1743,12 @@ def promote_remaining_to_upstream(g10_bucket, g7_bucket, protected_items=None):
     probe_mtr = 0
     probe_myr = 0
     probe_result = 0
+    probe_locked = 0
     for i, item in enumerate(g10_bucket, 1):
-        if is_mtr_only_group_subject(item['subject']):
+        if is_locked_from_promotion(item['subject']):
+            probe_results.append((item, 'locked'))
+            probe_locked += 1
+        elif is_mtr_only_group_subject(item['subject']):
             probe_results.append((item, 'mtr-only'))
             probe_mtr += 1
         elif is_result_only_item(item):
@@ -1692,14 +1770,14 @@ def promote_remaining_to_upstream(g10_bucket, g7_bucket, protected_items=None):
             log(f"  [g7<-g10] probed {i}/{total} commits  "
                 f"({probe_promotable} clean, {probe_conflict} conflict, "
                 f"{probe_mtr} MTR skipped, {probe_result} result skipped, "
-                f"{probe_myr} g9 skipped)  "
+                f"{probe_myr} g9 skipped, {probe_locked} === skipped)  "
                 f"{rate:5.1f} commits/s")
 
     protected = list(protected_items or ())
     clean_items = []
     for item, result in probe_results:
         if result is False or result in (
-                'mtr-only', 'result-only', 'g9-subject'):
+                'mtr-only', 'result-only', 'g9-subject', 'locked'):
             protected.append(item)
         elif result is True:
             clean_items.append(item)
@@ -1711,7 +1789,12 @@ def promote_remaining_to_upstream(g10_bucket, g7_bucket, protected_items=None):
             g7_bucket.append(promoted_item)
             promoted += 1
         else:
-            if result == 'mtr-only':
+            if result == 'locked':
+                log(f"  [g7<-g10] keeping {item['source_hash'][:12]} in "
+                    "remaining because subject contains '===' "
+                    "(locked from promotion)")
+                locked_kept += 1
+            elif result == 'mtr-only':
                 log(f"  [g7<-g10] keeping {item['source_hash'][:12]} in "
                     "remaining because subject starts with [MTR-only]")
                 mtr_kept += 1
@@ -1738,10 +1821,12 @@ def promote_remaining_to_upstream(g10_bucket, g7_bucket, protected_items=None):
             log(f"  [g7<-g10] {i}/{total} commits  "
                 f"({promoted} promoted, {conflict_kept} conflict kept, "
                 f"{overlap_kept} overlap kept, {mtr_kept} MTR kept, "
-                f"{result_kept} result kept, {myr_kept} g9 kept)  "
+                f"{result_kept} result kept, {myr_kept} g9 kept, "
+                f"{locked_kept} === kept)  "
                 f"{rate:5.1f} commits/s")
     g10_bucket[:] = kept
-    return promoted, conflict_kept, overlap_kept, mtr_kept, result_kept, myr_kept
+    return (promoted, conflict_kept, overlap_kept, mtr_kept, result_kept,
+            myr_kept, locked_kept)
 
 
 def emit_split_bucket(bucket, tag, removed_commits=None):
@@ -1965,6 +2050,7 @@ def build_output_branch(args, input_hash, base_hash, plan):
         'g7_remaining_mtr_kept': 0,
         'g7_remaining_result_kept': 0,
         'g7_remaining_myr_kept': 0,
+        'g7_remaining_locked_kept': 0,
         'g8_emitted': 0, 'g8_skipped': 0,
         'g9_emitted': 0, 'g9_skipped': 0,
         'g9_conflict_fallback': 0,
@@ -2067,7 +2153,8 @@ def build_output_branch(args, input_hash, base_hash, plan):
                              plan['removed_commits'])
     stats['g7_emitted'], stats['g7_skipped'] = e, s
     promoted_g7_bucket = []
-    promoted, conflict_kept, overlap_kept, mtr_kept, result_kept, myr_kept = promote_remaining_to_upstream(
+    (promoted, conflict_kept, overlap_kept, mtr_kept, result_kept, myr_kept,
+     locked_kept) = promote_remaining_to_upstream(
         plan['g10_bucket'], promoted_g7_bucket,
         plan['g8_bucket'] + plan['g9_bucket'])
     stats['g7_promoted_from_remaining'] = promoted
@@ -2076,6 +2163,7 @@ def build_output_branch(args, input_hash, base_hash, plan):
     stats['g7_remaining_mtr_kept'] = mtr_kept
     stats['g7_remaining_result_kept'] = result_kept
     stats['g7_remaining_myr_kept'] = myr_kept
+    stats['g7_remaining_locked_kept'] = locked_kept
     e, s = emit_split_bucket(promoted_g7_bucket, 'g7:promoted',
                              plan['removed_commits'])
     stats['g7_emitted'] += e
@@ -2357,16 +2445,8 @@ def log_terminal_summary(args, input_hash, base_hash, plan, stats):
         f"{stats.get('g7_remaining_result_kept', 0)}")
     log(f"g10 MyRocks/kernel-subject commits kept out of g7: "
         f"{stats.get('g7_remaining_myr_kept', 0)}")
-
-    log("")
-    log("g1 subcategories:")
-    if plan['g1_files']:
-        for cat in sorted(plan['g1_files'].keys(),
-                          key=lambda c: plan['g1_first_pos'][c]):
-            log(f"  {cat}: {len(plan['g1_files'][cat])} file(s), "
-                f"first source commit position #{plan['g1_first_pos'][cat]}")
-    else:
-        log("  (none)")
+    log(f"g10 commits kept out of g7 because subject contains '===': "
+        f"{stats.get('g7_remaining_locked_kept', 0)}")
 
     log("")
     log(f"Null diff vs INPUT_BRANCH: {'YES' if null_diff else 'NO'}")

@@ -322,9 +322,36 @@ def absorb_small_commits(absorb, args: argparse.Namespace) -> int:
             commit=candidate.sha,
             color=args.color,
         )
-        absorb.rewrite_branch(rewrite_args)
+        rewrite_error: absorb.AbsorbError | None = None
+        try:
+            absorb.rewrite_branch(rewrite_args)
+        except absorb.AbsorbError as exc:
+            rewrite_error = exc
         after = absorb.branch_tip(repo, args.output_branch)
-        if after == before:
+        if rewrite_error is not None:
+            # rewrite_branch failed (e.g. unreplayable conflict in the patch
+            # fallback). The output branch ref is updated atomically at the
+            # end of rewrite_branch, so a mid-run failure leaves the ref
+            # unchanged. Reset the worktree if rewrite_branch left it dirty,
+            # then mark the candidate as not absorbed and continue.
+            try:
+                absorb.ensure_clean_worktree(repo)
+            except absorb.AbsorbError:
+                absorb.git(
+                    repo, "reset", "--hard", args.output_branch, check=False
+                )
+            ignored_keys.add(candidate.key)
+            unabsorbed_commits.append(candidate)
+            skipped += 1
+            error_text = absorb.colorize_conflicts(str(rewrite_error))
+            absorb.log(
+                f"{absorb.STYLE.yellow('Small commit not absorbed; continuing:')} "
+                f"{absorb.short_sha(candidate.sha)} {candidate.title}"
+            )
+            absorb.log(
+                f"  {absorb.STYLE.yellow('rewrite_branch error:')} {error_text}"
+            )
+        elif after == before:
             ignored_keys.add(candidate.key)
             unabsorbed_commits.append(candidate)
             skipped += 1

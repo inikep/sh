@@ -150,6 +150,22 @@ class Hunk:
 
 
 @dataclass(frozen=True)
+class BinaryHunk:
+    """Represents a binary-file change in a parsed diff.
+
+    Used by `patch_cherry_pick_tree` to copy the target commit's blob into
+    the rewritten tree without trying to apply a textual patch. Other
+    callers of `parse_unified_diff` opt out of binary emission and continue
+    to receive `AbsorbError` when binary content is encountered.
+    """
+
+    old_path: str | None
+    new_path: str | None
+    new_blob: str | None  # None when the file is being deleted.
+    new_mode: str | None  # None when the file is being deleted.
+
+
+@dataclass(frozen=True)
 class HunkDecision:
     hunk: Hunk
     target: str | None
@@ -170,6 +186,17 @@ HUNK_RE = re.compile(
 )
 CONFLICT_RE = re.compile(r"^CONFLICT \((?P<type>[^)]+)\):")
 REPLAYABLE_DELETE_CONFLICTS = {"modify/delete", "rename/delete"}
+INDEX_LINE_RE = re.compile(
+    r"^index (?P<old>[0-9a-f]+)\.\.(?P<new>[0-9a-f]+)(?: (?P<mode>\d{6}))?$"
+)
+NEW_FILE_MODE_RE = re.compile(r"^new file mode (?P<mode>\d{6})$")
+DELETED_FILE_MODE_RE = re.compile(r"^deleted file mode (?P<mode>\d{6})$")
+NEW_MODE_RE = re.compile(r"^new mode (?P<mode>\d{6})$")
+DIFF_GIT_PATHS_RE = re.compile(r'^diff --git "?a/(?P<a>.+?)"? "?b/(?P<b>.+?)"?\n?$')
+
+
+def _is_zero_sha(sha: str | None) -> bool:
+    return bool(sha) and set(sha) == {"0"}
 
 
 def log(msg: str) -> None:
@@ -449,25 +476,86 @@ def split_lf_keepends(text: str) -> list[str]:
     return lines
 
 
-def parse_unified_diff(patch: str) -> list[Hunk]:
+def parse_unified_diff(
+    patch: str, *, emit_binary: bool = False
+) -> list[Hunk | BinaryHunk]:
+    """Parse a unified diff into hunks.
+
+    By default, raises `AbsorbError` when a binary file diff is encountered
+    (the historic behavior, used by callers that need textual hunks for
+    blame). With `emit_binary=True`, binary file diffs are emitted as
+    `BinaryHunk` records instead, so the caller can apply them by copying
+    the target blob into the index.
+    """
     lines = split_lf_keepends(patch)
-    hunks: list[Hunk] = []
+    hunks: list[Hunk | BinaryHunk] = []
     i = 0
     file_header: list[str] = []
     old_path: str | None = None
     new_path: str | None = None
+    diff_path_a: str | None = None
+    diff_path_b: str | None = None
+    index_new_sha: str | None = None
+    index_mode: str | None = None
+    new_file_mode: str | None = None
+    deleted_file_mode: str | None = None
+    new_mode: str | None = None
+
+    def reset_file_state() -> None:
+        nonlocal old_path, new_path, diff_path_a, diff_path_b
+        nonlocal index_new_sha, index_mode, new_file_mode, deleted_file_mode, new_mode
+        old_path = None
+        new_path = None
+        diff_path_a = None
+        diff_path_b = None
+        index_new_sha = None
+        index_mode = None
+        new_file_mode = None
+        deleted_file_mode = None
+        new_mode = None
 
     while i < len(lines):
         line = lines[i]
         if line.startswith("diff --git "):
             file_header = [line]
-            old_path = None
-            new_path = None
+            reset_file_state()
+            match = DIFF_GIT_PATHS_RE.match(line)
+            if match:
+                diff_path_a = match.group("a")
+                diff_path_b = match.group("b")
             i += 1
             continue
 
         if line.startswith("Binary files ") or line.startswith("GIT binary patch"):
-            raise AbsorbError("binary change encountered in target commit")
+            if not emit_binary:
+                raise AbsorbError("binary change encountered in target commit")
+            is_deletion = (
+                deleted_file_mode is not None
+                or _is_zero_sha(index_new_sha)
+            )
+            mode = new_file_mode or new_mode or index_mode
+            blob = None if is_deletion else index_new_sha
+            if not is_deletion and (blob is None or mode is None):
+                raise AbsorbError(
+                    "cannot extract binary blob/mode for "
+                    f"{diff_path_b or diff_path_a or '<unknown>'}; "
+                    "diff lacks `index` line with full SHA "
+                    "(use --full-index)"
+                )
+            hunks.append(
+                BinaryHunk(
+                    old_path=diff_path_a,
+                    new_path=None if is_deletion else (diff_path_b or diff_path_a),
+                    new_blob=blob,
+                    new_mode=mode,
+                )
+            )
+            # Skip remaining lines belonging to this file's diff section
+            # until the next `diff --git` line (or EOF).
+            i += 1
+            while i < len(lines) and not lines[i].startswith("diff --git "):
+                i += 1
+            continue
 
         if line.startswith("@@ "):
             match = HUNK_RE.match(line)
@@ -521,6 +609,25 @@ def parse_unified_diff(patch: str) -> list[Hunk]:
                 old_path = parse_patch_path(line[4:].strip().split("\t", 1)[0])
             elif line.startswith("+++ "):
                 new_path = parse_patch_path(line[4:].strip().split("\t", 1)[0])
+            else:
+                stripped = line.rstrip("\n").rstrip("\r")
+                if stripped.startswith("index "):
+                    match = INDEX_LINE_RE.match(stripped)
+                    if match:
+                        index_new_sha = match.group("new")
+                        index_mode = match.group("mode") or index_mode
+                elif stripped.startswith("new file mode "):
+                    match = NEW_FILE_MODE_RE.match(stripped)
+                    if match:
+                        new_file_mode = match.group("mode")
+                elif stripped.startswith("deleted file mode "):
+                    match = DELETED_FILE_MODE_RE.match(stripped)
+                    if match:
+                        deleted_file_mode = match.group("mode")
+                elif stripped.startswith("new mode "):
+                    match = NEW_MODE_RE.match(stripped)
+                    if match:
+                        new_mode = match.group("mode")
         i += 1
 
     return hunks
@@ -829,13 +936,41 @@ def patch_cherry_pick_tree(repo: str | Path, base: str, ours: str, theirs: str) 
         base,
         theirs,
     )
-    hunks = parse_unified_diff(patch)
+    hunks = parse_unified_diff(patch, emit_binary=True)
     if not hunks:
         return tree_of(repo, ours)
     return apply_hunks_to_tree(repo, tree_of(repo, ours), hunks)
 
 
-def apply_hunks_to_tree(repo: str | Path, tree: str, hunks: list[Hunk]) -> str:
+def apply_binary_hunk_to_index(
+    repo: str | Path,
+    env: dict[str, str],
+    hunk: BinaryHunk,
+) -> None:
+    if hunk.new_blob is None:
+        # Deletion.
+        path = hunk.old_path or hunk.new_path
+        if path is None:
+            raise AbsorbError("binary deletion has no path")
+        git(repo, "update-index", "--remove", "--", path, env=env)
+        return
+    path = hunk.new_path or hunk.old_path
+    if path is None:
+        raise AbsorbError("binary change has no path")
+    mode = hunk.new_mode or "100644"
+    git(
+        repo,
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        f"{mode},{hunk.new_blob},{path}",
+        env=env,
+    )
+
+
+def apply_hunks_to_tree(
+    repo: str | Path, tree: str, hunks: list[Hunk | BinaryHunk]
+) -> str:
     fd, index_path = tempfile.mkstemp(prefix="ps-absorb-hunks-index-")
     os.close(fd)
     os.unlink(index_path)
@@ -844,6 +979,10 @@ def apply_hunks_to_tree(repo: str | Path, tree: str, hunks: list[Hunk]) -> str:
         current_tree = tree
         for hunk in hunks:
             git(repo, "read-tree", "--reset", current_tree, env=env)
+            if isinstance(hunk, BinaryHunk):
+                apply_binary_hunk_to_index(repo, env, hunk)
+                current_tree = git(repo, "write-tree", env=env).stdout.strip()
+                continue
             if is_submodule_hunk(hunk):
                 apply_submodule_hunk_to_index(repo, env, hunk)
                 current_tree = git(repo, "write-tree", env=env).stdout.strip()

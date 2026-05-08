@@ -40,10 +40,75 @@ MERGE_BRANCH_SUBJECT_RE = re.compile(
     re.IGNORECASE,
 )
 BUG_ID_RE = re.compile(r"\bbug[-_/ ]*#?(\d{4,})\b", re.IGNORECASE)
+SHORT_HASH_RE = re.compile(r"\b[0-9a-f]{12,40}\b")
+ACTION_RE = re.compile(r"^(emit|squash|replay|skip null|skip empty replay|done:|main|onto)\b")
 
 
 class FlattenError(RuntimeError):
     pass
+
+
+class Style:
+    """ANSI styling for terminal output; a no-op when disabled."""
+
+    def __init__(self, enabled: bool = False) -> None:
+        self.enabled = enabled
+
+    def _wrap(self, code: str, text: str) -> str:
+        if not self.enabled or not text:
+            return text
+        return f"\033[{code}m{text}\033[0m"
+
+    def bold(self, text: str) -> str:
+        return self._wrap("1", text)
+
+    def dim(self, text: str) -> str:
+        return self._wrap("2", text)
+
+    def red(self, text: str) -> str:
+        return self._wrap("31", text)
+
+    def green(self, text: str) -> str:
+        return self._wrap("32", text)
+
+    def yellow(self, text: str) -> str:
+        return self._wrap("33", text)
+
+    def cyan(self, text: str) -> str:
+        return self._wrap("36", text)
+
+
+STYLE = Style(False)
+
+
+def configure_style(mode: str) -> None:
+    if mode == "always":
+        STYLE.enabled = True
+        return
+    if mode == "never":
+        STYLE.enabled = False
+        return
+    if os.environ.get("NO_COLOR") is not None:
+        STYLE.enabled = False
+        return
+    if os.environ.get("FORCE_COLOR"):
+        STYLE.enabled = True
+        return
+    STYLE.enabled = sys.stderr.isatty()
+
+
+def colorize_log_message(message: str) -> str:
+    if not STYLE.enabled or not message:
+        return message
+    if message.startswith("align "):
+        return STYLE.red(message)
+    if message.startswith("ERROR:"):
+        return STYLE.red(message)
+    if message.startswith("skip "):
+        return STYLE.dim(message)
+    message = SHORT_HASH_RE.sub(lambda match: STYLE.yellow(match.group(0)), message)
+    message = ACTION_RE.sub(lambda match: STYLE.cyan(match.group(0)), message)
+    return message
 
 
 @dataclass(frozen=True)
@@ -81,7 +146,7 @@ class Stats:
 
 
 def log(message: str) -> None:
-    print(message, file=sys.stderr, flush=True)
+    print(colorize_log_message(message), file=sys.stderr, flush=True)
 
 
 def git(
@@ -643,11 +708,18 @@ def build_parser() -> argparse.ArgumentParser:
             "instead of aligning emitted trees back to the source"
         ),
     )
+    parser.add_argument(
+        "--color",
+        choices=("auto", "always", "never"),
+        default="auto",
+        help="colorize stderr output (default: auto; respects NO_COLOR / FORCE_COLOR)",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    configure_style(args.color)
     repo = Path(args.repo).resolve()
     try:
         validate_branch_name(repo, args.output_branch)
@@ -681,7 +753,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     except FlattenError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        log(f"ERROR: {exc}")
         return 1
 
 

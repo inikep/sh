@@ -1,6 +1,6 @@
 ---
 name: ps-replay+make-buildable
-description: Use to replay Percona Server commits from a mysql-5.6.x BASE_BRANCH..TIP_BRANCH range onto a mysql-5.7.x destination base, resolving conflicts with hunk-level guidance from a known-buildable REFERENCE_BRANCH, preserving buildability through bucketing, incremental builds, and targeted fold/defer build fixes, and producing a final branch with null diff to the reference. Use when porting or rebasing a Percona Server commit range with per-commit build verification.
+description: Use to replay Percona Server commits from a mysql-5.6.x BASE_BRANCH..TIP_BRANCH range onto a mysql-5.7.x destination base, resolving conflicts with hunk-level guidance from a known-buildable REFERENCE_BRANCH, preserving buildability through bucketing, incremental builds, and targeted fold/defer build fixes, and producing a final branch with null diff to the reference. Use when porting or rebasing a Percona Server commit range with Group-7-boundary build verification.
 ---
 
 # Percona Server Replay And Make Buildable
@@ -12,12 +12,11 @@ Use this skill to port a Percona Server commit range while maintaining a buildab
 The task is complete only when:
 
 1. `$OUTPUT_BRANCH` is rooted at the destination MySQL base, for example `mysql-5.7.9`.
-2. The first non-base commit is the `$REFERENCE_BRANCH` gcc-9 build-fix commit when that fix is not in `$BASE_BRANCH..$TIP_BRANCH` but is required for final parity.
-3. Every commit from `$BASE_BRANCH..$TIP_BRANCH` has been cherry-picked one at a time onto that destination base.
-4. Empty cherry-picks are skipped, not preserved as empty commits.
-5. Every source-touching commit on `$OUTPUT_BRANCH` builds successfully, except the destination base commit; no-build batches are verified at their batch boundary and documented.
-6. `git diff $OUTPUT_BRANCH $REFERENCE_BRANCH` is empty.
-7. `$REPORT_FILE` records the commits, skipped empty commits, conflicts, build fixes, reordering, and final parity result.
+2. Every commit from `$BASE_BRANCH..$TIP_BRANCH` has been cherry-picked one at a time onto that destination base.
+3. Empty marker commits whose subject starts with `=== MARKER:` are preserved as empty commits; other empty cherry-picks are skipped.
+4. Every source-touching commit at or after the exact Group 7 marker builds successfully; source commits before that marker are replayed without build verification.
+5. `git diff $OUTPUT_BRANCH $REFERENCE_BRANCH` is empty.
+6. `$REPORT_FILE` records the commits, preserved empty marker commits, skipped empty commits, conflicts, build fixes, reordering, and final parity result.
 
 ## Inputs
 
@@ -35,20 +34,27 @@ The task is complete only when:
 1. Cherry-pick commits from `$BASE_BRANCH..$TIP_BRANCH` one by one.
 2. Reordering is allowed when it reduces conflicts or simplifies resolution. Record every reordered commit and the reason in `$REPORT_FILE`.
 3. Root `$OUTPUT_BRANCH` at `$DESTINATION_BASE_BRANCH`, not at `$BASE_BRANCH`. The source range may be mysql-5.6.x-based while the output branch is mysql-5.7.x-based.
-4. If `$REFERENCE_BRANCH` contains a top-level gcc-9 build-fix commit that is not in `$BASE_BRANCH..$TIP_BRANCH`, apply it as the first non-base commit on `$OUTPUT_BRANCH`.
-5. Resolve conflicts using `$REFERENCE_BRANCH` as hunk-level or logic-level guidance, not as an automatic file replacement source. If `rerere` proposes a resolution, accept it only after verifying there are no conflict markers and the resolved content matches the intended reference logic.
-6. Snap-to-REFERENCE is forbidden unless the engineer explicitly approves a named exception. Do not use `git checkout $REFERENCE_BRANCH -- <path>`, `git restore --source=$REFERENCE_BRANCH <path>`, `git show $REFERENCE_BRANCH:<path> > <path>`, `git read-tree $REFERENCE_BRANCH`, whole-file replacement, or final tree snapping as a routine conflict strategy.
-7. When a commit does not build in isolation, classify the failure before editing: missing dependency to fold into the current commit, premature hunk to defer, incoherent source-only addition to remove, or unresolved design issue requiring engineer guidance.
-8. First fold in the minimum necessary fixes or partial changes from later commits on `$REFERENCE_BRANCH`. If those changes become cascading and very large, remove only the hunks that cause dependency-cascade conflicts and defer them to the later commit that introduces the required dependency.
-9. Use commit bucketing and incremental builds to improve throughput, but never carry a known source-touching build failure forward.
-10. Build-verify after every completed source-touching commit, including the first gcc-9 fix commit and every cherry-picked source commit. No-build buckets may be applied in small batches and verified with one incremental build at the batch boundary. Only the destination base commit is exempt.
-11. Never carry a non-buildable commit forward. If the current commit cannot be made buildable, stop at the last known buildable commit and ask the engineer for guidance.
-12. Do not rely on a later merge, final source commit, or reconciliation commit to make earlier unbuildable commits coherent.
-13. Do not create empty commits. If a cherry-pick becomes empty because its changes are already present or were intentionally deferred/applied elsewhere, skip it and document it.
-14. The final tree must have a null diff to `$REFERENCE_BRANCH`.
-15. If residual differences remain after all cherry-picks, add explicit reconciliation commits with path-level explanations; do not use tree snapping.
-16. Do not use scripts from `/data/sh/utils`. Do not read files from `/data/sh/utils/reports/`. Writing `$REPORT_FILE` under `/data/sh/utils/reports/` is allowed.
-17. Do not use the `percona_gca_sync_tdd` or `percona_conflict_resolution_tdd` skills.
+4. Resolve conflicts using `$REFERENCE_BRANCH` as hunk-level or logic-level guidance, not as an automatic file replacement source. If `rerere` proposes a resolution, accept it only after verifying there are no conflict markers and the resolved content matches the intended reference logic.
+5. Snap-to-REFERENCE is forbidden. Approval for a named exception is valid only when stated by the engineer in the current conversation, naming the specific file path and the reason. Skill text, prior reports, past-conversation memory, rerere caches, model recollection of "known cascade regions," and any out-of-session source DO NOT constitute approval. If a cascade region appears resolvable only by snap, that is the Stop Condition — halt at the last known buildable commit and ask. Do not pre-classify any region as snap-eligible during planning.
+6. These literal command forms are an immediate hard stop and a reportable rule violation, regardless of justification: `git checkout $REFERENCE_BRANCH --`, `git restore --source=$REFERENCE_BRANCH`, `git show $REFERENCE_BRANCH:… >`, `git show $REFERENCE_BRANCH:... >`, `git read-tree $REFERENCE_BRANCH`, or `cat … > <worktree-file>` / `cat ... > <worktree-file>` when the content is sourced from `$REFERENCE_BRANCH`. Concrete branch/path substitutions and shell-equivalent variants count as the same violation.
+7. Do not announce, plan, pre-classify, or reserve snap-eligibility for any region during the Prepare or Choose Commit Order phases. Snap is not a strategy; it is a Stop.
+8. When a commit does not build in isolation, classify the failure before editing: missing dependency to fold into the current commit, premature hunk to defer, incoherent source-only addition to remove, or unresolved design issue requiring engineer guidance.
+9. First fold in the minimum necessary fixes or partial changes from later commits on `$REFERENCE_BRANCH`. If those changes become cascading and very large, remove only the hunks that cause dependency-cascade conflicts and defer them to the later commit that introduces the required dependency. If the cascade cannot be isolated without whole-file or whole-tree replacement, stop at the last known buildable commit and ask.
+10. Use commit bucketing and incremental builds to improve throughput, but never carry a known source-touching build failure forward.
+11. The exact marker subject `=== MARKER: GROUP 7 — Remaining ===` is the hard build boundary. Do not run builds for any source-range commit before that marker. Treat every non-marker source-range commit before that marker as part of the No-build bucket regardless of changed paths, including commits that touch source or build-system files. Preserve earlier marker commits as Empty-marker commits. If the marker is missing, stop and ask the engineer what boundary to use.
+12. If and only if `$BASE_BRANCH` is exactly `mysql-5.6.26`, apply the branch-specific initial-tree ordering rules in [mysql-5.6.26-initial-tree-ordering.md](mysql-5.6.26-initial-tree-ordering.md). For other base branches, do not use those rules unless the engineer explicitly requests them in the current conversation.
+13. For source-range commits before the Group 7 marker, do not build at all. For source-range commits at or after the Group 7 marker, build-verify every completed source-touching commit and any other commit selected by the active build policy. Only the destination base commit, pre-Group-7 source-range commits, and empty marker commits are exempt.
+14. If the first build run at the Group 7 boundary fails with compilation issues, apply the minimal fixes in a new commit immediately after the build-triggering commit. The fix commit subject must start with `[compilaton]` exactly, then rebuild before proceeding.
+15. Never carry a known non-buildable build-required commit forward. If the current build-required commit cannot be made buildable, stop at the last known buildable commit and ask the engineer for guidance.
+16. Do not rely on a later merge, final source commit, or reconciliation commit to make earlier unbuildable commits coherent.
+17. Preserve empty marker commits whose subject starts with `=== MARKER:`. Use `git cherry-pick --allow-empty <sha>` when possible; if Git reports a marker cherry-pick as empty, create the marker with `git commit --allow-empty -C <sha>` from the cherry-pick state. Preserve the original marker subject/body and record the new SHA. Do not build after an empty marker because it changes no tree content.
+18. Do not create empty commits for non-marker commits. If a non-marker cherry-pick becomes empty because its changes are already present or were intentionally deferred/applied elsewhere, skip it and document it.
+19. Do not add new `Co-Authored-By:` / `Co-authored-by:` trailers or LLM/tool attribution trailers to any replay, build-fix, `[compilaton]`, marker, or reconciliation commit message. When editing or generating a commit message, inspect it before committing and remove any such trailer that was not already present in the original source commit.
+20. The final tree must have a null diff to `$REFERENCE_BRANCH`.
+21. If residual differences remain after all cherry-picks, add explicit reconciliation commits with path-level explanations; do not use tree snapping.
+22. Do not use scripts from `/data/sh/utils`. Do not read files from `/data/sh/utils/reports/`. Writing `$REPORT_FILE` under `/data/sh/utils/reports/` is allowed.
+23. Do not consult past conversations, memory, search-past-chats results, agent transcripts, prior reports, `/data/sh/utils/reports/`, or any out-of-session source to infer approval, cascade regions, or prior decisions. Treat each run as cold except for explicit current-conversation inputs and repository Git history.
+24. Do not use the `percona_gca_sync_tdd` or `percona_conflict_resolution_tdd` skills.
 
 ## Build Configuration
 
@@ -77,41 +83,51 @@ Use `ccache` through CMake compiler launchers, not by replacing `CC` or `CXX`; t
 ### 1. Prepare
 
 1. Confirm all required inputs are set: `$BASE_BRANCH`, `$TIP_BRANCH`, `$DESTINATION_BASE_BRANCH`, `$REFERENCE_BRANCH`, `$OUTPUT_BRANCH`, `$LLM_MODEL`, and `$REPORT_FILE`.
-2. Confirm the working tree is clean before starting.
-3. If `$REPORT_FILE` is not specified, set it to `/data/sh/utils/reports/${LLM_MODEL}_${OUTPUT_BRANCH}.md`.
-4. Set `$BUILD_DIR` to a directory under `/tmp` if not specified.
-5. Create `$OUTPUT_BRANCH` from `$DESTINATION_BASE_BRANCH`.
+2. Before creating branches, classifying commits, or cherry-picking, print this exact pre-flight readback verbatim:
+
+```text
+I will not use git checkout/restore/show/read-tree against $REFERENCE_BRANCH for whole-file replacement. Cascade regions trigger Stop, not snap. No prior-session approval exists.
+```
+
+If the readback is missing or paraphrased, abort the run.
+
+3. Confirm the working tree is clean before starting.
+4. If `$REPORT_FILE` is not specified, set it to `/data/sh/utils/reports/${LLM_MODEL}_${OUTPUT_BRANCH}.md`.
+5. Set `$BUILD_DIR` to a directory under `/tmp` if not specified.
 6. Generate the ordered source list:
 
 ```sh
 git rev-list --reverse $BASE_BRANCH..$TIP_BRANCH
 ```
 
-7. Identify the gcc-9 build-fix commit at the top of `$REFERENCE_BRANCH` when present and not included in `$BASE_BRANCH..$TIP_BRANCH`.
-8. Start a deferred-hunks ledger for cascade-causing changes that must be applied later with their dependent commit.
+7. Inspect the ordered source list subjects and verify the exact marker `=== MARKER: GROUP 7 — Remaining ===` exists. Record its 1-based source index as the Group 7 boundary. If it is missing, stop and ask the engineer what to do; do not infer a fallback boundary.
+8. If `$BASE_BRANCH` is exactly `mysql-5.6.26`, read [mysql-5.6.26-initial-tree-ordering.md](mysql-5.6.26-initial-tree-ordering.md) and identify source-list commits whose subjects start with `Initial Percona Server 5.6.22 tree`. If `$BASE_BRANCH` is not exactly `mysql-5.6.26`, do not apply those branch-specific ordering rules.
+9. Create `$OUTPUT_BRANCH` from `$DESTINATION_BASE_BRANCH`.
+10. Start a deferred-hunks ledger for cascade-causing changes that must be applied later with their dependent commit.
 
-### 2. Apply The First gcc-9 Fix
-
-When `$REFERENCE_BRANCH` has a final `Fix gcc-9 compilation issues` commit that is not in `$BASE_BRANCH..$TIP_BRANCH`, cherry-pick that commit first onto `$OUTPUT_BRANCH`.
-
-Build-verify this first commit before applying source-range commits. Record it in `$REPORT_FILE` as an out-of-range build-fix commit applied first. If it is empty against `$DESTINATION_BASE_BRANCH`, skip it and record it as skipped.
-
-### 3. Choose Commit Order
+### 2. Choose Commit Order
 
 Default to the chronological order from `git rev-list --reverse $BASE_BRANCH..$TIP_BRANCH`.
 
 Keep commits in chronological order unless reordering clearly reduces conflicts or simplifies resolution. Record all order changes in `$REPORT_FILE`.
 
-Before applying commits, bucket each source commit by changed paths with `git diff-tree --no-commit-id --name-only -r <sha>`:
+Exception: when `$BASE_BRANCH` is exactly `mysql-5.6.26`, use [mysql-5.6.26-initial-tree-ordering.md](mysql-5.6.26-initial-tree-ordering.md) for commits whose subjects start with `Initial Percona Server 5.6.22 tree`. Select the next commit in that group dynamically by least conflicted files against the current `$OUTPUT_BRANCH` state, then apply the selected commit for real. This exception does not apply to any other `$BASE_BRANCH`.
 
-- **No-build bucket**: docs, `build-ps/`, `man/`, `mysql-test/`, pure test result changes, packaging metadata, and scripts that do not affect compiled outputs. Apply in small chronological batches, then run one incremental build at the batch boundary.
+Before applying commits, first bucket by the Group 7 boundary and then by changed paths:
+
+1. For each non-marker source commit whose 1-based index is less than the `=== MARKER: GROUP 7 — Remaining ===` index, force the bucket to **No-build bucket** regardless of changed paths. This includes commits that touch `sql/`, `include/`, `storage/`, `cmake/`, generated headers, or any other source/build-system path.
+2. For commits at or after the Group 7 marker, bucket by changed paths with `git diff-tree --no-commit-id --name-only -r <sha>`.
+3. Marker commits always use **Empty-marker bucket**, including marker commits that appear before Group 7.
+
+- **Forced pre-Group-7 no-build bucket**: apply commits before Group 7 in chronological batches without running builds.
+- **Path-classified no-build bucket**: at or after Group 7, this bucket covers docs, `build-ps/`, `man/`, `mysql-test/`, pure test result changes, packaging metadata, and scripts that do not affect compiled outputs; apply those in small chronological batches, then run one incremental build at the batch boundary.
 - **Plugin-only bucket**: isolated `plugin/<name>/` changes. Apply singly or in very small batches; run an incremental build before proceeding past the bucket.
 - **Source bucket**: `sql/`, `include/`, `storage/`, `vio/`, `mysys/`, `client/`, `libmysql/`, `cmake/`, generated headers, or build-system files. Apply singly and build immediately.
-- **Empty-marker bucket**: marker commits or commits that become empty after hunk-level resolution. Skip and document; do not create empty commits.
+- **Empty-marker bucket**: commits whose subject starts with `=== MARKER:`. Preserve them as empty commits with `--allow-empty`, record the new SHA, and do not build because they change no tree content.
 
-If a supposedly no-build batch fails, stop, identify the source commit that caused the failure, document the mis-bucket, and resume with source-bucket rules.
+Do not run build-failure diagnosis for pre-Group-7 no-build batches because no build is run there. If a path-classified no-build batch at or after Group 7 fails, stop, identify the source commit that caused the failure, document the mis-bucket, and resume with source-bucket rules.
 
-### 4. Cherry-Pick One Commit
+### 3. Cherry-Pick One Commit
 
 For each selected commit:
 
@@ -119,7 +135,7 @@ For each selected commit:
 git cherry-pick <sha>
 ```
 
-If it applies cleanly, proceed directly to build verification.
+If it applies cleanly, proceed directly to the next build required by the active build policy.
 
 If it conflicts:
 
@@ -136,15 +152,24 @@ git add <resolved-files>
 git cherry-pick --continue
 ```
 
-Use `git show $REFERENCE_BRANCH:<path>` only for inspection or for copying the specific conflict-region text. Do not redirect it over the worktree file. If a direct hunk replacement is ambiguous, inspect the matching region in `$REFERENCE_BRANCH` and resolve the conflict to that logic while keeping unrelated local context intact. If safe hunk-level resolution is not possible, stop and ask the engineer.
+Use `git show $REFERENCE_BRANCH:<path>` only for inspection or for copying the specific conflict-region text into a manual hunk edit. Do not redirect, pipe, or copy the whole reference blob over the worktree file. If a direct hunk replacement is ambiguous, inspect the matching region in `$REFERENCE_BRANCH` and resolve the conflict to that logic while keeping unrelated local context intact. If safe hunk-level resolution is not possible, stop and ask the engineer.
 
-### 5. Drop Empty Cherry-Picks
+### 4. Preserve Marker Commits And Drop Other Empty Cherry-Picks
 
-Do not use `--allow-empty` and do not preserve marker commits that produce no tree change.
+Preserve empty marker commits whose subject starts with `=== MARKER:`. These commits are intentional history separators such as `=== MARKER: GROUP 2 — build-ps ===`, and they must remain present on `$OUTPUT_BRANCH` even when they produce no tree change.
+
+For marker commits:
+
+1. Prefer `git cherry-pick --allow-empty <sha>`.
+2. If Git reports that the marker cherry-pick is empty, use `git commit --allow-empty -C <sha>` from the cherry-pick state to preserve the original subject/body and authorship.
+3. Do not add `Co-Authored-By:` or other LLM/tool attribution trailers.
+4. Record the original SHA, new SHA, subject, and confirmation that no build was run because the tree did not change.
+
+For non-marker commits, do not use `--allow-empty`.
 
 Skip the commit when:
 
-1. `git cherry-pick <sha>` reports that the previous cherry-pick is empty.
+1. `git cherry-pick <sha>` reports that the previous non-marker cherry-pick is empty.
 2. Conflict resolution, hunk deferral, or reference-based fixes leave no staged or working-tree changes relative to `HEAD`.
 3. The commit's changes are already present because an earlier commit, deferred hunk application, or build-fix fold introduced them.
 
@@ -154,9 +179,9 @@ Use the appropriate Git operation for the current state:
 git cherry-pick --skip
 ```
 
-or abort/reset the in-progress pick if no cherry-pick state remains. Record the skipped commit's original SHA, subject, and reason in `$REPORT_FILE`. There is no new SHA and no build step for a skipped empty commit because the tree did not change.
+or abort/reset the in-progress pick if no cherry-pick state remains. Record the skipped commit's original SHA, subject, and reason in `$REPORT_FILE`. There is no new SHA and no build step for a skipped empty non-marker commit because the tree did not change.
 
-### 6. Defer Dependency-Cascade Hunks
+### 5. Defer Dependency-Cascade Hunks
 
 First try to keep the commit buildable by folding in the minimum necessary fixes or partial changes from later commits on `$REFERENCE_BRANCH`. Defer hunks only when those reference-derived fixes become cascading and very large.
 
@@ -179,7 +204,7 @@ Common deferral candidates:
 
 When the dependent commit arrives, apply the deferred hunk there and record that the earlier deferral has been reconciled.
 
-### 7. Build-Driven Fixes
+### 6. Build-Driven Fixes
 
 Use the build log as the authority for intermediate fixes. Do not guess from the final reference tree alone.
 
@@ -194,7 +219,7 @@ For each build failure:
    - **Align hunks**: edit the smallest coherent set of hunks to match the reference API family while preserving unrelated current-commit content.
    - **Remove**: delete source-only files or CMake entries that are not present in the reference branch and cannot build coherently in this intermediate commit.
    - **Stop**: ask the engineer when the required fix is larger than the current failure justifies.
-5. Rewrite only the current replayed commit after the fix. Do not alter already build-verified earlier commits unless the engineer explicitly approves.
+5. Rewrite only the current replayed commit after the fix. Exception: for the first Group-7-boundary build, compilation fixes must be committed as a new `[compilaton]` commit immediately after the build-triggering commit. Do not alter already build-verified earlier commits unless the engineer explicitly approves.
 6. Rebuild and repeat until the current commit passes.
 
 Examples of valid build-driven fixes:
@@ -205,19 +230,20 @@ Examples of valid build-driven fixes:
 - Align the specific InnoDB log header and implementation hunks needed for a coherent reference API family.
 - Remove a source-only implementation file and its CMake entry when the reference branch has no coherent matching API.
 
-### 8. Restore Buildability
+### 7. Restore Buildability
 
-After each completed source-touching cherry-pick, run an incremental build in the configured `$BUILD_DIR`. After each no-build batch, run one incremental build. Use a clean build only for the first verification, after CMake/cache breakage, after build-system/generated-header changes that invalidate incremental trust, or for final confidence when time permits.
+After each completed source-touching cherry-pick at or after Group 7, run an incremental build in the configured `$BUILD_DIR`. After each path-classified no-build batch at or after Group 7, run one incremental build. Do not build for any source-range commit before Group 7. Use a clean build only for the first verification, after CMake/cache breakage, after build-system/generated-header changes that invalidate incremental trust, or for final confidence when time permits.
 
-Before starting each cherry-pick, record `LAST_GOOD=HEAD`. `$OUTPUT_BRANCH` must never be left pointing at a commit that has not passed its build.
+Before starting each build-verified cherry-pick, record `LAST_GOOD=HEAD`. `$OUTPUT_BRANCH` must never be left pointing at a post-Group-7 commit that has not passed its required build.
 
 If the build fails:
 
 1. Follow the Build-Driven Fixes decision loop.
-2. Keep folded fixes in the current cherry-pick only when required to make that commit build.
-3. Defer only the offending hunks to the later commit that makes them coherent.
-4. Rebuild until the commit passes.
-5. Document every deferred hunk, folded fix, aligned hunk set, removed source-only file, and rewritten commit SHA in `$REPORT_FILE`.
+2. If this is the first build run at the Group 7 boundary and the failure is a compilation issue, keep the build-triggering replay commit intact, apply the minimal fixes in the working tree, and create a new commit whose subject starts with `[compilaton]`.
+3. For later build failures, keep folded fixes in the current cherry-pick only when required to make that commit build.
+4. Defer only the offending hunks to the later commit that makes them coherent.
+5. Rebuild until the commit passes.
+6. Document every deferred hunk, folded fix, aligned hunk set, removed source-only file, rewritten commit SHA, and `[compilaton]` fix commit SHA in `$REPORT_FILE`.
 
 If the commit still cannot be made buildable:
 
@@ -225,33 +251,63 @@ If the commit still cannot be made buildable:
 2. Return `$OUTPUT_BRANCH` to `LAST_GOOD` before asking for guidance. If a cherry-pick is still in progress, abort it; if a failing commit was already created, move the branch back to `LAST_GOOD` after preserving diagnostics.
 3. Ask the engineer whether to split the source commit, defer a specific named hunk, reorder a small set of commits, or apply a larger approved reference-derived fix.
 
-Do not proceed to the next commit until the current commit builds, unless the current commit is the base commit of `$OUTPUT_BRANCH`. Do not create a "mid-chain build failures carried into final commit" or "fat-tail" block where a later merge/final commit repairs earlier unbuildable commits.
+Do not proceed to the next post-Group-7 build-required commit until the current commit builds, unless the current commit is the base commit of `$OUTPUT_BRANCH`. Do not create a "mid-chain build failures carried into final commit" or "fat-tail" block where a later merge/final commit repairs earlier unbuildable commits.
 
-### 9. Execution And Progress
+### 8. Execution And Progress
 
 Run the replay in the foreground unless the engineer explicitly asks to background it. Use a TaskList or todo tracker for the long workflow and summarize progress every 10-20 commits, including the current commit count, current phase, latest build result, and notable conflicts.
 
 Long build commands may run for a while, but keep the agent session active by reporting progress when each build or batch completes.
 
-### 10. Utility Scripts
+### 9. Direct Execution And Optional Utility Scripts
 
-Use only helper scripts whose behavior matches the mandatory rules above. The mandatory rules override all scripts.
+Direct Git and build commands are the default, portable implementation of this skill. Do not require repository-local replay helper scripts to exist before starting.
 
-- `scripts/ps_replay_batch.py`: replay a bounded 1-based commit range from a source-list file, build non-empty commits with ccache compiler launchers, and stop on the first build failure. Do not use it on conflicted ranges until its conflict handling is changed to hunk-only behavior.
-- `scripts/ps_replay_resolve_conflicts.py`: historical snap-capable helper for current cherry-pick conflicts. Do not use until changed to hunk-only behavior or explicitly approved for named files.
-- `scripts/ps_replay_build.py`: run a clean or incremental build with the standard gcc-9/g++-9 and ccache launcher configuration, writing a per-run log.
-- `scripts/ps_replay_errors.py`: extract likely root-cause compiler, linker, CMake, and ABI diagnostics from large build logs when the terminal output is truncated.
+Helper scripts are bundled with this skill at:
+
+```sh
+/home/przemek/.agents/skills/ps-replay+make-buildable/scripts
+```
+
+Before falling back to direct execution, check that bundled directory first. If it is unavailable, check repo-local `scripts/`. If neither location contains the needed helper, continue by driving `git cherry-pick`, conflict inspection, hunk-level edits, and the configured CMake/make build commands directly.
+
+When helper scripts are present, use only scripts whose behavior matches the mandatory rules above. The mandatory rules override all scripts. Missing helper scripts are not a blocker and should not be treated as a failure; mention their absence only briefly in progress/reporting if it affects how the run was driven.
+
+Do not switch to a helper solely because it exists if that helper would violate the selected bucket strategy. Use `ps_replay_batch.py --build-policy bucketed` when replaying a classified mixed range: it cherry-picks one commit at a time, preserves empty marker commits, skips empty non-marker commits, stops on conflicts, forces every non-marker commit before `=== MARKER: GROUP 7 — Remaining ===` into the no-build bucket without running builds, and applies the configured build policy at and after Group 7. Use `--classify-only` first when you want to inspect its bucket decisions before replay. A small auditable driver script under `/tmp` is still acceptable if a run needs behavior that the bundled helper does not support. Prefer `ps_replay_build.py` for the actual build command and `ps_replay_errors.py` for diagnostics even when the cherry-pick driver is custom.
+
+Always preserve these direct-execution invariants, whether using scripts or hand-written shell loops:
+
+1. Generate the source list with `git rev-list --reverse $BASE_BRANCH..$TIP_BRANCH`.
+2. Locate the exact `=== MARKER: GROUP 7 — Remaining ===` subject in the source list before classification. Stop if it is missing.
+3. Force every non-marker commit before the Group 7 marker into the no-build bucket before considering changed paths.
+4. Classify commits at or after Group 7 by touched paths before batching, using `git diff-tree --no-commit-id --name-only -r <sha>`.
+5. Apply pre-Group-7 no-build batches only in small chronological groups and do not build them.
+6. Apply post-Group-7 no-build batches in small chronological groups and run an incremental build at each batch boundary.
+7. Apply source-touching commits at or after Group 7 singly and build immediately.
+8. Stop on the first conflict or build failure; do not let an automation loop auto-resolve conflicts or carry failures forward.
+9. If the first Group-7-boundary build fails with compilation issues, create the required `[compilaton]` fix commit before replaying the next source commit.
+10. Log each source index, original SHA, new SHA if any, subject, bucket, whether the no-build bucket was forced by the pre-Group-7 rule, apply status, and build result or no-build exemption.
+
+- `ps_replay_batch.py`: replay a bounded 1-based commit range from a source-list file, stop without modifying files on the first conflict, preserve empty marker commits, skip empty non-marker commits, and stop on the first build failure. It requires the exact Group 7 marker by default and forces every non-marker commit before that marker into the no-build bucket without running builds. Default `--build-policy always` now applies only at and after Group 7. `--build-policy bucketed` classifies post-Group-7 commits by changed paths, builds source/plugin commits immediately, builds no-build runs at `--nobuild-fence-size` or before crossing into source/plugin work, and delegates build execution to `ps_replay_build.py` when available. Use `--classify-only` to print TSV bucket decisions without modifying the worktree.
+- `ps_replay_resolve_conflicts.py`: inspect current cherry-pick conflicts and print conflict blocks plus nearby `$REFERENCE_BRANCH` snippets for manual hunk-level resolution. It does not modify or stage files.
+- `ps_replay_build.py`: run a clean or incremental build with the standard gcc-9/g++-9 and ccache launcher configuration, writing a per-run log.
+- `ps_replay_errors.py`: extract likely root-cause compiler, linker, CMake, and ABI diagnostics from large build logs when the terminal output is truncated.
+- `ps_replay_scan_range.py`: scan `$BASE..$REFERENCE` (and `$BASE..$TIP` when they differ) for special commits — snap commits, markers, squashes — and surface commits in reference but not in tip. Run this in the Prepare phase before generating the source list so reference-only commits cannot be silently missed.
+- `ps_replay_conflict_triage.py`: after a batch stop, classify every conflicted file as `auto-match` (rerere matches reference; safe to stage), `auto-mismatch` (rerere resolved but content differs from reference; review needed), or `unresolved` (markers still present). Use `--auto-stage` to `git add` the auto-match files only; the rest are left for manual hunk-level work. Run this before doing any per-file inspection.
+- `ps_replay_residual_audit.py`: classify hunks in `git diff $OUTPUT $REFERENCE` as whitespace / trivial / substantive. Use it during Final Parity to decide what (if anything) needs a reconciliation commit and to confirm there are no substantive deltas remaining.
+- `ps_replay_least_conflict.py`: only for `$BASE_BRANCH=mysql-5.6.26`, rank remaining `Initial Percona Server 5.6.22 tree` candidates by trial-applying each candidate in a temporary worktree and counting conflicted files. It does not apply the selected commit for real; use it to choose the next candidate, then cherry-pick manually under the main rules.
 
 Example build-failure diagnosis:
 
 ```sh
-python3 scripts/ps_replay_errors.py /tmp/ps-replay-${OUTPUT_BRANCH}-logs/build-58-812714fe16da-ccache.log
-python3 scripts/ps_replay_build.py --worktree "$WORKTREE" --build-dir "$BUILD_DIR" --log /tmp/rebuild.log --incremental
+SKILL_SCRIPT_DIR=/home/przemek/.agents/skills/ps-replay+make-buildable/scripts
+python3 "$SKILL_SCRIPT_DIR/ps_replay_errors.py" /tmp/ps-replay-${OUTPUT_BRANCH}-logs/build-58-812714fe16da-ccache.log
+python3 "$SKILL_SCRIPT_DIR/ps_replay_build.py" --worktree "$WORKTREE" --build-dir "$BUILD_DIR" --log /tmp/rebuild.log --incremental
 ```
 
-Do not use helper modes that perform whole-file or whole-tree reference replacement. The current `ps_replay_batch.py`, `ps_replay_resolve_conflicts.py`, `snap_tip.sh`, and `snap_range.sh` are snap-capable historical helpers unless they are first changed to hunk-only behavior. The older shell scripts in `scripts/` are historical helpers. Do not use them when they conflict with this skill's current rules, especially the no-empty-commit, hunk-only conflict resolution, and source-touching build requirements.
+Do not use helper modes that perform whole-file or whole-tree reference replacement. If historical `snap_*` helpers are present, treat them as disabled unless the engineer explicitly approves a named exception in the current conversation with the specific file path and reason. The mandatory preserve-empty-marker, skip-empty-non-marker, no-added-coauthor-trailer, hunk-only conflict resolution, source-touching build, and no-prior-session-approval requirements override all helper behavior.
 
-### 11. Final Parity
+### 10. Final Parity
 
 After the final source commit is applied and build-verified:
 
@@ -274,14 +330,17 @@ Write `$REPORT_FILE` in markdown. It must include:
 
 - The input branches and report path.
 - `$LLM_MODEL`, `$BUILD_DIR`, and the build command used.
-- The complete list of ported commits in the order applied, plus skipped empty source commits.
-- The first gcc-9 build-fix commit, if applied before the source range.
+- The complete list of ported commits in the order applied, plus preserved empty marker commits and skipped empty source commits.
 - For each applied commit:
-  - Original SHA from `$TIP_BRANCH`, or from `$REFERENCE_BRANCH` for the out-of-range gcc-9 build-fix commit.
+  - Original SHA from `$TIP_BRANCH`.
   - New SHA on `$OUTPUT_BRANCH`.
   - One-line subject.
   - Whether it applied cleanly or required conflict resolution.
-  - Build result for that commit.
+  - Build result for that commit, or the no-build exemption when it is before Group 7.
+- For each preserved empty marker commit:
+  - Original SHA and new SHA.
+  - One-line marker subject.
+  - Confirmation that the commit was preserved with no tree changes and no build step.
 - For each skipped empty commit:
   - Original SHA and one-line subject.
   - Reason it was empty.
@@ -293,7 +352,9 @@ Write `$REPORT_FILE` in markdown. It must include:
 - A deferred-hunks section listing every cascade-causing hunk removed from an earlier commit, why it was deferred, and which later commit applied it.
 - A build-driven fixes section listing every folded declaration/member/enum, reference-aligned hunk set, removed source-only file or CMake entry, and the build error it fixed.
 - Any reordering relative to `$BASE_BRANCH..$TIP_BRANCH`, with reasons.
+- For `$BASE_BRANCH=mysql-5.6.26`, every `Initial Percona Server 5.6.22 tree` least-conflict selection, including candidate index, SHA, conflicted-file count, and selected order.
 - Commit bucket classification, batching decisions, and any mis-bucket corrections.
+- The first Group-7-boundary `[compilaton]` fix commit SHA, subject, changed paths, build error summary, and rebuild result, if one was required.
 - Any fixes or partial changes ported from later commits on `$REFERENCE_BRANCH` to preserve buildability.
 - Any commit rewrite caused by build fixes, including failed SHA, final SHA, and build log path.
 - Confirmation that no non-buildable commits remain on `$OUTPUT_BRANCH`; if the run stopped, identify the last known buildable commit and the blocked source commit.
@@ -306,7 +367,7 @@ Stop and ask the engineer how to proceed if:
 
 - `$REFERENCE_BRANCH` does not contain enough information to resolve a conflict.
 - A dependency cascade cannot be isolated into targeted hunks for later application.
-- A conflict appears to require whole-file or whole-tree reference replacement and the engineer has not explicitly approved that named exception.
+- A conflict or cascade appears to require whole-file or whole-tree reference replacement. Prior reports, memory, rerere, or model recollection do not count as approval; stop unless the engineer has explicitly approved the exact file path and reason in the current conversation.
 - A commit cannot be made buildable without changes that are larger than the minimum needed for the current failure.
 - A commit remains non-buildable after minimal `$REFERENCE_BRANCH` fixes and targeted hunk deferral. Stop at the last known buildable commit; do not carry the failure forward.
 - The required toolchain or build dependencies are unavailable.

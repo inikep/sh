@@ -117,6 +117,9 @@ Rules implemented (letters match the task):
      preserved source bucket when rerunning a grouped branch) as a single
      item. Only g1 squash extraction still applies, since those paths must
      be folded into the squash for null diff.
+  U) A later g2/g3/g4 path is kept in Remaining if an earlier Remaining commit
+     touched the same path. Remaining commits materialise whole file states, so
+     moving the later dedicated path before Remaining can otherwise clobber it.
 
 Usage:
   ps-reorder-py --input-branch <branch|hash> \
@@ -1050,6 +1053,13 @@ def plan_commits(commits, base_hash, removed_paths):
     source_group = None
     result_file_last_item = {}
     base_existence = PathExistenceCache(base_hash)
+    prior_remaining_paths = set()
+
+    def append_bucket_item(bucket_name, item):
+        append_plan_item(plan[bucket_name], item, result_file_last_item)
+        if bucket_name == 'g10_bucket':
+            prior_remaining_paths.update(item['files'])
+
     for idx, ch in enumerate(commits):
         done = idx + 1
         if done % 200 == 0 or done == total:
@@ -1094,7 +1104,7 @@ def plan_commits(commits, base_hash, removed_paths):
 
         source_group_bucket = source_group_bucket_name(source_group)
         if source_group_bucket is not None:
-            append_plan_item(plan[source_group_bucket], {
+            append_bucket_item(source_group_bucket, {
                 'info': info,
                 'files': list(files),
                 'subject': info['subject'],
@@ -1102,7 +1112,7 @@ def plan_commits(commits, base_hash, removed_paths):
                 'source_hash': ch,
                 'source_pos': idx,
                 'source_group': source_group,
-            }, result_file_last_item)
+            })
             continue
 
         g1_part, non_g1_files = split_out_g1_files(files)
@@ -1134,7 +1144,7 @@ def plan_commits(commits, base_hash, removed_paths):
                 plan['result_only_base_commits_kept'] += 1
                 result_subject, original_subject = add_subject_prefix_with_original(
                     info['subject'], '[result-only]', space_before_plain=True)
-                append_plan_item(plan['g10_bucket'], {
+                append_bucket_item('g10_bucket', {
                     'info': info,
                     'files': list(base_result_files),
                     'subject': result_subject,
@@ -1144,7 +1154,7 @@ def plan_commits(commits, base_hash, removed_paths):
                     'source_group': source_group,
                     'result_only': True,
                     'original_subject': original_subject,
-                }, result_file_last_item)
+                })
             if not files:
                 continue
 
@@ -1155,32 +1165,32 @@ def plan_commits(commits, base_hash, removed_paths):
         if mtr_like_commit and not locked_subject:
             g4_files, files = split_out_group_files(files, 'g4')
             if g4_files:
-                append_plan_item(plan['g4_bucket'], {
+                append_bucket_item('g4_bucket', {
                     'info': info,
                     'files': list(g4_files),
                     'subject': info['subject'],
                     'body_rest': info['body_rest'],
                     'source_hash': ch,
                     'source_group': source_group,
-                }, result_file_last_item)
+                })
             if not files:
                 continue
 
         if is_compilation_group_subject(info['subject']) and not locked_subject:
             if files:
-                append_plan_item(plan['g6_bucket'], {
+                append_bucket_item('g6_bucket', {
                     'info': info,
                     'files': list(files),
                     'subject': info['subject'],
                     'body_rest': info['body_rest'],
                     'source_hash': ch,
                     'source_group': source_group,
-                }, result_file_last_item)
+                })
             continue
         if is_mtr_only_group_subject(info['subject']) and not locked_subject:
             if files:
-                target_bucket = plan['g10_bucket'] if source_group == 10 else plan['g5_bucket']
-                append_plan_item(target_bucket, {
+                target_bucket = 'g10_bucket' if source_group == 10 else 'g5_bucket'
+                append_bucket_item(target_bucket, {
                     'info': info,
                     'files': list(files),
                     'subject': info['subject'],
@@ -1188,11 +1198,11 @@ def plan_commits(commits, base_hash, removed_paths):
                     'source_hash': ch,
                     'source_pos': idx,
                     'source_group': source_group,
-                }, result_file_last_item)
+                })
             continue
         if (is_mysql_test_only_commit(files) and not contains_g1_paths(files)
                 and not locked_subject):
-            append_plan_item(plan['g10_bucket'], {
+            append_bucket_item('g10_bucket', {
                 'info': info,
                 'files': list(files),
                 'subject': info['subject'],
@@ -1201,29 +1211,29 @@ def plan_commits(commits, base_hash, removed_paths):
                 'source_pos': idx,
                 'source_group': source_group,
                 'mtr_only_candidate': True,
-            }, result_file_last_item)
+            })
             continue
         if is_upstream_bug_fix_group_subject(info['subject']) and not locked_subject:
             if files:
-                append_plan_item(plan['g7_bucket'], {
+                append_bucket_item('g7_bucket', {
                     'info': info,
                     'files': list(files),
                     'subject': info['subject'],
                     'body_rest': info['body_rest'],
                     'source_hash': ch,
                     'source_group': source_group,
-                }, result_file_last_item)
+                })
             continue
         if is_init_group_subject(info['subject']) and not locked_subject:
             if files:
-                append_plan_item(plan['g8_bucket'], {
+                append_bucket_item('g8_bucket', {
                     'info': info,
                     'files': list(files),
                     'subject': info['subject'],
                     'body_rest': info['body_rest'],
                     'source_hash': ch,
                     'source_group': source_group,
-                }, result_file_last_item)
+                })
             continue
 
         # Partition by group
@@ -1244,15 +1254,32 @@ def plan_commits(commits, base_hash, removed_paths):
             is_myrocks_kernel_group_subject(info['subject'])
             and not locked_subject)
 
+        dedicated_forced_remaining = False
+        g2_part, unsafe = keep_clobbered_dedicated_paths_in_remaining(
+            g2_part, prior_remaining_paths)
+        dedicated_forced_remaining = dedicated_forced_remaining or bool(unsafe)
+        g10_part.extend(unsafe)
+        g3_part, unsafe = keep_clobbered_dedicated_paths_in_remaining(
+            g3_part, prior_remaining_paths)
+        dedicated_forced_remaining = dedicated_forced_remaining or bool(unsafe)
+        g10_part.extend(unsafe)
+        g4_part, unsafe = keep_clobbered_dedicated_paths_in_remaining(
+            g4_part, prior_remaining_paths)
+        dedicated_forced_remaining = dedicated_forced_remaining or bool(unsafe)
+        g10_part.extend(unsafe)
+
         if source_group == 10:
             g2_part, unsafe = keep_clobbered_dedicated_paths_in_remaining(
                 g2_part, later_preserved_group_paths['g2'])
+            dedicated_forced_remaining = dedicated_forced_remaining or bool(unsafe)
             g10_part.extend(unsafe)
             g3_part, unsafe = keep_clobbered_dedicated_paths_in_remaining(
                 g3_part, later_preserved_group_paths['g3'])
+            dedicated_forced_remaining = dedicated_forced_remaining or bool(unsafe)
             g10_part.extend(unsafe)
             g4_part, unsafe = keep_clobbered_dedicated_paths_in_remaining(
                 g4_part, later_preserved_group_paths['g4'])
+            dedicated_forced_remaining = dedicated_forced_remaining or bool(unsafe)
             g10_part.extend(unsafe)
 
         if locked_subject and (g2_part or g3_part or g4_part):
@@ -1264,8 +1291,8 @@ def plan_commits(commits, base_hash, removed_paths):
 
         has_g234 = bool(g2_part or g3_part or g4_part)
 
-        if myrocks_kernel_subject and not has_g234:
-            append_plan_item(plan['g9_bucket'], {
+        if myrocks_kernel_subject and not has_g234 and not dedicated_forced_remaining:
+            append_bucket_item('g9_bucket', {
                 'info': info,
                 'files': list(files),
                 'subject': info['subject'],
@@ -1273,7 +1300,7 @@ def plan_commits(commits, base_hash, removed_paths):
                 'source_hash': ch,
                 'source_pos': idx,
                 'source_group': source_group,
-            }, result_file_last_item)
+            })
             continue
 
         if has_g234:
@@ -1281,23 +1308,23 @@ def plan_commits(commits, base_hash, removed_paths):
             # in g10 except MYR/rocks subjects whose non-dedicated portion
             # belongs in g9.
             if g2_part:
-                append_plan_item(plan['g2_bucket'], {
+                append_bucket_item('g2_bucket', {
                     'info': info,
                     'files': list(g2_part),
                     'subject': info['subject'],
                     'body_rest': info['body_rest'],
                     'source_hash': ch,
                     'source_group': source_group,
-                }, result_file_last_item)
+                })
             if g3_part:
-                append_plan_item(plan['g3_bucket'], {
+                append_bucket_item('g3_bucket', {
                     'info': info,
                     'files': list(g3_part),
                     'subject': info['subject'],
                     'body_rest': info['body_rest'],
                     'source_hash': ch,
                     'source_group': source_group,
-                }, result_file_last_item)
+                })
             if g4_part:
                 # "[MyRocks part]" suffix for the g4+g10 split per rule F.
                 subj = info['subject']
@@ -1305,7 +1332,7 @@ def plan_commits(commits, base_hash, removed_paths):
                 if g10_part:
                     subj, original_subject = truncate_with_suffix_and_original(
                         info['subject'], ' [MyRocks part]')
-                append_plan_item(plan['g4_bucket'], {
+                append_bucket_item('g4_bucket', {
                     'info': info,
                     'files': list(g4_part),
                     'subject': subj,
@@ -1313,7 +1340,7 @@ def plan_commits(commits, base_hash, removed_paths):
                     'source_hash': ch,
                     'source_group': source_group,
                     'original_subject': original_subject,
-                }, result_file_last_item)
+                })
             if g10_part:
                 subj = info['subject']
                 original_subject = None
@@ -1321,7 +1348,7 @@ def plan_commits(commits, base_hash, removed_paths):
                     subj, original_subject = truncate_with_suffix_and_original(
                         info['subject'], ' [non-MyRocks part]')
                 target_bucket = 'g9_bucket' if myrocks_kernel_subject else 'g10_bucket'
-                append_plan_item(plan[target_bucket], {
+                append_bucket_item(target_bucket, {
                     'info': info,
                     'files': list(g10_part),
                     'subject': subj,
@@ -1330,10 +1357,10 @@ def plan_commits(commits, base_hash, removed_paths):
                     'source_pos': idx,
                     'source_group': source_group,
                     'original_subject': original_subject,
-                }, result_file_last_item)
+                })
         elif g10_part:
             # No g2/g3/g4; just emit g10.
-            append_plan_item(plan['g10_bucket'], {
+            append_bucket_item('g10_bucket', {
                 'info': info,
                 'files': list(g10_part),
                 'subject': info['subject'],
@@ -1341,7 +1368,7 @@ def plan_commits(commits, base_hash, removed_paths):
                 'source_hash': ch,
                 'source_pos': idx,
                 'source_group': source_group,
-            }, result_file_last_item)
+            })
 
     return plan
 

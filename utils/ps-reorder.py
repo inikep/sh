@@ -1104,15 +1104,64 @@ def plan_commits(commits, base_hash, removed_paths):
 
         source_group_bucket = source_group_bucket_name(source_group)
         if source_group_bucket is not None:
-            append_bucket_item(source_group_bucket, {
-                'info': info,
-                'files': list(files),
-                'subject': info['subject'],
-                'body_rest': info['body_rest'],
-                'source_hash': ch,
-                'source_pos': idx,
-                'source_group': source_group,
-            })
+            # Split g1 paths into the G1 squash so its INPUT-final state is
+            # not clobbered when this preserved group's whole-commit replay
+            # emits later.
+            g1_part, files = split_out_g1_files(files)
+            for cat, fl in g1_part.items():
+                add_g1_files_to_plan(plan, cat, fl, info, idx)
+
+            # For preserved groups that emit AFTER a dedicated bucket (g5+
+            # follows g2/g3/g4), peel off any g2/g3/g4 paths so the dedicated
+            # bucket's source-ordered last writer remains correct.
+            split_dedicated = []
+            if source_group >= 5:
+                for grp in ('g2', 'g3', 'g4'):
+                    grp_part, files = split_out_group_files(files, grp)
+                    if grp_part:
+                        split_dedicated.append((grp, grp_part))
+
+            preserved_subject = info['subject']
+            preserved_original_subject = None
+            if any(grp == 'g4' for grp, _ in split_dedicated) and files:
+                preserved_subject, preserved_original_subject = (
+                    truncate_with_suffix_and_original(
+                        info['subject'], ' [non-MyRocks part]'))
+
+            for grp, grp_part in split_dedicated:
+                subj = info['subject']
+                original_subject = None
+                if grp == 'g4' and files:
+                    subj, original_subject = (
+                        truncate_with_suffix_and_original(
+                            info['subject'], ' [MyRocks part]'))
+                append_bucket_item(f'{grp}_bucket', {
+                    'info': info,
+                    'files': list(grp_part),
+                    'subject': subj,
+                    'body_rest': info['body_rest'],
+                    'source_hash': ch,
+                    'source_pos': idx,
+                    'source_group': source_group,
+                    'original_subject': original_subject,
+                })
+
+            if files:
+                append_bucket_item(source_group_bucket, {
+                    'info': info,
+                    'files': list(files),
+                    'subject': preserved_subject,
+                    'body_rest': info['body_rest'],
+                    'source_hash': ch,
+                    'source_pos': idx,
+                    'source_group': source_group,
+                    'original_subject': preserved_original_subject,
+                })
+            elif g1_part or split_dedicated:
+                record_removed_commit(
+                    plan, info,
+                    f"all paths from source group {source_group} routed to "
+                    "g1 squashes and/or earlier dedicated buckets")
             continue
 
         g1_part, non_g1_files = split_out_g1_files(files)
@@ -2242,6 +2291,17 @@ def build_output_branch(args, input_hash, base_hash, plan):
     return stats
 
 
+def emit_final_summary_marker(in_count, out_count, out_ins, out_del):
+    """Append an empty marker commit summarising the input/output sizes."""
+    subject = (f"=== {in_count} => {out_count} commits; "
+               f"total +{out_ins}/-{out_del} ===")
+    env = os.environ.copy()
+    for k in ('GIT_AUTHOR_DATE', 'GIT_COMMITTER_DATE'):
+        env.pop(k, None)
+    run_git(['commit', '--allow-empty', '-m', subject], env=env)
+    log_output_commit_stats(git_rev_parse('HEAD'))
+
+
 # ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
@@ -2392,6 +2452,8 @@ def log_terminal_summary(args, input_hash, base_hash, plan, stats):
                                   label='INPUT_BRANCH')
     out_ins, out_del = scan_commits(base_hash, args.output_branch,
                                     label='OUTPUT_BRANCH')
+
+    emit_final_summary_marker(in_count, out_count, out_ins, out_del)
 
     diff_stat = run_git(['diff', '--stat', input_hash, args.output_branch],
                         check=False).stdout.strip()

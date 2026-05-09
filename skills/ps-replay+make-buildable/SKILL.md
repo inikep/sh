@@ -16,7 +16,7 @@ The task is complete only when **all** of the following hold simultaneously:
 1. `$OUTPUT_BRANCH` is rooted at `$DESTINATION_BASE_BRANCH`, e.g. `mysql-5.7.9`.
 2. Every commit from `$BASE_BRANCH..$TIP_BRANCH` has been cherry-picked one at a time onto that destination base, **without** consulting any out-of-session source for prior decisions, cascade regions, or approvals.
 3. Empty marker commits whose subject begins with the literal prefix `=== MARKER:` are preserved as empty commits; other empty cherry-picks are skipped.
-4. The first build runs **exactly** at the source-list position of `=== MARKER: GROUP 7 — Remaining ===`, before that empty marker commit is preserved. Every build-required commit after that marker has its own successful build record at that commit's resulting SHA before the next build-required commit is applied.
+4. The first build runs **exactly** at the source-list position of `=== MARKER: GROUP 7 — Upstream bug fixes ===`, before that empty marker commit is preserved. Every build-required commit after that marker has its own successful build record at that commit's resulting SHA before the next build-required commit is applied.
 5. The replay reaches a null diff to `$REFERENCE_BRANCH` through path/hunk-level reconciliation commits. The null-diff tree is then final-build verified. The null-diff reconciliation commit and the final build are **never** a substitute build-of-record for any skipped post-Group-7 required build.
 6. `$REPORT_FILE` records the commits, preserved empty marker commits, skipped empty commits, conflicts, build fixes, reordering, the pre-flight readback, and the final parity result, including an explicit "violations encountered: none" attestation if no violations occurred.
 
@@ -70,7 +70,7 @@ There are no other forms of approval. A null diff achieved by snapping is a rule
 
 ### HP-2. Required post-Group-7 builds must not be skipped.
 
-After the `=== MARKER: GROUP 7 — Remaining ===` checkpoint, every source/plugin/build-system commit must have its own successful build at that commit's resulting SHA before the next build-required commit is applied.
+After the `=== MARKER: GROUP 7 — Upstream bug fixes ===` checkpoint, every source/plugin/build-system commit must have its own successful build at that commit's resulting SHA before the next build-required commit is applied.
 
 The following are forbidden:
 
@@ -111,6 +111,21 @@ The mandatory rules in this skill override all helper-script behavior. If a help
 
 These skills are excluded from this workflow.
 
+### HP-7. Subject-based commit classification is forbidden.
+
+Do not branch behavior on a source commit's subject line. The following patterns and any equivalent are forbidden as a basis for changing how a commit is processed:
+
+- Treating commits whose subject begins with `[reconciliation]`, `[compilation]`, or any other bracketed tag as a class that gets skipped, bulk-reset, auto-resolved against HEAD, or otherwise processed differently from a normal cherry-pick.
+- Treating commits whose subject contains phrases like `Percona Server 5.7 port`, `Fixes for the Percona Server 5.7 port`, `port fixes`, `align tree with`, or any equivalent porter-fix phrasing as a class that gets bulk source-file resets, kept-tests-only commits, or auto-skips.
+- Encoding any `is_porter_fix`, `is_reconciliation`, `is_*_commit` predicate (or equivalent regex/case statement) in helper scripts, driver loops, or inline shell that varies cherry-pick, conflict resolution, or commit emission logic by subject.
+- Pre-classifying upcoming source-list commits by reading their subjects ahead of time and deciding "this batch is reconciliation-style, I'll handle it differently."
+
+The only subject-based syntactic check this skill performs is the marker preservation rule (HP-implicit, see §4): a source commit subject whose first non-whitespace characters match the literal prefix `=== MARKER:` is preserved as an empty commit. No other subject-derived branching is permitted.
+
+**Why:** Subject lines are metadata, not authority. A commit titled `[reconciliation]` may still carry source hunks that are correct on the destination base, and a commit titled `Percona Server 5.7 port fixes` may carry a fold this run actually needs. Bulk-resetting source modifications to HEAD on a per-commit basis bypasses hunk-level resolution and is functionally a whole-file-from-HEAD replacement, which has the same coarse-grained-substitution failure mode that HP-1 forbids against `$REFERENCE_BRANCH`. The right granularity is always the conflict region.
+
+**How to apply:** Resolve every commit's conflicts at the hunk level using `$REFERENCE_BRANCH` for guidance, regardless of subject. If after hunk-level resolution and the Fold/Defer/Align/Remove loop a commit still cannot be made buildable, that is a Stop Condition — stop and ask, do not introduce a "this kind of commit always gets reset" shortcut. If a class of commits genuinely doesn't apply to the destination base, that decision belongs to the engineer in the current conversation, named by SHA, not to the model classifying by subject.
+
 ---
 
 ## Pre-flight Contract
@@ -125,6 +140,7 @@ HP-3: I will not consult past conversations, memory, search-past-chats results, 
 HP-4: I will not add Co-Authored-By, Co-authored-by, Generated-By, Assisted-By, or any equivalent LLM/tool attribution trailer to any commit message.
 HP-5: I will not invoke helper-script modes that perform whole-file or whole-tree reference replacement. snap_* helpers are disabled.
 HP-6: I will not invoke percona_gca_sync_tdd or percona_conflict_resolution_tdd.
+HP-7: I will not branch behavior on a source commit's subject line. No is_porter_fix / is_reconciliation / "[reconciliation]" / "Percona Server 5.7 port" classification, no bulk source-file resets keyed off subject, no auto-skips by subject. The only subject-based check is the literal `=== MARKER:` marker preservation rule.
 STOP-DON'T-JUDGE: Where this skill says "if X is even arguably possible, stop and ask," I will stop and ask rather than apply judgment in my own favor.
 ASYMMETRIC ERRORS: Stopping unnecessarily is recoverable; the engineer will tell me to continue. Violating any HP rule invalidates the run regardless of the resulting tree state.
 === END PRE-FLIGHT READBACK ===
@@ -145,6 +161,7 @@ A run is **invalid** (must be discarded and restarted, not repaired) if any of t
 - An out-of-session source (HP-3) was consulted to determine approval, cascade regions, snap-eligibility, prior decisions, or commit ordering.
 - An LLM/tool attribution trailer (HP-4) was added to a commit and not amended out before the next commit was created.
 - A helper-script mode (HP-5) that performs whole-file or whole-tree reference replacement was invoked.
+- A subject-based commit classification (HP-7) was used to branch processing — bulk source-file resets, auto-skips, or any other per-commit behavior change keyed off the source commit's subject line (other than the literal `=== MARKER:` preservation rule).
 - The pre-flight readback was missing, paraphrased, or skipped.
 - A non-marker empty commit was created, or a marker commit's empty preservation was skipped.
 - The Group 7 marker checkpoint build was skipped, or `[compilation]` fix commits were committed after the marker rather than before it.
@@ -174,10 +191,10 @@ The Hard Prohibitions above are the highest-priority rules. The rules below are 
 5. When a commit does not build in isolation **after the Group 7 marker**, classify the failure before editing. The classification must be one of: missing dependency to fold, premature hunk to defer, incoherent source-only addition to remove, or unresolved design issue. **If the failure does not clearly fit one of these four categories, stop and ask the engineer.** Do not invent a fifth category. Do not classify as "fold" what is actually whole-file replacement.
 6. First fold in the minimum necessary fixes from later commits on `$REFERENCE_BRANCH`. Defer hunks only when those reference-derived fixes touch more than the affected commit's own changed paths plus a small set of directly-required headers. **If isolating the cascade requires editing files that the current commit did not touch and that are not direct-dependency headers, stop and ask the engineer.** "Cascading and very large" is not a judgment call you make; it is a Stop Condition you trigger.
 7. Use commit bucketing and incremental builds to improve throughput, but never use bucketing to skip, defer, or batch a required post-Group-7 build (see HP-2).
-8. The exact marker subject `=== MARKER: GROUP 7 — Remaining ===` is the hard build boundary. Treat every non-marker source-range commit before that marker as part of the No-build bucket regardless of changed paths, including commits that touch `sql/`, `include/`, `storage/`, `cmake/`, generated headers, or any other source/build-system path. If the marker is missing from the source list, **stop and ask the engineer** what boundary to use; do not infer a fallback.
+8. The exact marker subject `=== MARKER: GROUP 7 — Upstream bug fixes ===` is the hard build boundary. Treat every non-marker source-range commit before that marker as part of the No-build bucket regardless of changed paths, including commits that touch `sql/`, `include/`, `storage/`, `cmake/`, generated headers, or any other source/build-system path. If the marker is missing from the source list, **stop and ask the engineer** what boundary to use; do not infer a fallback.
 9. If and only if `$BASE_BRANCH` is exactly `mysql-5.6.22`, apply the branch-specific initial-tree ordering rules in [mysql-5.6.22-initial-tree-ordering.md](mysql-5.6.22-initial-tree-ordering.md). For any other base branch, do not apply those rules even if the engineer mentions them.
 10. For source-range commits before the Group 7 marker, do not run per-commit builds. The first build must start exactly at the Group 7 marker checkpoint, before the marker commit itself is created. For source-range commits after the Group 7 marker, build-verify every completed source/plugin/build-system commit at that commit's resulting SHA before applying the next build-required commit. Only the destination base commit, pre-Group-7 source-range commits, and empty marker commits are exempt.
-11. If the first build run at the Group 7 marker checkpoint fails with compilation issues, apply the minimal fixes in one or more new commits **before** preserving the `=== MARKER: GROUP 7 — Remaining ===` marker itself. Each fix commit subject must start with the literal prefix `[compilation]`, then rebuild before preserving the marker and proceeding. The marker commit, when preserved, must be authored after all `[compilation]` fix commits — verify this with `git log --oneline` before continuing.
+11. If the first build run at the Group 7 marker checkpoint fails with compilation issues, apply the minimal fixes in one or more new commits **before** preserving the `=== MARKER: GROUP 7 — Upstream bug fixes ===` marker itself. Each fix commit subject must start with the literal prefix `[compilation]`, then rebuild before preserving the marker and proceeding. The marker commit, when preserved, must be authored after all `[compilation]` fix commits — verify this with `git log --oneline` before continuing.
 12. Never carry a known non-buildable build-required commit forward (see HP-2). If the current build-required commit cannot be made buildable with at most three minimum-fix attempts, stop and ask.
 13. Do not rely on a later merge, final source commit, reconciliation commit, or final build to make earlier unbuildable commits coherent or to replace missing required post-Group-7 build evidence.
 14. Preserve empty marker commits whose subject starts with `=== MARKER:`. Use `git cherry-pick --allow-empty <sha>` when possible; if Git reports a marker cherry-pick as empty, create the marker with `git commit --allow-empty -C <sha>` from the cherry-pick state. Preserve the original marker subject/body and record the new SHA. Do not build after an empty marker because it changes no tree content. **Detection of "marker" is syntactic**: the source commit subject's first non-whitespace characters must match the literal prefix `=== MARKER:`. If the subject merely contains the word "marker" without that exact prefix, it is not a marker.
@@ -203,6 +220,7 @@ CC=gcc-9 CXX=g++-9 cmake .. \
   -DDOWNLOAD_BOOST=1 \
   -DWITH_BOOST=/tmp/boost \
   -DWITHOUT_TOKUDB=1 \
+  -DWITH_ROCKSDB=OFF \
   -DENABLE_DOWNLOADS=1 \
   -DWITH_READLINE=system
 make -j$(( $(nproc) * 3 / 4 ))
@@ -231,7 +249,7 @@ Use `ccache` through CMake compiler launchers, not by replacing `CC` or `CXX`; t
    git rev-list --reverse $BASE_BRANCH..$TIP_BRANCH
    ```
 
-7. Inspect the ordered source list subjects and verify the exact marker `=== MARKER: GROUP 7 — Remaining ===` exists. Record its 1-based source index as the Group 7 boundary. **If it is missing, stop and ask the engineer.** Do not infer a fallback boundary; do not select a "nearby" marker; do not proceed without one.
+7. Inspect the ordered source list subjects and verify the exact marker `=== MARKER: GROUP 7 — Upstream bug fixes ===` exists. Record its 1-based source index as the Group 7 boundary. **If it is missing, stop and ask the engineer.** Do not infer a fallback boundary; do not select a "nearby" marker; do not proceed without one.
 8. If `$BASE_BRANCH` is exactly `mysql-5.6.22`, read [mysql-5.6.22-initial-tree-ordering.md](mysql-5.6.22-initial-tree-ordering.md) and identify source-list commits whose subjects start with `Initial Percona Server 5.6.22 tree`. If `$BASE_BRANCH` is not exactly `mysql-5.6.22`, do not apply those rules even if a comment or memory suggests they would help.
 9. Create `$OUTPUT_BRANCH` from `$DESTINATION_BASE_BRANCH`.
 10. Start a deferred-hunks ledger for cascade-causing changes that must be applied later with their dependent commit.
@@ -256,7 +274,7 @@ Bucket each commit before applying it. Bucketing is a syntactic operation, not a
 
 1. **Empty-marker bucket**: source commit subject's first non-whitespace characters match the literal prefix `=== MARKER:`. Always preserve as empty commit, regardless of position relative to Group 7. Do not build after.
 2. **Forced pre-Group-7 no-build bucket**: source commit's 1-based index is less than the Group 7 marker's index, AND it is not itself the Group 7 marker, AND it is not in the Empty-marker bucket. Apply in chronological batches without running builds. This bucket overrides any path-based classification.
-3. **Boundary-build checkpoint**: source commit's subject is exactly `=== MARKER: GROUP 7 — Remaining ===`. Run the first build before preserving the marker as an empty commit. Create any required `[compilation]` fix commits before the marker itself.
+3. **Boundary-build checkpoint**: source commit's subject is exactly `=== MARKER: GROUP 7 — Upstream bug fixes ===`. Run the first build before preserving the marker as an empty commit. Create any required `[compilation]` fix commits before the marker itself.
 4. **Path-classified buckets** (post-Group-7 only): for non-marker commits after Group 7, run `git diff-tree --no-commit-id --name-only -r <sha>` and classify by changed paths:
    - **Path-classified no-build bucket**: only if every changed path matches `^(docs/|build-ps/|man/|mysql-test/|.*\.result$|debian/|rpm/|packaging/|.*\.spec$|scripts/(?!.*\.cmake))`. Apply in small chronological batches; run one incremental build at each batch boundary.
    - **Plugin-only bucket**: every changed path matches `^plugin/[^/]+/`. Apply singly and build immediately at the resulting SHA.
@@ -361,12 +379,12 @@ For each post-Group-7 build failure:
    **If the failure does not clearly map to one of Fold/Defer/Align/Remove, choose Stop.** Do not invent a fifth action. Do not classify a whole-file replacement as "Fold" or "Align hunks."
 
 5. After at most three Fold/Defer/Align/Remove attempts on the same commit, if the build is still failing, choose Stop. Do not continue iterating; the iteration limit exists to prevent unbounded reasoning toward forbidden actions.
-6. Rewrite only the current replayed commit after the fix. **Exception**: for the first Group 7 marker checkpoint build, compilation fixes must be committed as new `[compilation]` commit(s) immediately before preserving the `=== MARKER: GROUP 7 — Remaining ===` marker itself. Do not alter already build-verified earlier commits.
+6. Rewrite only the current replayed commit after the fix. **Exception**: for the first Group 7 marker checkpoint build, compilation fixes must be committed as new `[compilation]` commit(s) immediately before preserving the `=== MARKER: GROUP 7 — Upstream bug fixes ===` marker itself. Do not alter already build-verified earlier commits.
 7. Rebuild and verify the commit passes before applying the next build-required commit.
 
 ### 7. Restore Buildability
 
-When replay reaches the exact `=== MARKER: GROUP 7 — Remaining ===` source-list commit, run the first build in the configured `$BUILD_DIR` **before** preserving that marker as an empty commit. After each completed source/plugin/build-system cherry-pick after Group 7, run an incremental build at that commit's resulting SHA before applying the next build-required commit. After each path-classified no-build batch after Group 7, run one incremental build at the batch boundary.
+When replay reaches the exact `=== MARKER: GROUP 7 — Upstream bug fixes ===` source-list commit, run the first build in the configured `$BUILD_DIR` **before** preserving that marker as an empty commit. After each completed source/plugin/build-system cherry-pick after Group 7, run an incremental build at that commit's resulting SHA before applying the next build-required commit. After each path-classified no-build batch after Group 7, run one incremental build at the batch boundary.
 
 Do not run builds for any source-range commit before the Group 7 marker checkpoint. Use a clean build only for the first verification, after CMake/cache breakage, after build-system/generated-header changes that invalidate incremental trust, or for final confidence when time permits.
 
@@ -375,7 +393,7 @@ Before starting the Group 7 marker checkpoint build or any later build-verified 
 If the Group 7 checkpoint build fails:
 
 1. Follow the Build-Driven Fixes loop in §6.
-2. Apply the minimal fixes in the working tree, then create one or more new commits whose subjects start with the literal prefix `[compilation]`. These fix commits must be committed **before** the `=== MARKER: GROUP 7 — Remaining ===` marker itself. Verify the order with `git log --oneline -- $LAST_GOOD..HEAD` after preservation.
+2. Apply the minimal fixes in the working tree, then create one or more new commits whose subjects start with the literal prefix `[compilation]`. These fix commits must be committed **before** the `=== MARKER: GROUP 7 — Upstream bug fixes ===` marker itself. Verify the order with `git log --oneline -- $LAST_GOOD..HEAD` after preservation.
 3. Rebuild until the boundary passes, then preserve the marker as an empty commit.
 
 If a post-Group-7 build fails:
@@ -408,7 +426,7 @@ Helper-script location: `/home/przemek/.agents/skills/ps-replay+make-buildable/s
 The following invariants apply whether using scripts or hand-written shell loops:
 
 1. Generate the source list with `git rev-list --reverse $BASE_BRANCH..$TIP_BRANCH`.
-2. Locate the exact `=== MARKER: GROUP 7 — Remaining ===` subject in the source list before classification. Stop if missing.
+2. Locate the exact `=== MARKER: GROUP 7 — Upstream bug fixes ===` subject in the source list before classification. Stop if missing.
 3. Force every non-marker commit before the Group 7 marker into the no-build bucket before considering changed paths.
 4. Treat the exact Group 7 marker as the first-build checkpoint: run the first build before preserving the marker, and create any required `[compilation]` fix commits before the marker itself.
 5. Classify non-marker commits after Group 7 by touched paths.
@@ -427,6 +445,8 @@ The following invariants apply whether using scripts or hand-written shell loops
 - `ps_replay_errors.py`: extract likely root-cause compiler/linker/CMake/ABI diagnostics from large build logs.
 - `ps_replay_scan_range.py`: scan `$BASE..$REFERENCE` (and `$BASE..$TIP` when they differ) for special commits — snap commits, markers, squashes — and surface commits in reference but not in tip. Run during Prepare so reference-only commits cannot be silently missed.
 - `ps_replay_conflict_triage.py`: after a stop, classify conflicted files as `auto-match`, `auto-mismatch`, or `unresolved`. `--auto-stage` stages only auto-match files; the rest require manual hunk-level work.
+- `ps_replay_resolve_hunks.py`: hunk-level conflict-region resolver. For each `<<<<<<< / ||||||| / ======= / >>>>>>>` block in the listed files (or `--all` for every markered file), score each side's distinct non-trivial lines against the corresponding `$REFERENCE_BRANCH` file and pick the higher-overlap side; HEAD-tiebreak. Replaces only the conflict block; merged context outside markers is untouched. Exit 1 if any region was left unresolved (neither side overlaps reference); those need manual hunk-level work using `git show $REFERENCE:<path>` for inspection only. HP-1 compliant: never copies whole files. Treat the result as best-effort: if the chosen side later breaks the build, fix via Fold/Defer/Align/Remove — do not loop the resolver with looser thresholds.
+- `ps_replay_auto_loop.sh`: replay driver that cherry-picks a 1-based source-list range, buckets each commit, auto-resolves DU files absent on REFERENCE, runs `ps_replay_resolve_hunks.py` against any markered files, skips empty cherry-picks (rule 15), and runs the per-commit build for source/plugin commits (rule 10). Stops on unresolved markers, remaining unmerged files, or build failures with the log path. Does **not** auto-fix build failures (those require Fold/Defer/Align/Remove judgment per rule 6). Configured via env vars `PS_REPLAY_SRC_LIST`, `PS_REPLAY_LOG_DIR`, `PS_REPLAY_BUILD_DIR`, `PS_REPLAY_WORKTREE` (default cwd), `PS_REPLAY_REFERENCE` (default `ps-5.7.9-gca-start`), `PS_REPLAY_SCRIPTS` (default the script's own directory). Use this for the bulk of the post-Group-7 replay; switch back to direct git when a stop demands per-commit reasoning.
 - `ps_replay_residual_audit.py`: classify hunks in `git diff $OUTPUT $REFERENCE` as whitespace / trivial / substantive during Final Parity.
 - `ps_replay_least_conflict.py`: only for `$BASE_BRANCH=mysql-5.6.22`, ranks remaining `Initial Percona Server 5.6.22 tree` candidates by trial-applying each in a temporary worktree. Does not apply for real; use to choose the next candidate, then cherry-pick manually under the main rules.
 
@@ -440,6 +460,30 @@ Example diagnosis:
 SKILL_SCRIPT_DIR=/home/przemek/.agents/skills/ps-replay+make-buildable/scripts
 python3 "$SKILL_SCRIPT_DIR/ps_replay_errors.py" /tmp/ps-replay-${OUTPUT_BRANCH}-logs/build-58-812714fe16da-ccache.log
 python3 "$SKILL_SCRIPT_DIR/ps_replay_build.py" --worktree "$WORKTREE" --build-dir "$BUILD_DIR" --log /tmp/rebuild.log --incremental
+```
+
+Example post-Group-7 driver loop:
+
+```sh
+SKILL_SCRIPT_DIR=/home/przemek/.agents/skills/ps-replay+make-buildable/scripts
+export PS_REPLAY_SRC_LIST="$LOG_DIR/source-list.txt"
+export PS_REPLAY_LOG_DIR="$LOG_DIR"
+export PS_REPLAY_BUILD_DIR="$BUILD_DIR"
+export PS_REPLAY_WORKTREE="$WORKTREE"
+export PS_REPLAY_REFERENCE="$REFERENCE_BRANCH"
+export PS_REPLAY_SCRIPTS="$SKILL_SCRIPT_DIR"
+bash "$SKILL_SCRIPT_DIR/ps_replay_auto_loop.sh" 29 95
+# Stops on the first conflict that needs hand-resolution or the first build
+# failure. Inspect, fix per Fold/Defer/Align/Remove, amend, re-run with
+# updated START.
+```
+
+Example hunk resolver invocation (after a stop on conflicts):
+
+```sh
+python3 "$SKILL_SCRIPT_DIR/ps_replay_resolve_hunks.py" "$REFERENCE_BRANCH" --all
+# Then inspect remaining files (those reported "left unresolved") with
+# `git show $REFERENCE_BRANCH:<path>` and edit the conflict region by hand.
 ```
 
 ### 10. Final Parity
@@ -546,6 +590,7 @@ Stop and ask the engineer whenever any of the following is **even arguably** the
 - A build-driven fix does not clearly map to Fold, Defer, Align, or Remove.
 - The final null-diff tree fails the required build.
 - You catch yourself reasoning toward any HP-rule violation.
+- You catch yourself reasoning toward "this commit's subject indicates X, so I'll handle it differently" — the only subject-based check is the literal `=== MARKER:` preservation rule (HP-7).
 - The pre-flight readback was not produced cleanly.
 
 When stopping, return `$OUTPUT_BRANCH` to `LAST_GOOD` (aborting any in-progress cherry-pick, resetting any failing commit), preserve diagnostics in `$REPORT_FILE`, and describe to the engineer:

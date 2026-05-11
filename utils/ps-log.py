@@ -34,6 +34,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import collections
 import concurrent.futures
 import os
 import re
@@ -107,7 +108,7 @@ def list_commits_with_subjects(log_args: list[str], reverse: bool,
                                paths: list[str] | None
                                ) -> list[tuple[str, str]]:
     """One cheap `git log` call returning (sha, subject) pairs."""
-    cmd = ["log", "--no-merges", "--format=%H%x09%s"]
+    cmd = ["log", "--format=%H%x09%s"]
     if limit is not None:
         cmd.append(f"-n{limit}")
     if reverse:
@@ -127,10 +128,129 @@ def list_commits_with_subjects(log_args: list[str], reverse: bool,
     return items
 
 
+def find_tip_ref(log_args: list[str]) -> str | None:
+    """Return the tip ref from log_args, or None if none can be determined.
+    Handles 'tip', 'base..tip', and excluded refs ('^X'). For symmetric
+    differences ('A...B') we return None since there's no single tip."""
+    pre = log_args[:log_args.index("--")] if "--" in log_args else log_args
+    positional = [a for a in pre if not a.startswith("-")]
+    included = [a for a in positional if not a.startswith("^")]
+    if not included:
+        return None
+    last = included[-1]
+    if "..." in last:
+        return None
+    if ".." in last:
+        _, _, tip = last.partition("..")
+        return tip or None
+    return last
+
+
+def build_commit_index(log_args: list[str]
+                       ) -> dict[str, tuple[list[str], str]]:
+    """Return {sha: (parents, subject)} for every commit reachable under
+    the user's log_args (range, exclude refs, etc.)."""
+    r = run_git(["log", "--format=%H %P%n%s", *log_args])
+    lines = r.stdout.splitlines()
+    idx: dict[str, tuple[list[str], str]] = {}
+    i = 0
+    while i + 1 < len(lines):
+        parts = lines[i].split()
+        if parts:
+            idx[parts[0]] = (parts[1:], lines[i + 1])
+        i += 2
+    return idx
+
+
+def compute_depths(idx: dict[str, tuple[list[str], str]],
+                   tip_sha: str) -> dict[str, int]:
+    """Minimum first-parent depth per commit (BFS by layer).
+    Layer 0 is tip's first-parent chain; each merge enqueues its
+    second-parent side one layer deeper. A commit's depth is the
+    lowest layer that reaches it, so main-chain commits stay at 0
+    even when a side branch's first-parent chain runs into them."""
+    depth: dict[str, int] = {}
+    pending: collections.deque[tuple[str, int]] = collections.deque()
+    pending.append((tip_sha, 0))
+    while pending:
+        start, d = pending.popleft()
+        cur = start
+        while cur in idx and cur not in depth:
+            depth[cur] = d
+            parents = idx[cur][0]
+            if len(parents) >= 2:
+                pending.append((parents[1], d + 1))
+            cur = parents[0] if parents else ""
+    return depth
+
+
+def walk_first_parent_depth(idx: dict[str, tuple[list[str], str]],
+                            tip_sha: str
+                            ) -> list[tuple[str, str, int]]:
+    """Emit (sha, subject, depth) in DFS first-parent order, newest-first,
+    using precomputed minimum depths so a side walk stops at any commit
+    that belongs to a shallower layer."""
+    depth = compute_depths(idx, tip_sha)
+    rows: list[tuple[str, str, int]] = []
+    seen: set[str] = set()
+
+    def walk(start: str, d: int) -> None:
+        cur = start
+        while (cur in idx and cur not in seen
+               and depth.get(cur) == d):
+            seen.add(cur)
+            parents, subj = idx[cur]
+            rows.append((cur, subj, d))
+            if len(parents) >= 2:
+                walk(parents[1], d + 1)
+            cur = parents[0] if parents else ""
+
+    walk(tip_sha, 0)
+    return rows
+
+
+def list_commits_with_depth(log_args: list[str], reverse: bool,
+                            limit: int | None,
+                            paths: list[str] | None
+                            ) -> list[tuple[str, str, int]]:
+    """Return (sha, subject, depth). Uses recursive first-parent expansion when
+    log_args is a single 'base..tip' range without --first-parent; otherwise
+    falls back to a flat git log at depth 0."""
+    user_set = set(log_args)
+    tip_ref = (find_tip_ref(log_args)
+               if "--first-parent" not in user_set else None)
+
+    if tip_ref is None:
+        flat = list_commits_with_subjects(log_args, reverse, limit, paths)
+        return [(h, s, 0) for h, s in flat]
+
+    try:
+        tip_sha = run_git(["rev-parse", "--verify",
+                           f"{tip_ref}^{{commit}}"]).stdout.strip()
+    except subprocess.CalledProcessError:
+        flat = list_commits_with_subjects(log_args, reverse, limit, paths)
+        return [(h, s, 0) for h, s in flat]
+
+    idx = build_commit_index(log_args)
+    if tip_sha not in idx:
+        flat = list_commits_with_subjects(log_args, reverse, limit, paths)
+        return [(h, s, 0) for h, s in flat]
+
+    rows = walk_first_parent_depth(idx, tip_sha)
+
+    if "--no-merges" in user_set:
+        rows = [(h, s, d) for h, s, d in rows if len(idx[h][0]) < 2]
+    if reverse:
+        rows.reverse()
+    if limit is not None:
+        rows = rows[:limit]
+    return rows
+
+
 def shortstat_for(sha: str,
                   paths: list[str] | None) -> tuple[int, int, int]:
-    cmd = ["git", "-c", "diff.renames=false", "show", "--no-patch",
-           "--format=", "--shortstat", sha]
+    cmd = ["git", "-c", "diff.renames=false", "show", "-m", "--first-parent",
+           "--no-patch", "--format=", "--shortstat", sha]
     if paths:
         cmd.append("--")
         cmd.extend(paths)
@@ -151,17 +271,18 @@ def shortstat_for(sha: str,
 
 def fetch_rows(log_args: list[str], reverse: bool, limit: int | None,
                paths: list[str] | None, jobs: int
-               ) -> list[tuple[str, str, int, int, int]]:
-    items = list_commits_with_subjects(log_args, reverse, limit, paths)
+               ) -> list[tuple[str, str, int, int, int, int]]:
+    items = list_commits_with_depth(log_args, reverse, limit, paths)
     if not items:
         return []
     paths_t = tuple(paths) if paths else None
 
-    def one(item: tuple[str, str]) -> tuple[str, str, int, int, int]:
-        h, s = item
+    def one(item: tuple[str, str, int]
+            ) -> tuple[str, str, int, int, int, int]:
+        h, s, d = item
         files, ins, dele = shortstat_for(
             h, list(paths_t) if paths_t else None)
-        return (h, s, files, ins, dele)
+        return (h, s, files, ins, dele, d)
 
     if jobs <= 1 or len(items) == 1:
         return [one(it) for it in items]
@@ -179,11 +300,12 @@ def compact_count(n: int) -> str:
 
 
 def format_stats_line(files: int, ins: int, dele: int,
-                      ch: str, subject: str) -> str:
+                      ch: str, subject: str, depth: int = 0) -> str:
     files_field = f"{compact_count(files)}f".ljust(OUTPUT_STAT_FILES_WIDTH)
     ins_field = f"{compact_count(ins)}+".rjust(OUTPUT_STAT_COUNT_WIDTH)
     del_field = f"{compact_count(dele)}-".rjust(OUTPUT_STAT_COUNT_WIDTH)
-    line = f"{files_field}{ins_field} {del_field} {ch[:12]} {subject}"
+    indent = "*" * max(depth, 0)
+    line = f"{files_field}{ins_field} {del_field} {indent}{ch[:12]} {subject}"
     return line[:OUTPUT_STAT_LINE_LEN]
 
 
@@ -200,15 +322,16 @@ def colorize_stats_line(line: str, bold_subject: bool,
     if not STYLE.enabled:
         return line
     m = re.match(r"^(\S+)(\s+)(\S+)(\s+)(\S+)(\s+)"
-                 r"(\S{12})(\s?)(.*)$", line)
+                 r"(\**)([0-9a-f-]{12})(\s?)(.*)$", line)
     if not m:
         return line
     return (
         m.group(1) + m.group(2) +
         STYLE.green(m.group(3)) + m.group(4) +
         STYLE.red(m.group(5)) + m.group(6) +
-        STYLE.yellow(m.group(7)) + m.group(8) +
-        subject_style(m.group(9), bold_subject, red_subject))
+        m.group(7) +
+        STYLE.yellow(m.group(8)) + m.group(9) +
+        subject_style(m.group(10), bold_subject, red_subject))
 
 
 def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
@@ -279,10 +402,10 @@ def render_section(label: str | None, log_args: list[str],
         rows = rows[:max(top, 0)]
 
     total_files = total_ins = total_dele = 0
-    for ch, subject, files, ins, dele in rows:
-        line = format_stats_line(files, ins, dele, ch, subject)
+    for ch, subject, files, ins, dele, depth in rows:
+        line = format_stats_line(files, ins, dele, ch, subject, depth)
         bold = (ins + dele) <= 8
-        red = dele > ins
+        red = dele > ins and (ins + dele) >= 100
         print(colorize_stats_line(line, bold, red), flush=True)
         total_files += files
         total_ins += ins

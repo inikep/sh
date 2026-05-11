@@ -21,6 +21,9 @@ Rules:
     linearized before this script sees it.
   * side-branch deltas are replayed onto the current emitted parent rather than
     preserving full side-branch trees.
+  * residual drift after replaying a side branch is folded into the latest
+    emitted commit inside that side branch that touched the path; unowned
+    residual paths fall back to an explicit merge alignment commit.
 """
 from __future__ import annotations
 
@@ -41,7 +44,18 @@ MERGE_BRANCH_SUBJECT_RE = re.compile(
 )
 BUG_ID_RE = re.compile(r"\bbug[-_/ ]*#?(\d{4,})\b", re.IGNORECASE)
 SHORT_HASH_RE = re.compile(r"\b[0-9a-f]{12,40}\b")
-ACTION_RE = re.compile(r"^(emit|squash|replay|skip null|skip empty replay|done:|main|onto)\b")
+ACTION_RE = re.compile(r"^(emit|squash|replay|skip null|skip empty replay|done:|main|onto|upstream|=)(?=\s|\b)")
+UPSTREAM_MYSQL_TAG_NAME_RE = re.compile(r"(?i)^mysql-(\d+)\.(\d+)\.(\d+)$")
+
+LOG_LINE_WIDTH = 104
+
+
+def format_commit_line(marker: str, sha: str, subject: str, depth: int = 0) -> str:
+    indent = "  " * depth
+    body = f"{indent}{marker}{sha[:12]} {subject}".rstrip()
+    if len(body) > LOG_LINE_WIDTH:
+        return body[: LOG_LINE_WIDTH - 1] + "…"
+    return body
 
 
 class FlattenError(RuntimeError):
@@ -100,11 +114,12 @@ def configure_style(mode: str) -> None:
 def colorize_log_message(message: str) -> str:
     if not STYLE.enabled or not message:
         return message
-    if message.startswith("align "):
+    stripped = message.lstrip()
+    if stripped.startswith("align "):
         return STYLE.red(message)
-    if message.startswith("ERROR:"):
+    if stripped.startswith("ERROR:"):
         return STYLE.red(message)
-    if message.startswith("skip "):
+    if stripped.startswith("skip "):
         return STYLE.dim(message)
     message = SHORT_HASH_RE.sub(lambda match: STYLE.yellow(match.group(0)), message)
     message = ACTION_RE.sub(lambda match: STYLE.cyan(match.group(0)), message)
@@ -143,6 +158,17 @@ class Stats:
     linearized_merge_metadata: int = 0
     base_alignments: int = 0
     merge_alignments: int = 0
+    merge_reconciled_paths: int = 0
+    upstream_import_merges: int = 0
+
+
+@dataclass
+class EmittedSideCommit:
+    source_meta: CommitMeta
+    emit_meta: CommitMeta
+    sha: str
+    tree: str
+    message: str
 
 
 def log(message: str) -> None:
@@ -233,7 +259,7 @@ def sanitize_ident(name: str, email: str) -> tuple[str, str]:
 def commit_tree(
     repo: str | Path,
     tree: str,
-    parent: str | None,
+    parent: str | list[str] | None,
     meta: CommitMeta,
     message: str | None = None,
 ) -> str:
@@ -248,13 +274,100 @@ def commit_tree(
         "GIT_COMMITTER_DATE": meta.committer_date,
     }
     args = ["commit-tree", tree]
-    if parent:
-        args.extend(["-p", parent])
+    parents = [parent] if isinstance(parent, str) else (parent or [])
+    for item in parents:
+        args.extend(["-p", item])
     args.extend(["-F", "-"])
     commit_message = meta.message if message is None else message
     if not commit_message.endswith("\n"):
         commit_message += "\n"
     return git(repo, *args, input_text=commit_message, env=env).stdout.strip()
+
+
+def dedupe_parents(parents: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for parent in parents:
+        if parent in seen:
+            continue
+        seen.add(parent)
+        result.append(parent)
+    return result
+
+
+def load_upstream_mysql_tags(repo: str | Path) -> list[tuple[tuple[int, int, int], str]]:
+    out = git_text(repo, "tag", "--list", "mysql-*")
+    tags: list[tuple[tuple[int, int, int], str]] = []
+    for tag in out.splitlines():
+        match = UPSTREAM_MYSQL_TAG_NAME_RE.match(tag)
+        if not match:
+            continue
+        tags.append((tuple(int(part) for part in match.groups()), tag))
+    tags.sort()
+    return tags
+
+
+def highest_reachable_upstream_tag(
+    repo: str | Path,
+    rev: str,
+    upstream_tags: list[tuple[tuple[int, int, int], str]],
+    cache: dict[str, tuple[tuple[int, int, int], str] | None],
+) -> tuple[tuple[int, int, int], str] | None:
+    if rev in cache:
+        return cache[rev]
+    merged = set(git_text(repo, "tag", "--merged", rev, "--list", "mysql-*").splitlines())
+    best = None
+    for version, tag in upstream_tags:
+        if tag in merged:
+            best = (version, tag)
+    cache[rev] = best
+    return best
+
+
+def advanced_upstream_tag(
+    repo: str | Path,
+    prev: str,
+    endpoint: str,
+    upstream_tags: list[tuple[tuple[int, int, int], str]],
+    cache: dict[str, tuple[tuple[int, int, int], str] | None],
+) -> tuple[tuple[int, int, int], str] | None:
+    if not upstream_tags:
+        return None
+    before = highest_reachable_upstream_tag(repo, prev, upstream_tags, cache)
+    after = highest_reachable_upstream_tag(repo, endpoint, upstream_tags, cache)
+    if after is None or after == before:
+        return None
+    if before is None:
+        return after
+    return after if after[0] > before[0] else None
+
+
+def upstream_import_tag(
+    repo: str | Path,
+    prev: str,
+    meta: CommitMeta,
+    upstream_tags: list[tuple[tuple[int, int, int], str]],
+    upstream_tag_cache: dict[str, tuple[tuple[int, int, int], str] | None],
+) -> tuple[tuple[int, int, int], str] | None:
+    if not meta.is_merge:
+        return None
+    return advanced_upstream_tag(repo, prev, meta.sha, upstream_tags, upstream_tag_cache)
+
+
+def emit_upstream_import_merge(
+    repo: str | Path,
+    meta: CommitMeta,
+    emitted_parent: str,
+    upstream_tag: str,
+    stats: Stats,
+) -> str:
+    upstream_parent = rev_parse(repo, upstream_tag)
+    parents = dedupe_parents([emitted_parent, upstream_parent])
+    new_sha = commit_tree(repo, meta.tree, parents, meta, meta.message)
+    stats.emitted += 1
+    stats.upstream_import_merges += 1
+    log(format_commit_line("upstream ", new_sha, f"{upstream_tag} {meta.subject}"))
+    return new_sha
 
 
 def first_parent_chain(repo: str | Path, base: str, tip: str) -> list[str]:
@@ -390,7 +503,6 @@ def emit_preserved(
     message = prefix_message_subject(source_message, effective_marker)
     new_sha = commit_tree(repo, meta.tree, parent, meta, message)
     stats.emitted += 1
-    log(f"emit {new_sha[:12]} from {meta.sha[:12]} {message.splitlines()[0] if message else ''}")
     return new_sha
 
 
@@ -420,6 +532,39 @@ def tree_entry(repo: str | Path, tree: str, path: str) -> tuple[str, str] | None
     meta, _ = out.rstrip("\n").split("\t", 1)
     mode, _kind, oid = meta.split()
     return mode, oid
+
+
+def diff_paths(repo: str | Path, left_tree: str, right_tree: str) -> list[str]:
+    out = git_text(repo, "diff", "--name-only", "--no-renames", left_tree, right_tree)
+    return [line for line in out.splitlines() if line]
+
+
+def touched_paths(repo: str | Path, meta: CommitMeta) -> set[str]:
+    if not meta.parents:
+        return set()
+    out = git_text(repo, "diff", "--name-only", "--no-renames", meta.parents[0], meta.sha)
+    return {line for line in out.splitlines() if line}
+
+
+def overlay_tree_paths(
+    repo: str | Path,
+    base_tree: str,
+    source_tree: str,
+    paths: list[str],
+) -> str:
+    if not paths:
+        return base_tree
+    with tempfile.TemporaryDirectory(prefix="ps-flatten-side-overlay-index-") as tmp:
+        env = {"GIT_INDEX_FILE": str(Path(tmp) / "index")}
+        git(repo, "read-tree", base_tree, env=env)
+        for path in sorted(set(paths)):
+            source = tree_entry(repo, source_tree, path)
+            if source is None:
+                git(repo, "update-index", "--force-remove", "--", path, env=env)
+                continue
+            mode, oid = source
+            git(repo, "update-index", "--cacheinfo", mode, oid, path, env=env)
+        return git(repo, "write-tree", env=env).stdout.strip()
 
 
 def resolve_merge_tree_conflicts(
@@ -499,19 +644,22 @@ def emit_replayed_delta(
     marker: str | None,
     metadata_meta: CommitMeta | None = None,
     expected_tree: str | None = None,
+    depth: int = 0,
 ) -> str:
     if not delta_meta.parents:
         raise FlattenError(f"cannot replay root commit as side delta: {delta_meta.sha}")
     metadata = metadata_meta or delta_meta
     message = prefix_message_subject(metadata.message, marker)
     tree = replay_delta_tree(repo, delta_meta.parents[0], delta_meta.sha, emitted_parent, expected_tree)
+    diag_indent = "  " * (depth + 1)
     if tree is None or tree == tree_of(repo, emitted_parent):
         stats.skipped_null += 1
-        log(f"skip empty replay {delta_meta.sha[:12]} {message.splitlines()[0] if message else ''}")
+        log(f"{diag_indent}skip empty replay")
         return emitted_parent
     new_sha = commit_tree(repo, tree, emitted_parent, metadata, message)
     stats.emitted += 1
-    log(f"replay {new_sha[:12]} from {delta_meta.sha[:12]} {message.splitlines()[0] if message else ''}")
+    subject = message.splitlines()[0] if message else ""
+    log(format_commit_line("= ", new_sha, subject, depth=depth))
     return new_sha
 
 
@@ -522,12 +670,16 @@ def emit_replayed_squash(
     stats: Stats,
     marker: str | None,
     expected_tree: str | None,
+    depth: int = 0,
 ) -> str:
     original = find_first_real_non_merge(repo, meta)
-    new_sha = emit_replayed_delta(repo, meta, parent, stats, marker, original, expected_tree)
+    new_sha = emit_replayed_delta(
+        repo, meta, parent, stats, marker, original, expected_tree, depth=depth
+    )
     if new_sha != parent:
         stats.squashed_merges += 1
-        log(f"  squash metadata from {original.sha[:12]}")
+        diag_indent = "  " * (depth + 1)
+        log(f"{diag_indent}squash metadata from {original.sha[:12]}")
     return new_sha
 
 
@@ -537,15 +689,12 @@ def emit_tree_alignment(
     emitted_parent: str,
     meta: CommitMeta,
     stats: Stats,
-    subject: str,
-    body: str,
     alignment_kind: str,
 ) -> str:
     if expected_tree == tree_of(repo, emitted_parent):
         return emitted_parent
 
-    message = f"{subject}\n\n{body}"
-    new_sha = commit_tree(repo, expected_tree, emitted_parent, meta, message)
+    new_sha = commit_tree(repo, expected_tree, emitted_parent, meta, meta.message)
     stats.emitted += 1
     if alignment_kind == "base":
         stats.base_alignments += 1
@@ -568,9 +717,6 @@ def emit_base_alignment(
         emitted_parent,
         base_meta,
         stats,
-        f"Align output tree with source base {base_meta.sha[:12]}",
-        "Synthetic commit created by ps-flatten-first-parent.py before replaying "
-        "the source range onto a different parent.",
         "base",
     )
 
@@ -587,12 +733,119 @@ def emit_merge_alignment(
         emitted_parent,
         merge_meta,
         stats,
-        f"Align output tree with merge {merge_meta.sha[:12]}",
-        "Synthetic commit created by ps-flatten-first-parent.py after expanding "
-        "a merge so cleanly-surviving destination-only hunks do not drift past "
-        "the source merge boundary.",
         "merge",
     )
+
+
+def last_side_toucher_by_path(
+    repo: str | Path,
+    side_emitted: list[EmittedSideCommit],
+    paths: list[str],
+) -> dict[str, int | None]:
+    remaining = set(paths)
+    result: dict[str, int | None] = {path: None for path in paths}
+    touched_cache: dict[str, set[str]] = {}
+    for index in range(len(side_emitted) - 1, -1, -1):
+        source_meta = side_emitted[index].source_meta
+        touched = touched_cache.setdefault(source_meta.sha, touched_paths(repo, source_meta))
+        matched = remaining & touched
+        for path in matched:
+            result[path] = index
+        remaining -= matched
+        if not remaining:
+            break
+    return result
+
+
+def rebuild_side_suffix(
+    repo: str | Path,
+    side_base_parent: str,
+    side_emitted: list[EmittedSideCommit],
+    adjusted_trees: list[str],
+    first_index: int,
+) -> str:
+    parent = side_base_parent if first_index == 0 else side_emitted[first_index - 1].sha
+    for index in range(first_index, len(side_emitted)):
+        emitted = side_emitted[index]
+        tree = adjusted_trees[index]
+        subject = emitted.message.splitlines()[0] if emitted.message else emitted.emit_meta.subject
+        if tree == tree_of(repo, parent):
+            log(format_commit_line("skip empty replay ", emitted.sha, f"{subject} after reconcile", depth=1))
+            continue
+        new_sha = commit_tree(repo, tree, parent, emitted.emit_meta, emitted.message)
+        side_emitted[index] = EmittedSideCommit(
+            emitted.source_meta,
+            emitted.emit_meta,
+            new_sha,
+            tree,
+            emitted.message,
+        )
+        parent = new_sha
+        log(format_commit_line("= ", new_sha, f"{subject} [reconciled]", depth=1))
+    return parent
+
+
+def reconcile_side_to_merge_tree(
+    repo: str | Path,
+    side_base_parent: str,
+    emitted_parent: str,
+    merge_meta: CommitMeta,
+    side_emitted: list[EmittedSideCommit],
+    stats: Stats,
+) -> str:
+    residual_paths = diff_paths(repo, tree_of(repo, emitted_parent), merge_meta.tree)
+    if not residual_paths:
+        return emitted_parent
+
+    log(f"align side drift {len(residual_paths)} path(s) to merge tree {merge_meta.sha[:12]}")
+    last_toucher = last_side_toucher_by_path(repo, side_emitted, residual_paths)
+    paths_by_index: dict[int, list[str]] = {}
+    fallback_paths: list[str] = []
+    for path in residual_paths:
+        index = last_toucher[path]
+        if index is None:
+            fallback_paths.append(path)
+            continue
+        paths_by_index.setdefault(index, []).append(path)
+
+    if paths_by_index:
+        adjusted_trees = [emitted.tree for emitted in side_emitted]
+        for index, paths in sorted(paths_by_index.items()):
+            for tree_index in range(index, len(adjusted_trees)):
+                adjusted_trees[tree_index] = overlay_tree_paths(
+                    repo,
+                    adjusted_trees[tree_index],
+                    merge_meta.tree,
+                    paths,
+                )
+            stats.merge_reconciled_paths += len(paths)
+            log(
+                f"    folded {len(paths)} path(s) into "
+                f"{side_emitted[index].source_meta.sha[:12]}"
+            )
+        emitted_parent = rebuild_side_suffix(
+            repo,
+            side_base_parent,
+            side_emitted,
+            adjusted_trees,
+            min(paths_by_index),
+        )
+
+    if fallback_paths:
+        log(
+            f"    {len(fallback_paths)} path(s) have no emitted owner in current side; "
+            "falling back to merge alignment"
+        )
+        return emit_merge_alignment(repo, merge_meta, emitted_parent, stats)
+
+    remaining = diff_paths(repo, tree_of(repo, emitted_parent), merge_meta.tree)
+    if remaining:
+        sample = "\n".join(f"  {path}" for path in remaining[:20])
+        raise FlattenError(
+            f"side reconciliation failed for {merge_meta.sha[:12]} "
+            f"({len(remaining)} path(s) still differ)\n{sample}"
+        )
+    return emitted_parent
 
 
 def flatten_side(
@@ -603,27 +856,60 @@ def flatten_side(
     stats: Stats,
     marker: str | None,
     expected_tree: str | None,
+    merge_meta: CommitMeta | None = None,
+    align_source_tree: bool = True,
 ) -> str:
     side_chain = first_parent_chain(repo, first_parent, second_parent)
     log(f"  side {first_parent[:12]}..{second_parent[:12]}: {len(side_chain)} first-parent commits")
+    side_base_parent = emitted_parent
+    side_emitted: list[EmittedSideCommit] = []
+    depth = 1
+    diag_indent = "  " * (depth + 1)
     for sha in side_chain:
         meta = load_commit(repo, sha)
         stats.walked += 1
+        log(format_commit_line("", meta.sha, meta.subject, depth=depth))
         if is_null_against_first_parent(repo, meta):
             stats.skipped_null += 1
-            log(f"skip null {sha[:12]} {meta.subject}")
+            log(f"{diag_indent}skip null")
             continue
         if meta.is_merge:
             side_marker = marker_from_subject(meta.subject) or marker
-            emitted_parent = emit_replayed_squash(repo, meta, emitted_parent, stats, side_marker, expected_tree)
+            original = find_first_real_non_merge(repo, meta)
+            message = prefix_message_subject(original.message, side_marker)
+            prev_emitted = emitted_parent
+            emitted_parent = emit_replayed_delta(
+                repo,
+                meta,
+                emitted_parent,
+                stats,
+                side_marker,
+                original,
+                expected_tree,
+                depth=depth,
+            )
+            if emitted_parent != prev_emitted:
+                stats.squashed_merges += 1
+                log(f"{diag_indent}squash metadata from {original.sha[:12]}")
+                side_emitted.append(
+                    EmittedSideCommit(
+                        meta,
+                        original,
+                        emitted_parent,
+                        tree_of(repo, emitted_parent),
+                        message,
+                    )
+                )
         else:
             metadata_meta = find_linearized_merge_metadata(repo, meta)
             if metadata_meta is not None:
                 stats.linearized_merge_metadata += 1
                 log(
-                    f"  linearized merge metadata from {metadata_meta.sha[:12]} "
+                    f"{diag_indent}linearized merge metadata from {metadata_meta.sha[:12]} "
                     f"for {meta.sha[:12]}"
                 )
+            message = prefix_message_subject((metadata_meta or meta).message, marker)
+            prev_emitted = emitted_parent
             emitted_parent = emit_replayed_delta(
                 repo,
                 meta,
@@ -632,7 +918,27 @@ def flatten_side(
                 marker,
                 metadata_meta=metadata_meta,
                 expected_tree=expected_tree,
+                depth=depth,
             )
+            if emitted_parent != prev_emitted:
+                side_emitted.append(
+                    EmittedSideCommit(
+                        meta,
+                        metadata_meta or meta,
+                        emitted_parent,
+                        tree_of(repo, emitted_parent),
+                        message,
+                    )
+                )
+    if align_source_tree and merge_meta is not None:
+        emitted_parent = reconcile_side_to_merge_tree(
+            repo,
+            side_base_parent,
+            emitted_parent,
+            merge_meta,
+            side_emitted,
+            stats,
+        )
     return emitted_parent
 
 
@@ -642,6 +948,7 @@ def flatten_range(
     tip: str,
     onto: str | None = None,
     align_source_trees: bool = True,
+    preserve_upstream_imports: bool = True,
 ) -> tuple[str, Stats]:
     stats = Stats()
     emitted_parent = onto if onto is not None else base
@@ -651,14 +958,30 @@ def flatten_range(
         log(f"onto {onto[:12]}")
         if align_source_trees:
             emitted_parent = emit_base_alignment(repo, base, emitted_parent, stats)
+    upstream_tags = load_upstream_mysql_tags(repo) if preserve_upstream_imports else []
+    upstream_tag_cache: dict[str, tuple[tuple[int, int, int], str] | None] = {}
+    prev_endpoint = base
     for sha in chain:
         meta = load_commit(repo, sha)
         stats.walked += 1
+        log(format_commit_line("", meta.sha, meta.subject))
         if is_null_against_first_parent(repo, meta):
             stats.skipped_null += 1
-            log(f"skip null {sha[:12]} {meta.subject}")
+            log("  skip null")
+            prev_endpoint = sha
             continue
         if meta.is_merge:
+            advanced_tag = (
+                upstream_import_tag(repo, prev_endpoint, meta, upstream_tags, upstream_tag_cache)
+                if preserve_upstream_imports
+                else None
+            )
+            if advanced_tag is not None:
+                emitted_parent = emit_upstream_import_merge(
+                    repo, meta, emitted_parent, advanced_tag[1], stats
+                )
+                prev_endpoint = sha
+                continue
             stats.expanded_merges += 1
             marker = marker_from_subject(meta.subject)
             emitted_parent = flatten_side(
@@ -669,11 +992,16 @@ def flatten_range(
                 stats,
                 marker,
                 meta.tree,
+                merge_meta=meta,
+                align_source_tree=align_source_trees,
             )
-            if align_source_trees:
-                emitted_parent = emit_merge_alignment(repo, meta, emitted_parent, stats)
         else:
+            prev_emitted = emitted_parent
             emitted_parent = emit_preserved(repo, meta, emitted_parent, stats)
+            if emitted_parent != prev_emitted:
+                emitted_meta = load_commit(repo, emitted_parent)
+                log(format_commit_line("= ", emitted_parent, emitted_meta.subject))
+        prev_endpoint = sha
     return emitted_parent, stats
 
 
@@ -709,6 +1037,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--no-preserve-upstream-imports",
+        action="store_true",
+        help=(
+            "flatten merge commits that advance the reachable mysql-X.Y.Z "
+            "upstream tag instead of preserving them as merge commits"
+        ),
+    )
+    parser.add_argument(
         "--color",
         choices=("auto", "always", "never"),
         default="auto",
@@ -733,7 +1069,14 @@ def main(argv: list[str] | None = None) -> int:
         base = rev_parse(repo, args.base)
         tip = rev_parse(repo, args.tip)
         onto = rev_parse(repo, args.onto) if args.onto else None
-        new_tip, stats = flatten_range(repo, base, tip, onto, not args.preserve_onto_tree)
+        new_tip, stats = flatten_range(
+            repo,
+            base,
+            tip,
+            onto,
+            align_source_trees=not args.preserve_onto_tree,
+            preserve_upstream_imports=not args.no_preserve_upstream_imports,
+        )
 
         if not args.no_final_tree_check and tree_of(repo, new_tip) != tree_of(repo, tip):
             raise FlattenError(
@@ -749,6 +1092,8 @@ def main(argv: list[str] | None = None) -> int:
             f"expanded_merges={stats.expanded_merges} squashed_merges={stats.squashed_merges} "
             f"linearized_merge_metadata={stats.linearized_merge_metadata} "
             f"base_alignments={stats.base_alignments} merge_alignments={stats.merge_alignments} "
+            f"merge_reconciled_paths={stats.merge_reconciled_paths} "
+            f"upstream_import_merges={stats.upstream_import_merges} "
             f"output={args.output_branch}"
         )
         return 0

@@ -47,8 +47,13 @@ MERGE_51_TO_55_SUBJECT_RE = re.compile(r"\b5\.1\b", re.IGNORECASE)
 SHORT_HASH_RE = re.compile(r"\b[0-9a-f]{12,40}\b")
 ACTION_RE = re.compile(r"^(emit|squash|replay|skip null|skip empty replay|done:|main|onto|upstream|=)(?=\s|\b)")
 UPSTREAM_MYSQL_TAG_NAME_RE = re.compile(r"(?i)^mysql-(\d+)\.(\d+)\.(\d+)$")
+FILES_RE = re.compile(r"(\d+) files? changed")
+INS_RE = re.compile(r"(\d+) insertion")
+DEL_RE = re.compile(r"(\d+) deletion")
 
 LOG_LINE_WIDTH = 104
+OUTPUT_STAT_FILES_WIDTH = 5
+OUTPUT_STAT_COUNT_WIDTH = 5
 
 
 def format_commit_line(marker: str, sha: str, subject: str, depth: int = 0) -> str:
@@ -57,6 +62,61 @@ def format_commit_line(marker: str, sha: str, subject: str, depth: int = 0) -> s
     if len(body) > LOG_LINE_WIDTH:
         return body[: LOG_LINE_WIDTH - 1] + "…"
     return body
+
+
+def compact_count(n: int) -> str:
+    if n >= 1000000:
+        return f"{n // 1000000}M"
+    if n >= 10000:
+        return f"{n // 1000}K"
+    return str(n)
+
+
+def depth_marker(depth: int) -> str:
+    return "  " * max(depth, 0)
+
+
+def format_stats_commit_line(
+    files: int,
+    insertions: int,
+    deletions: int,
+    marker: str,
+    sha: str,
+    subject: str,
+    depth: int = 0,
+) -> str:
+    files_field = f"{compact_count(files)}f".ljust(OUTPUT_STAT_FILES_WIDTH)
+    ins_field = f"{compact_count(insertions)}+".rjust(OUTPUT_STAT_COUNT_WIDTH)
+    del_field = f"{compact_count(deletions)}-".rjust(OUTPUT_STAT_COUNT_WIDTH)
+    indent = depth_marker(depth)
+    body = f"{indent}{files_field}{ins_field} {del_field} {marker}{sha[:12]} {subject}".rstrip()
+    return body[:LOG_LINE_WIDTH]
+
+
+def format_squash_metadata_line(meta: "CommitMeta") -> str:
+    line = f"  squash metadata from {meta.sha[:12]} {meta.subject}"
+    return line[:LOG_LINE_WIDTH]
+
+
+def format_side_drift_line(path_count: int, merge_meta: "CommitMeta") -> str:
+    line = (
+        f"  align side drift {path_count} path(s) "
+        f"to merge tree {merge_meta.sha[:12]} {merge_meta.subject}"
+    )
+    return line[:LOG_LINE_WIDTH]
+
+
+def format_folded_paths_line(path_count: int, sha: str, subject: str) -> str:
+    line = f"  folded {path_count} path(s) into {sha[:12]} {subject}"
+    return line[:LOG_LINE_WIDTH]
+
+
+def format_fallback_paths_line(path_count: int) -> str:
+    line = (
+        f"  {path_count} path(s) have no emitted owner in current side; "
+        "falling back to merge alignment"
+    )
+    return line[:LOG_LINE_WIDTH]
 
 
 class FlattenError(RuntimeError):
@@ -188,16 +248,165 @@ def is_51_to_55_merge(meta: CommitMeta) -> bool:
     return meta.is_merge and MERGE_51_TO_55_SUBJECT_RE.search(meta.subject) is not None
 
 
-def log_first_parent_commit(meta: CommitMeta, upstream_tag: str | None) -> None:
-    message = format_commit_line("", meta.sha, meta.subject)
+def style_stats_commit_line(line: str, subject_color: str | None = None) -> str:
+    if not STYLE.enabled:
+        return line
+    match = re.match(
+        r"^(\s*)(\[[^\]]+\]\s+)?(\S+)(\s+)(\S+)(\s+)(\S+)(\s+)(.*?)([0-9a-f]{12})(\s?)(.*)$",
+        line,
+    )
+    if not match:
+        return line
+    subject = match.group(12)
+    commit_hash = match.group(10)
+    if subject_color == "violet":
+        subject = STYLE.violet(subject)
+    elif subject_color == "blue":
+        subject = STYLE.blue(subject)
+    elif subject_color == "blue_hash_subject":
+        subject = STYLE.blue(subject)
+        commit_hash = STYLE.blue(commit_hash)
+    elif subject_color == "green":
+        subject = STYLE.green(subject)
+        commit_hash = STYLE.green(commit_hash)
+    elif subject_color == "red":
+        subject = STYLE.red(subject)
+        commit_hash = STYLE.red(commit_hash)
+    else:
+        commit_hash = STYLE.yellow(commit_hash)
+    return (
+        match.group(1)
+        + (match.group(2) or "")
+        + match.group(3)
+        + match.group(4)
+        + STYLE.green(match.group(5))
+        + match.group(6)
+        + STYLE.red(match.group(7))
+        + match.group(8)
+        + STYLE.cyan(match.group(9))
+        + commit_hash
+        + match.group(11)
+        + subject
+    )
+
+
+def shortstat_for_commit(repo: str | Path, sha: str) -> tuple[int, int, int]:
+    text = git_text(
+        repo,
+        "-c",
+        "diff.renames=false",
+        "show",
+        "-m",
+        "--first-parent",
+        "--no-patch",
+        "--format=",
+        "--shortstat",
+        sha,
+    )
+    files = insertions = deletions = 0
+    match = FILES_RE.search(text)
+    if match:
+        files = int(match.group(1))
+    match = INS_RE.search(text)
+    if match:
+        insertions = int(match.group(1))
+    match = DEL_RE.search(text)
+    if match:
+        deletions = int(match.group(1))
+    return files, insertions, deletions
+
+
+def format_rewrite_commit_line(
+    files: int,
+    insertions: int,
+    deletions: int,
+    marker: str,
+    sha: str,
+    subject: str,
+) -> str:
+    stats_line = format_stats_commit_line(
+        files, insertions, deletions, marker, sha, subject
+    )
+    return f"  [rewrite] {stats_line}"[:LOG_LINE_WIDTH]
+
+
+def format_align_commit_line(
+    files: int,
+    insertions: int,
+    deletions: int,
+    marker: str,
+    sha: str,
+    subject: str,
+    align_sha: str,
+) -> str:
+    stats_line = format_stats_commit_line(
+        files, insertions, deletions, marker, sha, subject
+    )
+    return f"  [align to {align_sha[:12]}] {stats_line}"[:LOG_LINE_WIDTH]
+
+
+def output_subject_color(
+    marker: str,
+    insertions: int,
+    deletions: int,
+    default: str | None = None,
+) -> str | None:
+    if marker == "=> " and insertions + deletions > 10000:
+        return "red"
+    return default
+
+
+def log_commit_line(
+    repo: str | Path,
+    marker: str,
+    sha: str,
+    subject: str,
+    depth: int = 0,
+    subject_color: str | None = None,
+) -> None:
+    files, insertions, deletions = shortstat_for_commit(repo, sha)
+    line = format_stats_commit_line(files, insertions, deletions, marker, sha, subject, depth)
+    color = output_subject_color(marker, insertions, deletions, subject_color)
+    print(style_stats_commit_line(line, color), file=sys.stderr, flush=True)
+
+
+def log_align_commit_line(
+    repo: str | Path,
+    marker: str,
+    sha: str,
+    subject: str,
+    align_sha: str,
+) -> None:
+    files, insertions, deletions = shortstat_for_commit(repo, sha)
+    line = format_align_commit_line(
+        files, insertions, deletions, marker, sha, subject, align_sha
+    )
+    subject_color = output_subject_color(marker, insertions, deletions, "green")
+    print(style_stats_commit_line(line, subject_color=subject_color), file=sys.stderr, flush=True)
+
+
+def log_rewrite_commit_line(
+    repo: str | Path,
+    marker: str,
+    sha: str,
+    subject: str,
+) -> None:
+    files, insertions, deletions = shortstat_for_commit(repo, sha)
+    line = format_rewrite_commit_line(
+        files, insertions, deletions, marker, sha, subject
+    )
+    color = output_subject_color(marker, insertions, deletions)
+    print(style_stats_commit_line(line, color), file=sys.stderr, flush=True)
+
+
+def log_first_parent_commit(repo: str | Path, meta: CommitMeta, upstream_tag: str | None) -> None:
+    subject_color = None
     if STYLE.enabled:
         if is_51_to_55_merge(meta):
-            print(STYLE.violet(message), file=sys.stderr, flush=True)
-            return
-        if upstream_tag:
-            print(STYLE.blue(message), file=sys.stderr, flush=True)
-            return
-    log(message)
+            subject_color = "violet"
+        elif upstream_tag:
+            subject_color = "blue"
+    log_commit_line(repo, "", meta.sha, meta.subject, subject_color=subject_color)
 
 
 def git(
@@ -393,7 +602,7 @@ def emit_upstream_import_merge(
     stats.emitted += 1
     stats.upstream_import_merges += 1
     subject = message.splitlines()[0] if message else ""
-    log(format_commit_line("upstream ", new_sha, subject))
+    log_commit_line(repo, "=> ", new_sha, subject, subject_color="blue_hash_subject")
     return new_sha
 
 
@@ -680,21 +889,23 @@ def emit_replayed_delta(
     metadata_meta: CommitMeta | None = None,
     expected_tree: str | None = None,
     depth: int = 0,
+    pre_emit_log: str | None = None,
 ) -> str:
     if not delta_meta.parents:
         raise FlattenError(f"cannot replay root commit as side delta: {delta_meta.sha}")
     metadata = metadata_meta or delta_meta
     message = prefix_message_subject(metadata.message, marker)
     tree = replay_delta_tree(repo, delta_meta.parents[0], delta_meta.sha, emitted_parent, expected_tree)
-    diag_indent = "  " * (depth + 1)
     if tree is None or tree == tree_of(repo, emitted_parent):
         stats.skipped_null += 1
-        log(f"{diag_indent}skip empty replay")
+        log("  skip empty replay")
         return emitted_parent
     new_sha = commit_tree(repo, tree, emitted_parent, metadata, message)
     stats.emitted += 1
     subject = message.splitlines()[0] if message else ""
-    log(format_commit_line("= ", new_sha, subject, depth=depth))
+    if pre_emit_log is not None:
+        log(pre_emit_log)
+    log_commit_line(repo, "=> ", new_sha, subject, depth=depth)
     return new_sha
 
 
@@ -709,12 +920,18 @@ def emit_replayed_squash(
 ) -> str:
     original = find_first_real_non_merge(repo, meta)
     new_sha = emit_replayed_delta(
-        repo, meta, parent, stats, marker, original, expected_tree, depth=depth
+        repo,
+        meta,
+        parent,
+        stats,
+        marker,
+        original,
+        expected_tree,
+        depth=depth,
+        pre_emit_log=format_squash_metadata_line(original),
     )
     if new_sha != parent:
         stats.squashed_merges += 1
-        diag_indent = "  " * (depth + 1)
-        log(f"{diag_indent}squash metadata from {original.sha[:12]}")
     return new_sha
 
 
@@ -735,7 +952,11 @@ def emit_tree_alignment(
         stats.base_alignments += 1
     elif alignment_kind == "merge":
         stats.merge_alignments += 1
-    log(f"align {new_sha[:12]} to {alignment_kind} tree {meta.sha[:12]}")
+    if alignment_kind == "merge":
+        log_align_commit_line(repo, "=> ", new_sha, meta.subject, meta.sha)
+    else:
+        subject = f"align to {alignment_kind} tree {meta.sha[:12]}: {meta.subject}"
+        log_commit_line(repo, "=> ", new_sha, subject)
     return new_sha
 
 
@@ -798,8 +1019,10 @@ def rebuild_side_suffix(
     side_emitted: list[EmittedSideCommit],
     adjusted_trees: list[str],
     first_index: int,
+    folded_paths_by_index: dict[int, int] | None = None,
 ) -> str:
     parent = side_base_parent if first_index == 0 else side_emitted[first_index - 1].sha
+    folded_paths_by_index = folded_paths_by_index or {}
     for index in range(first_index, len(side_emitted)):
         emitted = side_emitted[index]
         tree = adjusted_trees[index]
@@ -816,7 +1039,10 @@ def rebuild_side_suffix(
             emitted.message,
         )
         parent = new_sha
-        log(format_commit_line("= ", new_sha, f"{subject} [reconciled]", depth=1))
+        folded_count = folded_paths_by_index.get(index)
+        if folded_count is not None:
+            log(format_folded_paths_line(folded_count, new_sha, subject))
+        log_rewrite_commit_line(repo, "=> ", new_sha, subject)
     return parent
 
 
@@ -832,7 +1058,7 @@ def reconcile_side_to_merge_tree(
     if not residual_paths:
         return emitted_parent
 
-    log(f"align side drift {len(residual_paths)} path(s) to merge tree {merge_meta.sha[:12]}")
+    log(format_side_drift_line(len(residual_paths), merge_meta))
     last_toucher = last_side_toucher_by_path(repo, side_emitted, residual_paths)
     paths_by_index: dict[int, list[str]] = {}
     fallback_paths: list[str] = []
@@ -845,6 +1071,7 @@ def reconcile_side_to_merge_tree(
 
     if paths_by_index:
         adjusted_trees = [emitted.tree for emitted in side_emitted]
+        folded_paths_by_index: dict[int, int] = {}
         for index, paths in sorted(paths_by_index.items()):
             for tree_index in range(index, len(adjusted_trees)):
                 adjusted_trees[tree_index] = overlay_tree_paths(
@@ -854,23 +1081,18 @@ def reconcile_side_to_merge_tree(
                     paths,
                 )
             stats.merge_reconciled_paths += len(paths)
-            log(
-                f"    folded {len(paths)} path(s) into "
-                f"{side_emitted[index].source_meta.sha[:12]}"
-            )
+            folded_paths_by_index[index] = len(paths)
         emitted_parent = rebuild_side_suffix(
             repo,
             side_base_parent,
             side_emitted,
             adjusted_trees,
             min(paths_by_index),
+            folded_paths_by_index,
         )
 
     if fallback_paths:
-        log(
-            f"    {len(fallback_paths)} path(s) have no emitted owner in current side; "
-            "falling back to merge alignment"
-        )
+        log(format_fallback_paths_line(len(fallback_paths)))
         return emit_merge_alignment(repo, merge_meta, emitted_parent, stats)
 
     remaining = diff_paths(repo, tree_of(repo, emitted_parent), merge_meta.tree)
@@ -903,7 +1125,7 @@ def flatten_side(
     for sha in side_chain:
         meta = load_commit(repo, sha)
         stats.walked += 1
-        log(format_commit_line("", meta.sha, meta.subject, depth=depth))
+        log_commit_line(repo, "", meta.sha, meta.subject, depth=depth)
         if is_null_against_first_parent(repo, meta):
             stats.skipped_null += 1
             log(f"{diag_indent}skip null")
@@ -922,10 +1144,10 @@ def flatten_side(
                 original,
                 expected_tree,
                 depth=depth,
+                pre_emit_log=format_squash_metadata_line(original),
             )
             if emitted_parent != prev_emitted:
                 stats.squashed_merges += 1
-                log(f"{diag_indent}squash metadata from {original.sha[:12]}")
                 side_emitted.append(
                     EmittedSideCommit(
                         meta,
@@ -1005,7 +1227,7 @@ def flatten_range(
             else None
         )
         first_parent_upstream_tag = advanced_tag[1] if advanced_tag is not None else None
-        log_first_parent_commit(meta, first_parent_upstream_tag)
+        log_first_parent_commit(repo, meta, first_parent_upstream_tag)
         if is_null_against_first_parent(repo, meta):
             stats.skipped_null += 1
             log("  skip null")
@@ -1042,7 +1264,7 @@ def flatten_range(
             )
             if emitted_parent != prev_emitted:
                 emitted_meta = load_commit(repo, emitted_parent)
-                log(format_commit_line("= ", emitted_parent, emitted_meta.subject))
+                log_commit_line(repo, "=> ", emitted_parent, emitted_meta.subject)
         prev_endpoint = sha
     return emitted_parent, stats
 

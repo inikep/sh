@@ -18,7 +18,7 @@ to flip the order.
 Usage:
   ps-log.py [--color auto|always|never] [--reverse] [-n N]
             [--path PATHSPEC]... [--section PATHSPEC]... [--all-section]
-            [--sort none|desc|asc] [--top N] [-j JOBS]
+            [--sort none|desc|asc] [--top N] [--depth [N]] [-j JOBS]
             [<git log args>...]
 
 Examples:
@@ -101,6 +101,7 @@ def run_git(args: list[str]) -> subprocess.CompletedProcess:
 FILES_RE = re.compile(r"(\d+) files? changed")
 INS_RE = re.compile(r"(\d+) insertion")
 DEL_RE = re.compile(r"(\d+) deletion")
+DEPTH_VALUE_RE = re.compile(r"-?\d+")
 
 
 def list_commits_with_subjects(log_args: list[str], reverse: bool,
@@ -210,7 +211,7 @@ def walk_first_parent_depth(idx: dict[str, tuple[list[str], str]],
 
 
 def list_commits_with_depth(log_args: list[str], reverse: bool,
-                            limit: int | None,
+                            limit: int | None, max_depth: int | None,
                             paths: list[str] | None
                             ) -> list[tuple[str, str, int]]:
     """Return (sha, subject, depth). Uses recursive first-parent expansion when
@@ -240,6 +241,8 @@ def list_commits_with_depth(log_args: list[str], reverse: bool,
 
     if "--no-merges" in user_set:
         rows = [(h, s, d) for h, s, d in rows if len(idx[h][0]) < 2]
+    if max_depth is not None:
+        rows = [(h, s, d) for h, s, d in rows if d <= max_depth]
     if reverse:
         rows.reverse()
     if limit is not None:
@@ -270,9 +273,9 @@ def shortstat_for(sha: str,
 
 
 def fetch_rows(log_args: list[str], reverse: bool, limit: int | None,
-               paths: list[str] | None, jobs: int
+               max_depth: int | None, paths: list[str] | None, jobs: int
                ) -> list[tuple[str, str, int, int, int, int]]:
-    items = list_commits_with_depth(log_args, reverse, limit, paths)
+    items = list_commits_with_depth(log_args, reverse, limit, max_depth, paths)
     if not items:
         return []
     paths_t = tuple(paths) if paths else None
@@ -299,14 +302,45 @@ def compact_count(n: int) -> str:
     return str(n)
 
 
-def format_stats_line(files: int, ins: int, dele: int,
-                      ch: str, subject: str, depth: int = 0) -> str:
+def comma_count(n: int) -> str:
+    return f"{n:,}"
+
+
+def counted(n: int, singular: str, plural: str | None = None) -> str:
+    return f"{comma_count(n)} {singular if n == 1 else plural or singular + 's'}"
+
+
+def depth_marker(depth: int) -> str:
+    return "  " * max(depth, 0)
+
+
+def format_stats_line(files: int, ins: int, dele: int, ch: str, subject: str,
+                      depth: int = 0, max_len: int | None = (
+                          OUTPUT_STAT_LINE_LEN)) -> str:
     files_field = f"{compact_count(files)}f".ljust(OUTPUT_STAT_FILES_WIDTH)
     ins_field = f"{compact_count(ins)}+".rjust(OUTPUT_STAT_COUNT_WIDTH)
     del_field = f"{compact_count(dele)}-".rjust(OUTPUT_STAT_COUNT_WIDTH)
-    indent = "*" * max(depth, 0)
-    line = f"{files_field}{ins_field} {del_field} {indent}{ch[:12]} {subject}"
-    return line[:OUTPUT_STAT_LINE_LEN]
+    indent = depth_marker(depth)
+    line = f"{indent}{files_field}{ins_field} {del_field} {ch[:12]} {subject}"
+    return line if max_len is None else line[:max_len]
+
+
+def format_total_line(files: int, ins: int, dele: int, subject: str) -> str:
+    files_field = f"{compact_count(files)}f".ljust(OUTPUT_STAT_FILES_WIDTH)
+    ins_field = f"{compact_count(ins)}+".rjust(OUTPUT_STAT_COUNT_WIDTH)
+    del_field = f"{compact_count(dele)}-".rjust(OUTPUT_STAT_COUNT_WIDTH)
+    return f"{files_field}{ins_field} {del_field} {subject}"
+
+
+def format_shortstat(files: int, ins: int, dele: int) -> str:
+    parts = [
+        f"{counted(files, 'file')} changed",
+    ]
+    if ins:
+        parts.append(f"{counted(ins, 'insertion')}(+)")
+    if dele:
+        parts.append(f"{counted(dele, 'deletion')}(-)")
+    return ", ".join(parts)
 
 
 def subject_style(text: str, bold: bool, red: bool) -> str:
@@ -321,17 +355,46 @@ def colorize_stats_line(line: str, bold_subject: bool,
                         red_subject: bool) -> str:
     if not STYLE.enabled:
         return line
-    m = re.match(r"^(\S+)(\s+)(\S+)(\s+)(\S+)(\s+)"
-                 r"(\**)([0-9a-f-]{12})(\s?)(.*)$", line)
+    m = re.match(r"^(\s*)(\S+)(\s+)(\S+)(\s+)(\S+)(\s+)"
+                 r"([0-9a-f-]{12})(\s?)(.*)$", line)
+    if m:
+        return (
+            m.group(1) + m.group(2) + m.group(3) +
+            STYLE.green(m.group(4)) + m.group(5) +
+            STYLE.red(m.group(6)) + m.group(7) +
+            STYLE.yellow(m.group(8)) + m.group(9) +
+            subject_style(m.group(10), bold_subject, red_subject))
+
+    m = re.match(r"^(\s*)(\S+)(\s+)(\S+)(\s+)(\S+)(\s+)(.*)$", line)
     if not m:
         return line
     return (
-        m.group(1) + m.group(2) +
-        STYLE.green(m.group(3)) + m.group(4) +
-        STYLE.red(m.group(5)) + m.group(6) +
-        m.group(7) +
-        STYLE.yellow(m.group(8)) + m.group(9) +
-        subject_style(m.group(10), bold_subject, red_subject))
+        m.group(1) + m.group(2) + m.group(3) +
+        STYLE.green(m.group(4)) + m.group(5) +
+        STYLE.red(m.group(6)) + m.group(7) +
+        subject_style(m.group(8), bold_subject, red_subject))
+
+
+def normalize_depth_arg(argv: list[str]) -> list[str]:
+    """Let bare --depth mean --depth=1 without swallowing a git revision."""
+    normalized: list[str] = []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--":
+            normalized.extend(argv[i:])
+            break
+        if arg == "--depth":
+            if i + 1 < len(argv) and DEPTH_VALUE_RE.fullmatch(argv[i + 1]):
+                normalized.extend((arg, argv[i + 1]))
+                i += 2
+            else:
+                normalized.append("--depth=1")
+                i += 1
+            continue
+        normalized.append(arg)
+        i += 1
+    return normalized
 
 
 def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
@@ -374,23 +437,28 @@ def parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
                         help="After sorting and pathspec filtering, print "
                              "at most N rows. Differs from -n, which limits "
                              "commits before they are sorted.")
+    parser.add_argument("--depth", nargs="?", const=1, type=int,
+                        default=None, metavar="N",
+                        help="Show commits only up to first-parent side depth "
+                             "N. Without N, defaults to 1, omitting rows "
+                             "indented four spaces and deeper.")
     parser.add_argument("-j", "--jobs", type=int, default=32, metavar="N",
                         help="Parallel workers for shortstat (default: 32). "
                              "Lower this to reduce concurrency.")
-    return parser.parse_known_args(argv)
+    return parser.parse_known_args(normalize_depth_arg(argv))
 
 
 def render_section(label: str | None, log_args: list[str],
                    reverse: bool, max_count: int | None,
-                   paths: list[str] | None, sort: str, top: int | None,
-                   jobs: int) -> None:
+                   max_depth: int | None, paths: list[str] | None,
+                   sort: str, top: int | None, jobs: int) -> None:
     if label is not None:
         header = f"=== {label} ==="
         if STYLE.enabled:
             header = STYLE.bold(STYLE.cyan(header))
         print(header, flush=True)
 
-    rows = fetch_rows(log_args, reverse, max_count, paths, jobs)
+    rows = fetch_rows(log_args, reverse, max_count, max_depth, paths, jobs)
     if paths:
         rows = [r for r in rows if (r[2] + r[3] + r[4]) > 0]
     range_count = len(rows)
@@ -413,12 +481,16 @@ def render_section(label: str | None, log_args: list[str],
 
     if rows:
         if len(rows) == range_count:
-            total_subject = f"TOTAL ({len(rows)} commits)"
+            total_subject = f"TOTAL {counted(len(rows), 'commit')}"
         else:
             total_subject = (
-                f"TOTAL ({len(rows)} of {range_count} commits)")
-        line = format_stats_line(total_files, total_ins, total_dele,
-                                 "-" * 12, total_subject)
+                f"TOTAL {comma_count(len(rows))} of "
+                f"{counted(range_count, 'commit')}")
+        total_subject = (
+            f"{total_subject}, "
+            f"{format_shortstat(total_files, total_ins, total_dele)}")
+        line = format_total_line(total_files, total_ins, total_dele,
+                                 total_subject)
         print(colorize_stats_line(line, bold_subject=True,
                                   red_subject=total_dele > total_ins),
               flush=True)
@@ -431,6 +503,9 @@ def main(argv: list[str]) -> int:
     if args.section and args.path:
         sys.stderr.write(
             "error: --section and --path are mutually exclusive\n")
+        return 2
+    if args.depth is not None and args.depth < 0:
+        sys.stderr.write("error: --depth must be non-negative\n")
         return 2
 
     sections: list[tuple[str | None, list[str] | None]] = []
@@ -447,7 +522,7 @@ def main(argv: list[str]) -> int:
             if i > 0:
                 print()
             render_section(label, log_args, args.reverse, args.max_count,
-                           paths, args.sort, args.top, args.jobs)
+                           args.depth, paths, args.sort, args.top, args.jobs)
     except subprocess.CalledProcessError as e:
         sys.stderr.write(e.stderr or f"git failed ({e.returncode})\n")
         return e.returncode or 1

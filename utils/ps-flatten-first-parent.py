@@ -43,6 +43,7 @@ MERGE_BRANCH_SUBJECT_RE = re.compile(
     re.IGNORECASE,
 )
 BUG_ID_RE = re.compile(r"\bbug[-_/ ]*#?(\d{4,})\b", re.IGNORECASE)
+MERGE_51_TO_55_SUBJECT_RE = re.compile(r"\b5\.1\b", re.IGNORECASE)
 SHORT_HASH_RE = re.compile(r"\b[0-9a-f]{12,40}\b")
 ACTION_RE = re.compile(r"^(emit|squash|replay|skip null|skip empty replay|done:|main|onto|upstream|=)(?=\s|\b)")
 UPSTREAM_MYSQL_TAG_NAME_RE = re.compile(r"(?i)^mysql-(\d+)\.(\d+)\.(\d+)$")
@@ -85,6 +86,12 @@ class Style:
     def green(self, text: str) -> str:
         return self._wrap("32", text)
 
+    def blue(self, text: str) -> str:
+        return self._wrap("34", text)
+
+    def violet(self, text: str) -> str:
+        return self._wrap("35", text)
+
     def yellow(self, text: str) -> str:
         return self._wrap("33", text)
 
@@ -115,6 +122,8 @@ def colorize_log_message(message: str) -> str:
     if not STYLE.enabled or not message:
         return message
     stripped = message.lstrip()
+    if stripped.startswith("align side drift "):
+        return STYLE.green(message)
     if stripped.startswith("align "):
         return STYLE.red(message)
     if stripped.startswith("ERROR:"):
@@ -173,6 +182,22 @@ class EmittedSideCommit:
 
 def log(message: str) -> None:
     print(colorize_log_message(message), file=sys.stderr, flush=True)
+
+
+def is_51_to_55_merge(meta: CommitMeta) -> bool:
+    return meta.is_merge and MERGE_51_TO_55_SUBJECT_RE.search(meta.subject) is not None
+
+
+def log_first_parent_commit(meta: CommitMeta, upstream_tag: str | None) -> None:
+    message = format_commit_line("", meta.sha, meta.subject)
+    if STYLE.enabled:
+        if is_51_to_55_merge(meta):
+            print(STYLE.violet(message), file=sys.stderr, flush=True)
+            return
+        if upstream_tag:
+            print(STYLE.blue(message), file=sys.stderr, flush=True)
+            return
+    log(message)
 
 
 def git(
@@ -363,10 +388,12 @@ def emit_upstream_import_merge(
 ) -> str:
     upstream_parent = rev_parse(repo, upstream_tag)
     parents = dedupe_parents([emitted_parent, upstream_parent])
-    new_sha = commit_tree(repo, meta.tree, parents, meta, meta.message)
+    message = prefix_upstream_tag_subject(meta.message, upstream_tag)
+    new_sha = commit_tree(repo, meta.tree, parents, meta, message)
     stats.emitted += 1
     stats.upstream_import_merges += 1
-    log(format_commit_line("upstream ", new_sha, f"{upstream_tag} {meta.subject}"))
+    subject = message.splitlines()[0] if message else ""
+    log(format_commit_line("upstream ", new_sha, subject))
     return new_sha
 
 
@@ -405,6 +432,12 @@ def prefix_message_subject(message: str, marker: str | None) -> str:
         return message
     lines[0] = f"{marker} {lines[0]}"
     return "\n".join(lines)
+
+
+def prefix_upstream_tag_subject(message: str, upstream_tag: str | None) -> str:
+    if not upstream_tag:
+        return message
+    return prefix_message_subject(message, f"({upstream_tag})")
 
 
 def linearized_pr_body_message(message: str) -> str | None:
@@ -497,10 +530,12 @@ def emit_preserved(
     parent: str,
     stats: Stats,
     marker: str | None = None,
+    upstream_tag: str | None = None,
 ) -> str:
     effective_marker = marker or marker_from_subject(meta.subject)
     source_message = linearized_pr_body_message(meta.message) or meta.message
     message = prefix_message_subject(source_message, effective_marker)
+    message = prefix_upstream_tag_subject(message, upstream_tag)
     new_sha = commit_tree(repo, meta.tree, parent, meta, message)
     stats.emitted += 1
     return new_sha
@@ -563,7 +598,7 @@ def overlay_tree_paths(
                 git(repo, "update-index", "--force-remove", "--", path, env=env)
                 continue
             mode, oid = source
-            git(repo, "update-index", "--cacheinfo", mode, oid, path, env=env)
+            git(repo, "update-index", "--add", "--cacheinfo", mode, oid, path, env=env)
         return git(repo, "write-tree", env=env).stdout.strip()
 
 
@@ -596,7 +631,7 @@ def resolve_merge_tree_conflicts(
                 git(repo, "update-index", "--force-remove", "--", path, env=env)
                 continue
             mode, oid = source
-            git(repo, "update-index", "--cacheinfo", mode, oid, path, env=env)
+            git(repo, "update-index", "--add", "--cacheinfo", mode, oid, path, env=env)
         tree = git(repo, "write-tree", env=env).stdout.strip()
     source_label = "expected merge tree" if expected_tree is not None else "source side"
     log(f"  resolved {len(stages)} merge-tree conflict path(s) with {source_label}")
@@ -964,18 +999,19 @@ def flatten_range(
     for sha in chain:
         meta = load_commit(repo, sha)
         stats.walked += 1
-        log(format_commit_line("", meta.sha, meta.subject))
+        advanced_tag = (
+            advanced_upstream_tag(repo, prev_endpoint, meta.sha, upstream_tags, upstream_tag_cache)
+            if preserve_upstream_imports
+            else None
+        )
+        first_parent_upstream_tag = advanced_tag[1] if advanced_tag is not None else None
+        log_first_parent_commit(meta, first_parent_upstream_tag)
         if is_null_against_first_parent(repo, meta):
             stats.skipped_null += 1
             log("  skip null")
             prev_endpoint = sha
             continue
         if meta.is_merge:
-            advanced_tag = (
-                upstream_import_tag(repo, prev_endpoint, meta, upstream_tags, upstream_tag_cache)
-                if preserve_upstream_imports
-                else None
-            )
             if advanced_tag is not None:
                 emitted_parent = emit_upstream_import_merge(
                     repo, meta, emitted_parent, advanced_tag[1], stats
@@ -997,7 +1033,13 @@ def flatten_range(
             )
         else:
             prev_emitted = emitted_parent
-            emitted_parent = emit_preserved(repo, meta, emitted_parent, stats)
+            emitted_parent = emit_preserved(
+                repo,
+                meta,
+                emitted_parent,
+                stats,
+                upstream_tag=first_parent_upstream_tag,
+            )
             if emitted_parent != prev_emitted:
                 emitted_meta = load_commit(repo, emitted_parent)
                 log(format_commit_line("= ", emitted_parent, emitted_meta.subject))

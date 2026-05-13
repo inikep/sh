@@ -10,7 +10,10 @@ Rules:
     output back to --base before replay and to each expanded merge's tree after
     replaying its side branch;
   * non-null merges are replaced by walking their second-parent side's
-    first-parent chain;
+    first-parent chain; mysql-X.Y.Z imports are preserved only at the direct
+    import point, either the merge whose second parent is the tag or a
+    side-branch reconciliation commit immediately after the tagged upstream
+    commit;
   * commits emitted under a "Merge pull request #NNN" parent or side-merge
     subject get a "[#NNN]" subject marker;
   * side-branch merge commits are squashed by replaying their net delta, but use
@@ -588,6 +591,20 @@ def upstream_import_tag(
     return advanced_upstream_tag(repo, prev, meta.sha, upstream_tags, upstream_tag_cache)
 
 
+def direct_upstream_import_tag(
+    repo: str | Path,
+    meta: CommitMeta,
+    advanced_tag: tuple[tuple[int, int, int], str] | None,
+) -> tuple[tuple[int, int, int], str] | None:
+    """Return the advanced mysql tag only for a merge that directly imports it."""
+    if advanced_tag is None or not meta.is_merge or len(meta.parents) < 2:
+        return None
+    upstream_parent = rev_parse(repo, advanced_tag[1])
+    if meta.parents[1] == upstream_parent:
+        return advanced_tag
+    return None
+
+
 def emit_upstream_import_merge(
     repo: str | Path,
     meta: CommitMeta,
@@ -1115,20 +1132,94 @@ def flatten_side(
     expected_tree: str | None,
     merge_meta: CommitMeta | None = None,
     align_source_tree: bool = True,
+    preserve_upstream_imports: bool = True,
+    upstream_tags: list[tuple[tuple[int, int, int], str]] | None = None,
+    upstream_tag_cache: dict[str, tuple[tuple[int, int, int], str] | None] | None = None,
 ) -> str:
+    upstream_tags = upstream_tags or []
+    if upstream_tag_cache is None:
+        upstream_tag_cache = {}
     side_chain = first_parent_chain(repo, first_parent, second_parent)
+    side_metas = [load_commit(repo, sha) for sha in side_chain]
     log(f"  side {first_parent[:12]}..{second_parent[:12]}: {len(side_chain)} first-parent commits")
     side_base_parent = emitted_parent
     side_emitted: list[EmittedSideCommit] = []
+    start_index = 0
+    prev_endpoint = first_parent
+    forced_upstream_imports: dict[str, str] = {}
+    if preserve_upstream_imports and upstream_tags:
+        scan_prev_endpoint = first_parent
+        for index, meta in enumerate(side_metas):
+            advanced_tag = advanced_upstream_tag(
+                repo,
+                scan_prev_endpoint,
+                meta.sha,
+                upstream_tags,
+                upstream_tag_cache,
+            )
+            direct_upstream_tag = direct_upstream_import_tag(repo, meta, advanced_tag)
+            if direct_upstream_tag is not None:
+                if index:
+                    stats.walked += index
+                    log(
+                        f"  skip upstream prefix before {direct_upstream_tag[1]} import: "
+                        f"{index} first-parent commits"
+                    )
+                start_index = index
+                prev_endpoint = first_parent if index == 0 else side_metas[index - 1].sha
+                break
+            if advanced_tag is not None:
+                upstream_parent = rev_parse(repo, advanced_tag[1])
+                if meta.sha == upstream_parent:
+                    import_index = index
+                    if index + 1 < len(side_metas) and side_metas[index + 1].tree == meta.tree:
+                        import_index = index + 1
+                    if import_index:
+                        stats.walked += import_index
+                        log(
+                            f"  skip upstream prefix before {advanced_tag[1]} import: "
+                            f"{import_index} first-parent commits"
+                        )
+                    start_index = import_index
+                    prev_endpoint = first_parent if import_index == 0 else side_metas[import_index - 1].sha
+                    forced_upstream_imports[side_metas[import_index].sha] = advanced_tag[1]
+                    break
+            scan_prev_endpoint = meta.sha
     depth = 1
     diag_indent = "  " * (depth + 1)
-    for sha in side_chain:
-        meta = load_commit(repo, sha)
+    for meta in side_metas[start_index:]:
         stats.walked += 1
-        log_commit_line(repo, "", meta.sha, meta.subject, depth=depth)
+        advanced_tag = (
+            advanced_upstream_tag(repo, prev_endpoint, meta.sha, upstream_tags, upstream_tag_cache)
+            if preserve_upstream_imports
+            else None
+        )
+        direct_upstream_tag = direct_upstream_import_tag(repo, meta, advanced_tag)
+        upstream_import_tag_name = forced_upstream_imports.get(meta.sha) or (
+            direct_upstream_tag[1] if direct_upstream_tag is not None else None
+        )
+        log_commit_line(
+            repo,
+            "",
+            meta.sha,
+            meta.subject,
+            depth=depth,
+            subject_color="blue" if upstream_import_tag_name is not None else None,
+        )
+        if upstream_import_tag_name is not None:
+            emitted_parent = emit_upstream_import_merge(
+                repo,
+                meta,
+                emitted_parent,
+                upstream_import_tag_name,
+                stats,
+            )
+            prev_endpoint = meta.sha
+            continue
         if is_null_against_first_parent(repo, meta):
             stats.skipped_null += 1
             log(f"{diag_indent}skip null")
+            prev_endpoint = meta.sha
             continue
         if meta.is_merge:
             side_marker = marker_from_subject(meta.subject) or marker
@@ -1187,6 +1278,7 @@ def flatten_side(
                         message,
                     )
                 )
+        prev_endpoint = meta.sha
     if align_source_tree and merge_meta is not None:
         emitted_parent = reconcile_side_to_merge_tree(
             repo,
@@ -1227,6 +1319,9 @@ def flatten_range(
             else None
         )
         first_parent_upstream_tag = advanced_tag[1] if advanced_tag is not None else None
+        direct_upstream_tag = direct_upstream_import_tag(repo, meta, advanced_tag)
+        if meta.is_merge and direct_upstream_tag is None:
+            first_parent_upstream_tag = None
         log_first_parent_commit(repo, meta, first_parent_upstream_tag)
         if is_null_against_first_parent(repo, meta):
             stats.skipped_null += 1
@@ -1234,9 +1329,9 @@ def flatten_range(
             prev_endpoint = sha
             continue
         if meta.is_merge:
-            if advanced_tag is not None:
+            if direct_upstream_tag is not None:
                 emitted_parent = emit_upstream_import_merge(
-                    repo, meta, emitted_parent, advanced_tag[1], stats
+                    repo, meta, emitted_parent, direct_upstream_tag[1], stats
                 )
                 prev_endpoint = sha
                 continue
@@ -1252,6 +1347,9 @@ def flatten_range(
                 meta.tree,
                 merge_meta=meta,
                 align_source_tree=align_source_trees,
+                preserve_upstream_imports=preserve_upstream_imports,
+                upstream_tags=upstream_tags,
+                upstream_tag_cache=upstream_tag_cache,
             )
         else:
             prev_emitted = emitted_parent

@@ -70,13 +70,15 @@ There are no other forms of approval. A null diff achieved by snapping is a rule
 
 ### HP-2. Required post-Group-7 builds must not be skipped.
 
-After the `=== MARKER: GROUP 7 — Upstream bug fixes ===` checkpoint, every source/plugin/build-system commit must have its own successful build at that commit's resulting SHA before the next build-required commit is applied.
+After the `=== MARKER: GROUP 7 — Upstream bug fixes ===` checkpoint, every source/plugin/build-system commit must have its own successful build at that commit's resulting SHA before the next build-required commit is applied. Bucketing for this purpose is locked at the source commit's path classification (see HP-8); whatever the post-resolution applied commit's diff happens to look like does not retroactively remove a commit's build requirement.
 
 The following are forbidden:
 
 - Applying any post-Group-7 source/plugin/build-system commit while a previous required build is missing or failing
-- Recording `deferred`, `covered by reconciliation`, `final build-of-record`, `covered by final build`, `batch build covers it`, or any equivalent wording in place of a per-commit build PASS
+- Recording `deferred`, `covered by reconciliation`, `final build-of-record`, `covered by final build`, `batch build covers it`, `covered by G7 [compilation] fold`, `effect already verified at G7`, or any equivalent wording in place of a per-commit build PASS
 - Citing the null-diff reconciliation commit's build, the final-build-fix commit's build, or any later commit's build as the build-of-record for an earlier required commit
+- Citing the Group 7 marker checkpoint build, or any pre-Group-7 build, as the build-of-record for any post-Group-7 commit. Pre-Group-7 builds (including the G7 checkpoint build and its `[compilation]` fix builds) are **never** build-of-record for any post-G7 commit, regardless of what content was folded into them.
+- Mass-folding REFERENCE state from later commits into a single G7 `[compilation]` fix commit so that subsequent post-G7 Source-bucket cherry-picks resolve to empty/no-op and their per-commit builds are escaped (see also HP-8 and rule 11). The G7 `[compilation]` fix commits address compile errors of the current G7 tree only; they do not pre-stage content that future commits would have introduced.
 - Pre-classifying any post-Group-7 source/plugin/build-system commit as build-deferrable during Choose Commit Order or progress reporting
 
 If a required post-Group-7 build was skipped and any later source-range commit was applied, the run is **invalid from the first skipped source index/SHA**. Do not attempt to repair an invalid run by adding builds at the tip. Stop, report the first skipped index/SHA, and ask the engineer whether to reset to the last build-verified commit.
@@ -126,6 +128,24 @@ The only subject-based syntactic check this skill performs is the marker preserv
 
 **How to apply:** Resolve every commit's conflicts at the hunk level using `$REFERENCE_BRANCH` for guidance, regardless of subject. If after hunk-level resolution and the Fold/Defer/Align/Remove loop a commit still cannot be made buildable, that is a Stop Condition — stop and ask, do not introduce a "this kind of commit always gets reset" shortcut. If a class of commits genuinely doesn't apply to the destination base, that decision belongs to the engineer in the current conversation, named by SHA, not to the model classifying by subject.
 
+### HP-8. Bucketing locks at the source commit. Stripping source modifications to escape the Source bucket is forbidden.
+
+The bucket of a source-list commit is determined **before** cherry-pick by running `git diff-tree --no-commit-id --name-only -r <source-sha>` against the **source commit's SHA** (the SHA from `$BASE_BRANCH..$TIP_BRANCH`). Once classified, the bucket does not change based on what the applied commit's tree happens to look like after conflict resolution, deferral, alignment, or amendment.
+
+The following are forbidden, regardless of justification:
+
+- Re-bucketing a Source-bucket commit (or Plugin-only bucket commit) as no-build because the applied commit's `git diff-tree` no longer touches source paths after resolution or amendment.
+- Stripping the source-path hunks of a Source-bucket commit during conflict resolution or post-cherry-pick editing so that the resulting commit lands in the no-build bucket and its required per-commit build is escaped.
+- Running any "align source paths to `$REFERENCE_BRANCH`" / "snap to current REFERENCE state" / "drop source modifications already at REFERENCE" pass over the worktree or the staged tree after a cherry-pick, whether implemented via the HP-1-forbidden commands, via a helper script, via a Python/awk/sed loop that reads `$REFERENCE_BRANCH` content, or via hand-edits whose source is `git show $REFERENCE_BRANCH:<path>` for anything other than the specific conflict region being resolved.
+- Treating "the applied commit's diff is no-build paths only" as evidence that no per-commit build is required, when the source commit's diff-tree included source/plugin/build-system paths.
+- Mass-folding REFERENCE content from later commits into a single G7 `[compilation]` fix commit so that subsequent Source-bucket cherry-picks become empty or no-build (see also HP-2 and rule 11 below). "Minimal G7 fix" means fixing the current G7 tree, not pre-staging future commits' content.
+
+Detection cross-check (mandatory before continuing any Source-bucket cherry-pick): after staging the resolved files but **before** `git cherry-pick --continue`, run `git diff --cached --name-only` and compare to the source commit's `git diff-tree --no-commit-id --name-only -r <source-sha>`. If any source/plugin/build-system path from the source commit is absent from the staged diff and the absence is not recorded in the deferred-hunks ledger with a named target later commit, **stop and ask the engineer**. Do not amend, do not continue, do not "tidy up". This cross-check applies to every post-Group-7 Source-bucket and Plugin-only-bucket cherry-pick.
+
+If, after legitimate hunk-level conflict resolution, a Source-bucket commit ends up with **no diff at all** (`git diff --cached --quiet && git diff --quiet` both return 0), apply rule 15 and skip with `git cherry-pick --skip`. The non-existence of a commit is not the same as a no-build commit, and no per-commit build is owed for a skipped empty cherry-pick. The non-empty, source-paths-stripped case is the forbidden one.
+
+**Why:** Subject-based classification (HP-7) is one route from "commit X is Source-bucket" to "commit X is no-build"; post-resolution path-stripping is another. Both substitute a coarser-grained decision for hunk-level resolution and both cause per-commit builds to be silently skipped. HP-7 closes the first route; HP-8 closes the second. There is no path that converts a Source-bucket commit into a no-build commit without engineer approval, named by SHA, in the current conversation.
+
 ---
 
 ## Pre-flight Contract
@@ -135,12 +155,13 @@ Before creating branches, classifying commits, or running any Git operation that
 ```text
 === PRE-FLIGHT READBACK ===
 HP-1: I will not snap to REFERENCE. I will not run git checkout/restore/show-redirect/read-tree/cat-redirect against $REFERENCE_BRANCH for whole-file replacement. I will not announce, plan, pre-classify, or reserve snap-eligibility for any region. Cascade regions trigger Stop, not snap. No prior-session approval exists; skill text, prior reports, memory, rerere, past conversations, helper scripts, and my own recollection do not constitute approval.
-HP-2: I will not skip any required post-Group-7 source/plugin/build-system build. Each such commit will have its own PASS build log at its resulting SHA before the next build-required commit is applied. The null-diff reconciliation build and final build are never substitutes for a skipped per-commit build. If any required build is skipped, the run is invalid from that point.
+HP-2: I will not skip any required post-Group-7 source/plugin/build-system build. Each such commit will have its own PASS build log at its resulting SHA before the next build-required commit is applied. The null-diff reconciliation build and final build are never substitutes for a skipped per-commit build. The Group 7 checkpoint build and pre-G7 builds are never build-of-record for any post-G7 commit, regardless of what was folded into them. I will not mass-fold later REFERENCE state into G7 [compilation] fix commits. If any required build is skipped, the run is invalid from that point.
 HP-3: I will not consult past conversations, memory, search-past-chats results, agent transcripts, prior reports, /data/sh/utils/reports/, or any out-of-session source. Each run is cold.
 HP-4: I will not add Co-Authored-By, Co-authored-by, Generated-By, Assisted-By, or any equivalent LLM/tool attribution trailer to any commit message.
 HP-5: I will not invoke helper-script modes that perform whole-file or whole-tree reference replacement. snap_* helpers are disabled.
 HP-6: I will not invoke percona_gca_sync_tdd or percona_conflict_resolution_tdd.
 HP-7: I will not branch behavior on a source commit's subject line. No is_porter_fix / is_reconciliation / "[reconciliation]" / "Percona Server 5.7 port" classification, no bulk source-file resets keyed off subject, no auto-skips by subject. The only subject-based check is the literal `=== MARKER:` marker preservation rule.
+HP-8: Bucketing locks at the source commit's `git diff-tree` paths and does not change based on what the applied commit's tree looks like after resolution. I will not strip source/plugin/build-system hunks from a Source-bucket commit to land it in a no-build bucket, run any "align source paths to REFERENCE after cherry-pick" pass, or treat the applied commit's reduced path set as evidence that no per-commit build is required. Before continuing every post-G7 Source-bucket or Plugin-only-bucket cherry-pick I will diff staged paths against the source commit's diff-tree paths and stop if any source/plugin/build-system path is silently absent.
 STOP-DON'T-JUDGE: Where this skill says "if X is even arguably possible, stop and ask," I will stop and ask rather than apply judgment in my own favor.
 ASYMMETRIC ERRORS: Stopping unnecessarily is recoverable; the engineer will tell me to continue. Violating any HP rule invalidates the run regardless of the resulting tree state.
 === END PRE-FLIGHT READBACK ===
@@ -162,6 +183,9 @@ A run is **invalid** (must be discarded and restarted, not repaired) if any of t
 - An LLM/tool attribution trailer (HP-4) was added to a commit and not amended out before the next commit was created.
 - A helper-script mode (HP-5) that performs whole-file or whole-tree reference replacement was invoked.
 - A subject-based commit classification (HP-7) was used to branch processing — bulk source-file resets, auto-skips, or any other per-commit behavior change keyed off the source commit's subject line (other than the literal `=== MARKER:` preservation rule).
+- A Source-bucket or Plugin-only-bucket post-Group-7 commit was rebucketed as no-build after resolution, had its source/plugin/build-system hunks stripped to escape its per-commit build requirement, or was subjected to an "align source paths to REFERENCE after cherry-pick" pass (HP-8). The HP-8 staged-paths cross-check was skipped for any post-G7 Source-bucket or Plugin-only-bucket cherry-pick.
+- A G7 `[compilation]` fix commit folded REFERENCE state from later commits, beyond the minimum required to make the current G7 tree build, so that subsequent post-G7 Source-bucket cherry-picks resolved to empty/no-op and their per-commit builds were escaped (HP-2, HP-8, rule 11).
+- The G7 checkpoint build, or any pre-G7 build, was cited as build-of-record for a post-G7 commit (HP-2).
 - The pre-flight readback was missing, paraphrased, or skipped.
 - A non-marker empty commit was created, or a marker commit's empty preservation was skipped.
 - The Group 7 marker checkpoint build was skipped, or `[compilation]` fix commits were committed after the marker rather than before it.
@@ -194,7 +218,7 @@ The Hard Prohibitions above are the highest-priority rules. The rules below are 
 8. The exact marker subject `=== MARKER: GROUP 7 — Upstream bug fixes ===` is the hard build boundary. Treat every non-marker source-range commit before that marker as part of the No-build bucket regardless of changed paths, including commits that touch `sql/`, `include/`, `storage/`, `cmake/`, generated headers, or any other source/build-system path. If the marker is missing from the source list, **stop and ask the engineer** what boundary to use; do not infer a fallback.
 9. If and only if `$BASE_BRANCH` is exactly `mysql-5.6.22`, apply the branch-specific initial-tree ordering rules in [mysql-5.6.22-initial-tree-ordering.md](mysql-5.6.22-initial-tree-ordering.md). For any other base branch, do not apply those rules even if the engineer mentions them.
 10. For source-range commits before the Group 7 marker, do not run per-commit builds. The first build must start exactly at the Group 7 marker checkpoint, before the marker commit itself is created. For source-range commits after the Group 7 marker, build-verify every completed source/plugin/build-system commit at that commit's resulting SHA before applying the next build-required commit. Only the destination base commit, pre-Group-7 source-range commits, and empty marker commits are exempt.
-11. If the first build run at the Group 7 marker checkpoint fails with compilation issues, apply the minimal fixes in one or more new commits **before** preserving the `=== MARKER: GROUP 7 — Upstream bug fixes ===` marker itself. Each fix commit subject must start with the literal prefix `[compilation]`, then rebuild before preserving the marker and proceeding. The marker commit, when preserved, must be authored after all `[compilation]` fix commits — verify this with `git log --oneline` before continuing.
+11. If the first build run at the Group 7 marker checkpoint fails with compilation issues, apply the minimal fixes in one or more new commits **before** preserving the `=== MARKER: GROUP 7 — Upstream bug fixes ===` marker itself. Each fix commit subject must start with the literal prefix `[compilation]`, then rebuild before preserving the marker and proceeding. The marker commit, when preserved, must be authored after all `[compilation]` fix commits — verify this with `git log --oneline` before continuing. "Minimal" means the smallest set of edits that makes the current G7 tree compile and link; it does **not** include folding REFERENCE state that addresses compile errors which would only be triggered by later commits. Pre-staging post-G7 content into a G7 `[compilation]` commit is forbidden (HP-2, HP-8): it converts later Source-bucket commits into empty/no-op cherry-picks and lets the G7 build act as a substitute build-of-record for content that belongs to post-G7 commits.
 12. Never carry a known non-buildable build-required commit forward (see HP-2). If the current build-required commit cannot be made buildable with at most three minimum-fix attempts, stop and ask.
 13. Do not rely on a later merge, final source commit, reconciliation commit, or final build to make earlier unbuildable commits coherent or to replace missing required post-Group-7 build evidence.
 14. Preserve empty marker commits whose subject starts with `=== MARKER:`. Use `git cherry-pick --allow-empty <sha>` when possible; if Git reports a marker cherry-pick as empty, create the marker with `git commit --allow-empty -C <sha>` from the cherry-pick state. Preserve the original marker subject/body and record the new SHA. Do not build after an empty marker because it changes no tree content. **Detection of "marker" is syntactic**: the source commit subject's first non-whitespace characters must match the literal prefix `=== MARKER:`. If the subject merely contains the word "marker" without that exact prefix, it is not a marker.
@@ -275,12 +299,25 @@ Bucket each commit before applying it. Bucketing is a syntactic operation, not a
 1. **Empty-marker bucket**: source commit subject's first non-whitespace characters match the literal prefix `=== MARKER:`. Always preserve as empty commit, regardless of position relative to Group 7. Do not build after.
 2. **Forced pre-Group-7 no-build bucket**: source commit's 1-based index is less than the Group 7 marker's index, AND it is not itself the Group 7 marker, AND it is not in the Empty-marker bucket. Apply in chronological batches without running builds. This bucket overrides any path-based classification.
 3. **Boundary-build checkpoint**: source commit's subject is exactly `=== MARKER: GROUP 7 — Upstream bug fixes ===`. Run the first build before preserving the marker as an empty commit. Create any required `[compilation]` fix commits before the marker itself.
-4. **Path-classified buckets** (post-Group-7 only): for non-marker commits after Group 7, run `git diff-tree --no-commit-id --name-only -r <sha>` and classify by changed paths:
+4. **Path-classified buckets** (post-Group-7 only): for non-marker commits after Group 7, run `git diff-tree --no-commit-id --name-only -r <source-sha>` against the **source commit's SHA** (from `$BASE_BRANCH..$TIP_BRANCH`) — never the applied commit's SHA, never the staged tree, never the post-resolution amended commit — and classify by changed paths.
+
+   **Extension-based Source override (checked first, overrides every rule below):** if **any** changed path has a filename ending in one of the following case-insensitive extensions, the commit is **Source bucket**, regardless of directory prefix:
+
+   ```
+   .h  .c  .cc  .cxx  .cpp  .hh  .hpp  .hxx  .cmake
+   ```
+
+   Concretely: match `(?i)\.(h|c|cc|cxx|cpp|hh|hpp|hxx|cmake)$` against each path. A single matching path forces the whole commit into Source bucket. This override applies even when the path lives under `mysql-test/`, `plugin/foo/`, `scripts/`, `packaging/`, or any other directory that would otherwise be no-build or plugin-only. C/C++/CMake source content is build-relevant regardless of where it lives.
+
+   If the extension override does not fire (no changed path matches any of those extensions), classify by directory prefix:
+
    - **Path-classified no-build bucket**: only if every changed path matches `^(docs/|build-ps/|man/|mysql-test/|.*\.result$|debian/|rpm/|packaging/|.*\.spec$|scripts/(?!.*\.cmake))`. Apply in small chronological batches; run one incremental build at each batch boundary.
    - **Plugin-only bucket**: every changed path matches `^plugin/[^/]+/`. Apply singly and build immediately at the resulting SHA.
    - **Source bucket**: any changed path that does not match the no-build or plugin-only patterns above, including `sql/`, `include/`, `storage/`, `vio/`, `mysys/`, `client/`, `libmysql/`, `cmake/`, generated headers, or build-system files. Apply singly and build immediately at the resulting SHA.
 
 If a path's bucket is ambiguous, default to the **Source bucket** (build-required). Never default to no-build for an ambiguous path.
+
+The bucket assigned here is **locked** (HP-8). It does not change based on what the applied commit's diff-tree looks like after conflict resolution, deferral, alignment, or amendment. The only legitimate way for a Source-bucket commit not to produce a per-commit build is rule 15: the cherry-pick is fully empty after hunk-level resolution and is therefore skipped — in which case no commit exists, so no build is owed. A non-empty Source-bucket commit whose applied diff has been reduced to no-build paths only is the forbidden case, and the HP-8 staged-paths cross-check in §3 must catch it before the cherry-pick is continued.
 
 If a path-classified no-build batch after Group 7 fails its boundary build, stop, identify the source commit that caused the failure, document the mis-bucket as a violation in `$REPORT_FILE`, and resume with source-bucket rules. If a source/plugin/build-system commit after Group 7 was applied without its required immediate build, the run is invalid (see HP-2 and Validity Invariants).
 
@@ -304,9 +341,24 @@ If it conflicts:
 4. **Whole-file replacement is forbidden** (HP-1) even for test fixtures, generated/preprocessed headers, version files, or coherent API families. If hunk-level resolution is not feasible, stop and ask.
 5. If the file does not exist on `$REFERENCE_BRANCH`, the conflict is between a local addition and a reference-side absence. Remove the conflicting addition hunk only if hunk-level analysis confirms the reference's deletion is the correct logic. Do not delete the whole file unless the entire file is the conflicting change and the engineer has explicitly approved removal in the current conversation.
 6. Stage the resolved files: `git add <resolved-files>`.
-7. Continue the cherry-pick: `git cherry-pick --continue`.
+7. **HP-8 staged-paths cross-check (mandatory for every post-Group-7 Source-bucket and Plugin-only-bucket cherry-pick, whether the cherry-pick conflicted or applied cleanly).** Before continuing, compare the staged tree's touched paths to the source commit's touched paths:
 
-If safe hunk-level resolution is not possible at any step, **stop and ask the engineer**. Do not escalate from hunk-level to whole-file replacement on your own authority.
+   ```sh
+   git diff-tree --no-commit-id --name-only -r <source-sha> | sort -u > /tmp/src-paths.txt
+   { git diff --cached --name-only; git diff --name-only; } | sort -u > /tmp/staged-paths.txt
+   comm -23 /tmp/src-paths.txt /tmp/staged-paths.txt
+   ```
+
+   For every source/plugin/build-system path that appears in `src-paths.txt` but not in `staged-paths.txt`, the source commit's modification of that path is silently absent. Two cases are acceptable:
+
+   1. The full cherry-pick is empty (no diff on any path, staged or unstaged). Apply rule 15 and `git cherry-pick --skip`. No build is owed.
+   2. The omission is bounded deferral recorded in the deferred-hunks ledger with a specific named later target commit (rule 5 / §5 bounds).
+
+   Any other case — non-empty cherry-pick where source/plugin/build-system paths from the source commit are silently absent — is an **HP-8 Stop Condition**. Abort the cherry-pick (`git cherry-pick --abort`), return to `LAST_GOOD`, and ask the engineer. Do not amend, do not run an "alignment" pass, do not strip more to make the commit cleaner, do not rebucket as no-build.
+
+8. Continue the cherry-pick: `git cherry-pick --continue`.
+
+If safe hunk-level resolution is not possible at any step, **stop and ask the engineer**. Do not escalate from hunk-level to whole-file replacement on your own authority. Do not "align" the staged tree to `$REFERENCE_BRANCH` after resolution; the conflict regions resolved during the cherry-pick are the only places where `$REFERENCE_BRANCH` content is permitted to enter the worktree, and only via hand-transcription, not via HP-1-forbidden commands.
 
 ### 4. Preserve Marker Commits And Drop Other Empty Cherry-Picks
 
@@ -429,13 +481,14 @@ The following invariants apply whether using scripts or hand-written shell loops
 2. Locate the exact `=== MARKER: GROUP 7 — Upstream bug fixes ===` subject in the source list before classification. Stop if missing.
 3. Force every non-marker commit before the Group 7 marker into the no-build bucket before considering changed paths.
 4. Treat the exact Group 7 marker as the first-build checkpoint: run the first build before preserving the marker, and create any required `[compilation]` fix commits before the marker itself.
-5. Classify non-marker commits after Group 7 by touched paths.
+5. Classify non-marker commits after Group 7 by touched paths of the **source commit** (`git diff-tree --no-commit-id --name-only -r <source-sha>`). Apply the **extension-based Source override** first: if any changed path matches `(?i)\.(h|c|cc|cxx|cpp|hh|hpp|hxx|cmake)$`, the commit is Source bucket regardless of directory prefix (including `mysql-test/`, `plugin/`, `scripts/`, `packaging/`). Only when no path matches the extension override do the directory-prefix no-build / plugin-only / source rules apply. The classification is locked at this point (HP-8); no helper-script mode may reclassify a Source-bucket or Plugin-only-bucket commit as no-build based on the applied commit's post-resolution diff.
 6. Apply pre-Group-7 no-build batches in small chronological groups without running builds.
 7. Apply post-Group-7 no-build batches in small chronological groups and run an incremental build at each batch boundary.
 8. Apply source/plugin/build-system commits after Group 7 singly and build immediately at the resulting SHA before applying the next build-required commit.
-9. Stop on the first conflict, build failure, or missing required build record. Do not let an automation loop auto-resolve conflicts, defer required builds, or carry failures forward.
-10. If the first Group 7 checkpoint build fails, create the required `[compilation]` fix commits before preserving the marker.
-11. Log each source index, original SHA, new SHA, subject, bucket, whether the no-build bucket was forced by the pre-Group-7 rule, apply status, and build result. For every post-Group-7 source/plugin/build-system commit, the log must include that commit's own build log path and PASS result.
+9. For every post-Group-7 Source-bucket and Plugin-only-bucket cherry-pick, perform the HP-8 staged-paths cross-check before `git cherry-pick --continue` (or before commit, if the cherry-pick applied cleanly). A helper-script mode that omits this cross-check, that runs any "align source paths to REFERENCE" pass over the worktree/staged tree, or that strips source/plugin/build-system hunks from a Source-bucket commit to escape its per-commit build is disabled by HP-8 regardless of disk presence.
+10. Stop on the first conflict, build failure, missing required build record, or HP-8 cross-check failure. Do not let an automation loop auto-resolve conflicts, defer required builds, "align" worktree paths to REFERENCE, or carry failures forward.
+11. If the first Group 7 checkpoint build fails, create the required `[compilation]` fix commits before preserving the marker. The fix content must be the minimum needed to compile the current G7 tree; helper-script modes that mass-fold later REFERENCE state into a G7 `[compilation]` commit are disabled by HP-2 / HP-8 / rule 11.
+12. Log each source index, original SHA, new SHA, subject, source-commit path list, bucket (and whether locked by HP-8 as Source/Plugin even if post-resolution paths look no-build), whether the no-build bucket was forced by the pre-Group-7 rule, the HP-8 staged-paths cross-check result, apply status, and build result. For every post-Group-7 source/plugin/build-system commit, the log must include that commit's own build log path and PASS result.
 
 #### Available helpers
 
@@ -537,7 +590,8 @@ Write `$REPORT_FILE` in markdown. It must include:
 - One-line subject.
 - Whether it applied cleanly or required conflict resolution.
 - Build result for that commit, **or** the no-build exemption (pre-Group-7 forced no-build / post-Group-7 path-classified no-build batch).
-- For every post-Group-7 source/plugin/build-system commit, that commit's own build log path and PASS result at the resulting SHA. The strings `deferred`, `covered by final build`, `covered by reconciliation`, `build-of-record is final`, or any equivalent are unacceptable build results and constitute an HP-2 violation.
+- For every post-Group-7 source/plugin/build-system commit, that commit's own build log path and PASS result at the resulting SHA. The strings `deferred`, `covered by final build`, `covered by reconciliation`, `build-of-record is final`, `covered by G7 [compilation] fold`, `effect already verified at G7`, or any equivalent are unacceptable build results and constitute an HP-2 violation.
+- For every post-Group-7 Source-bucket and Plugin-only-bucket commit, the bucket was decided from the source commit's `git diff-tree` (record the source SHA and the source-paths list), and the HP-8 staged-paths cross-check was performed before continuing the cherry-pick (record either `all source paths present in staged tree` or the deferred-hunks ledger entries that account for any absent paths).
 
 ### Per-preserved-marker-commit
 
@@ -564,7 +618,8 @@ Write `$REPORT_FILE` in markdown. It must include:
 - **Reordering**: any reordering relative to chronological order, with the specific conflict that motivated it.
 - **`mysql-5.6.22` initial-tree selections** (if applicable): every least-conflict selection with candidate index, SHA, conflicted-file count, and selected order.
 - **Bucket classification**: bucket per commit, batching decisions, and any mis-bucket corrections.
-- **Group 7 checkpoint**: any `[compilation]` fix commits with SHA, subject, changed paths, build error summary, rebuild result, and confirmation that each fix commit was created before the marker itself.
+- **Group 7 checkpoint**: any `[compilation]` fix commits with SHA, subject, changed paths, build error summary, rebuild result, and confirmation that each fix commit was created before the marker itself. Each `[compilation]` commit must also include an attestation that its content is the minimum to make the current G7 tree build and does **not** pre-stage REFERENCE state from later commits (HP-2, HP-8, rule 11).
+- **Bucketing lock (HP-8)**: for every post-Group-7 Source-bucket and Plugin-only-bucket commit, the source-SHA-derived path list, whether the **extension-based Source override** fired (and which extensions/paths triggered it), the staged-paths list, the comm-diff result, and either `match` or the ledger entries justifying any missing source paths. Explicit attestation that no Source-bucket commit was rebucketed as no-build after resolution and no "align source paths to REFERENCE" pass was run.
 - **Reference-derived fixes**: any partial changes ported from later commits on `$REFERENCE_BRANCH` to preserve buildability.
 - **Commit rewrites**: any commit rewritten due to build fixes, with failed SHA, final SHA, and build log path.
 - **Buildability confirmation**: confirmation that no non-buildable build-required commits remain on `$OUTPUT_BRANCH`. If the run stopped, identify the last known buildable commit and the blocked source commit.
@@ -591,6 +646,8 @@ Stop and ask the engineer whenever any of the following is **even arguably** the
 - The final null-diff tree fails the required build.
 - You catch yourself reasoning toward any HP-rule violation.
 - You catch yourself reasoning toward "this commit's subject indicates X, so I'll handle it differently" — the only subject-based check is the literal `=== MARKER:` preservation rule (HP-7).
+- The HP-8 staged-paths cross-check shows a source/plugin/build-system path from the source commit absent from the staged tree, and the absence is not (a) a fully empty cherry-pick under rule 15 or (b) a bounded deferral recorded in the ledger with a named later target commit.
+- You catch yourself reasoning toward "the applied commit no longer touches source paths after resolution, so it's no-build now," "I'll align the source paths to REFERENCE since REFERENCE has the final state anyway," "this source intent was already verified at the G7 [compilation] fold," or "I'll fold the post-G7 REFERENCE state into the G7 fix so later cherry-picks land cleanly" — these are HP-2 / HP-8 / rule 11 violations.
 - The pre-flight readback was not produced cleanly.
 
 When stopping, return `$OUTPUT_BRANCH` to `LAST_GOOD` (aborting any in-progress cherry-pick, resetting any failing commit), preserve diagnostics in `$REPORT_FILE`, and describe to the engineer:

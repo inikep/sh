@@ -63,11 +63,13 @@ class Style:
     def bold(self, t): return self._wrap("1", t)
     def red(self, t): return self._wrap("31", t)
     def green(self, t): return self._wrap("32", t)
+    def blue(self, t): return self._wrap("34", t)
     def yellow(self, t): return self._wrap("33", t)
     def magenta(self, t): return self._wrap("35", t)
     def cyan(self, t): return self._wrap("36", t)
     def default(self, t): return self._wrap("39", t)
     def bold_default(self, t): return self._wrap("1;39", t)
+    def orange(self, t): return self._wrap("38;5;208", t)
     def bold_red(self, t): return self._wrap("1;31", t)
     def bold_magenta(self, t): return self._wrap("1;35", t)
 
@@ -102,6 +104,11 @@ FILES_RE = re.compile(r"(\d+) files? changed")
 INS_RE = re.compile(r"(\d+) insertion")
 DEL_RE = re.compile(r"(\d+) deletion")
 DEPTH_VALUE_RE = re.compile(r"-?\d+")
+UPSTREAM_MYSQL_SUBJECT_PREFIX_RE = re.compile(r"^(\(mysql-\d+\.\d+\.\d+\))(\s+)?")
+COMMIT_STATS_LINE_RE = re.compile(
+    r"^(\s*)(.{5})(.{5})(\s)(.{5})(\s)([0-9a-f-]{12})(\s?)(.*)$"
+)
+TOTAL_STATS_LINE_RE = re.compile(r"^(\s*)(.{5})(.{5})(\s)(.{5})(\s)(.*)$")
 
 
 def list_commits_with_subjects(log_args: list[str], reverse: bool,
@@ -344,6 +351,10 @@ def format_shortstat(files: int, ins: int, dele: int) -> str:
 
 
 def subject_style(text: str, bold: bool, red: bool) -> str:
+    prefix = UPSTREAM_MYSQL_SUBJECT_PREFIX_RE.match(text)
+    if prefix:
+        rest = text[prefix.end():]
+        return STYLE.blue(prefix.group(1)) + (prefix.group(2) or "") + subject_style(rest, bold, red)
     if red and bold:
         return STYLE.bold_red(text)
     if red:
@@ -351,28 +362,54 @@ def subject_style(text: str, bold: bool, red: bool) -> str:
     return STYLE.bold_default(text) if bold else STYLE.default(text)
 
 
+def count_style(text: str, color: str) -> str:
+    is_large = "K" in text or "M" in text
+    if is_large:
+        return STYLE.orange(text)
+    if color == "green":
+        return STYLE.green(text)
+    if color == "red":
+        return STYLE.red(text)
+    return text
+
+
+def count_field_style(text: str, color: str, large_as_orange: bool) -> str:
+    value = text.lstrip()
+    padding = text[: len(text) - len(value)]
+    if not value:
+        return text
+    if large_as_orange:
+        return padding + count_style(value, color)
+    if color == "green":
+        return padding + STYLE.green(value)
+    if color == "red":
+        return padding + STYLE.red(value)
+    return text
+
+
 def colorize_stats_line(line: str, bold_subject: bool,
                         red_subject: bool) -> str:
     if not STYLE.enabled:
         return line
-    m = re.match(r"^(\s*)(\S+)(\s+)(\S+)(\s+)(\S+)(\s+)"
-                 r"([0-9a-f-]{12})(\s?)(.*)$", line)
+    m = COMMIT_STATS_LINE_RE.match(line)
     if m:
         return (
-            m.group(1) + m.group(2) + m.group(3) +
-            STYLE.green(m.group(4)) + m.group(5) +
-            STYLE.red(m.group(6)) + m.group(7) +
-            STYLE.yellow(m.group(8)) + m.group(9) +
-            subject_style(m.group(10), bold_subject, red_subject))
+            m.group(1) + m.group(2) +
+            count_field_style(m.group(3), "green", large_as_orange=True) +
+            m.group(4) +
+            count_field_style(m.group(5), "red", large_as_orange=True) +
+            m.group(6) + STYLE.yellow(m.group(7)) + m.group(8) +
+            subject_style(m.group(9), bold_subject, red_subject))
 
-    m = re.match(r"^(\s*)(\S+)(\s+)(\S+)(\s+)(\S+)(\s+)(.*)$", line)
+    m = TOTAL_STATS_LINE_RE.match(line)
     if not m:
         return line
     return (
-        m.group(1) + m.group(2) + m.group(3) +
-        STYLE.green(m.group(4)) + m.group(5) +
-        STYLE.red(m.group(6)) + m.group(7) +
-        subject_style(m.group(8), bold_subject, red_subject))
+        m.group(1) + m.group(2) +
+        count_field_style(m.group(3), "green", large_as_orange=False) +
+        m.group(4) +
+        count_field_style(m.group(5), "red", large_as_orange=False) +
+        m.group(6) + subject_style(m.group(7), bold_subject, red_subject))
 
 
 def normalize_depth_arg(argv: list[str]) -> list[str]:

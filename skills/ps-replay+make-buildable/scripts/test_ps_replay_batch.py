@@ -150,5 +150,66 @@ class BuildPolicyTests(unittest.TestCase):
         self.assertEqual(reason, "plugin-commit")
 
 
+class ClassifyPathsTests(unittest.TestCase):
+    """HP-8 extension-based Source override (SKILL.md §2 Bucketing)."""
+
+    def test_marker_subject_is_empty_marker(self):
+        self.assertEqual(
+            ps_replay_batch.classify_paths(["sql/sql_acl.cc"], "=== MARKER: GROUP 7 — foo"),
+            "empty-marker",
+        )
+
+    def test_empty_paths_is_empty(self):
+        self.assertEqual(ps_replay_batch.classify_paths([], "subject"), "empty")
+
+    def test_cc_in_plugin_is_source_not_plugin(self):
+        # HP-8: extension override beats plugin/ prefix rule.
+        self.assertEqual(
+            ps_replay_batch.classify_paths(["plugin/foo/bar.cc"], "subject"),
+            "source",
+        )
+
+    def test_header_in_mysql_test_is_source_not_no_build(self):
+        # HP-8: extension override beats mysql-test/ no-build rule.
+        self.assertEqual(
+            ps_replay_batch.classify_paths(["mysql-test/include/foo.h"], "subject"),
+            "source",
+        )
+
+    def test_cmake_in_packaging_is_source_not_no_build(self):
+        self.assertEqual(
+            ps_replay_batch.classify_paths(["packaging/rpm-oel/foo.cmake"], "subject"),
+            "source",
+        )
+
+    def test_uppercase_extension_still_matches(self):
+        self.assertEqual(
+            ps_replay_batch.classify_paths(["plugin/foo/Bar.CPP"], "subject"),
+            "source",
+        )
+
+    def test_all_no_build_paths_still_no_build_without_source_extension(self):
+        self.assertEqual(
+            ps_replay_batch.classify_paths(
+                ["mysql-test/r/foo.result", "packaging/rpm-oel/foo.spec"], "subject"
+            ),
+            "no-build",
+        )
+
+    def test_plugin_only_without_source_extensions_is_plugin(self):
+        self.assertEqual(
+            ps_replay_batch.classify_paths(
+                ["plugin/foo/CMakeLists.txt", "plugin/foo/README"], "subject"
+            ),
+            "plugin",
+        )
+
+    def test_sql_directory_is_source(self):
+        self.assertEqual(
+            ps_replay_batch.classify_paths(["sql/sql_acl.cc"], "subject"),
+            "source",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

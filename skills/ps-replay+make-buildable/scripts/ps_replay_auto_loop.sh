@@ -6,9 +6,13 @@
 #   1. Read sha and subject from $SRC_LIST.
 #   2. Bucket the commit:
 #        empty-marker      subject begins with "=== MARKER:"
-#        no-build          all changed paths match no-build prefixes
+#        source            ANY changed path ends in a C/C++/CMake extension
+#                          (.h .c .cc .cxx .cpp .hh .hpp .hxx .cmake) — HP-8
+#                          extension-based override, takes precedence over
+#                          plugin/ and no-build prefixes
+#        no-build          all remaining changed paths match no-build prefixes
 #                          (mysql-test/, doc/, build-ps/, packaging/, *.spec,
-#                          scripts/*.{sh,pl,cmake})
+#                          scripts/*.{sh,pl})
 #        plugin            every changed path is under plugin/
 #        source            anything else (ambiguous defaults to source)
 #   3. Cherry-pick:
@@ -78,20 +82,31 @@ is_marker() {
 
 classify_paths() {
     # Stdin: one path per line. Stdout: bucket name.
-    local has_plugin=0 has_source=0 has_anything=0 nb=1
+    # HP-8 extension-based Source override: a single C/C++/CMake-extension path
+    # forces Source bucket regardless of directory prefix (including plugin/,
+    # mysql-test/, scripts/, packaging/).
+    local has_plugin=0 has_source=0 has_anything=0 has_source_ext=0 nb=1
     while IFS= read -r p; do
         [ -z "$p" ] && continue
         has_anything=1
+        case "${p,,}" in
+            *.h|*.c|*.cc|*.cxx|*.cpp|*.hh|*.hpp|*.hxx|*.cmake)
+                has_source_ext=1; has_source=1; nb=0 ;;
+        esac
         case "$p" in
             mysql-test/*|doc/*|build-ps/*|packaging/*|man/*|Docs/*) ;;
             *.spec|*.spec.*|*.md|*.rst|.bzrignore|.gitignore) ;;
-            scripts/*.sh|scripts/*.pl|scripts/CMakeLists.txt|scripts/*.cmake) ;;
+            scripts/*.sh|scripts/*.pl|scripts/CMakeLists.txt) ;;
             plugin/*) has_plugin=1; nb=0 ;;
             *) has_source=1; nb=0 ;;
         esac
     done
     if [ "$has_anything" = "0" ]; then
         echo empty
+        return
+    fi
+    if [ "$has_source_ext" = "1" ]; then
+        echo source
         return
     fi
     if [ "$nb" = "1" ]; then
@@ -171,9 +186,9 @@ for ((idx=START; idx<=END; idx++)); do
         fi
 
         # If nothing changed after resolution, the cherry-pick is empty —
-        # skip it per skill rule 15.
+        # skip it per skill rule 14.
         if git diff --cached --quiet && git diff --quiet; then
-            echo "[$idx] EMPTY after resolution; skipping (rule 15)"
+            echo "[$idx] EMPTY after resolution; skipping (rule 14)"
             git cherry-pick --skip >/dev/null 2>&1 || git reset --hard HEAD >/dev/null 2>&1
             continue
         fi

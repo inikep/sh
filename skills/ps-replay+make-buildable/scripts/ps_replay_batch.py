@@ -132,6 +132,17 @@ SOURCE_PREFIXES = (
     "vio/",
 )
 SOURCE_EXACT = {"CMakeLists.txt", "VERSION"}
+SOURCE_EXTENSIONS = (
+    ".h",
+    ".c",
+    ".cc",
+    ".cxx",
+    ".cpp",
+    ".hh",
+    ".hpp",
+    ".hxx",
+    ".cmake",
+)
 NOBUILD_PREFIXES = (
     "Docs/",
     "build-ps/",
@@ -218,12 +229,24 @@ def is_marker_subject(subject: str) -> bool:
     return subject.upper().startswith("=== MARKER:")
 
 
+def has_source_extension(path: str) -> bool:
+    """SKILL HP-8 extension-based Source override: any C/C++/CMake file forces Source bucket."""
+    lowered = path.lower()
+    return lowered.endswith(SOURCE_EXTENSIONS)
+
+
 def classify_paths(paths: list[str], subject: str) -> str:
     if is_marker_subject(subject):
         return "empty-marker"
 
     if not paths:
         return "empty"
+
+    # HP-8 extension-based Source override: a single C/C++/CMake-extension path
+    # forces Source bucket regardless of directory prefix (including plugin/,
+    # mysql-test/, scripts/, packaging/).
+    if any(has_source_extension(path) for path in paths):
+        return "source"
 
     if all(path.startswith("plugin/") for path in paths):
         return "plugin"
@@ -234,7 +257,6 @@ def classify_paths(paths: list[str], subject: str) -> str:
     if all(is_no_build_path(path) for path in paths):
         return "no-build"
 
-    # Unknown paths are treated conservatively as source-touching.
     return "source"
 
 

@@ -16,9 +16,9 @@ Rules:
     commit;
   * commits emitted under a "Merge pull request #NNN" parent or side-merge
     subject get a "[#NNN]" subject marker;
-  * side-branch merge commits are squashed by replaying their net delta, but use
-    message, author, and date metadata from the first real non-merge commit
-    found through nested second-parent propagation.
+  * side-branch merge commits are squashed by replaying their net delta; when a
+    nested merge imports a single real change, that change supplies metadata once,
+    while later broad merge squashes keep their own merge metadata.
   * one-parent side commits with merge-like subjects can use metadata from a
     matching real bug-fix commit when the original branch merge was already
     linearized before this script sees it.
@@ -933,22 +933,26 @@ def emit_replayed_squash(
     stats: Stats,
     marker: str | None,
     expected_tree: str | None,
+    used_metadata_shas: set[str] | None = None,
     depth: int = 0,
 ) -> str:
     original = find_first_real_non_merge(repo, meta)
+    metadata = meta if used_metadata_shas is not None and original.sha in used_metadata_shas else original
     new_sha = emit_replayed_delta(
         repo,
         meta,
         parent,
         stats,
         marker,
-        original,
+        metadata,
         expected_tree,
         depth=depth,
-        pre_emit_log=format_squash_metadata_line(original),
+        pre_emit_log=format_squash_metadata_line(original) if metadata.sha == original.sha else None,
     )
     if new_sha != parent:
         stats.squashed_merges += 1
+        if used_metadata_shas is not None:
+            used_metadata_shas.add(metadata.sha)
     return new_sha
 
 
@@ -1135,10 +1139,13 @@ def flatten_side(
     preserve_upstream_imports: bool = True,
     upstream_tags: list[tuple[tuple[int, int, int], str]] | None = None,
     upstream_tag_cache: dict[str, tuple[tuple[int, int, int], str] | None] | None = None,
+    used_metadata_shas: set[str] | None = None,
 ) -> str:
     upstream_tags = upstream_tags or []
     if upstream_tag_cache is None:
         upstream_tag_cache = {}
+    if used_metadata_shas is None:
+        used_metadata_shas = set()
     side_chain = first_parent_chain(repo, first_parent, second_parent)
     side_metas = [load_commit(repo, sha) for sha in side_chain]
     log(f"  side {first_parent[:12]}..{second_parent[:12]}: {len(side_chain)} first-parent commits")
@@ -1214,6 +1221,7 @@ def flatten_side(
                 upstream_import_tag_name,
                 stats,
             )
+            used_metadata_shas.add(meta.sha)
             prev_endpoint = meta.sha
             continue
         if is_null_against_first_parent(repo, meta):
@@ -1224,7 +1232,8 @@ def flatten_side(
         if meta.is_merge:
             side_marker = marker_from_subject(meta.subject) or marker
             original = find_first_real_non_merge(repo, meta)
-            message = prefix_message_subject(original.message, side_marker)
+            metadata_meta = meta if original.sha in used_metadata_shas else original
+            message = prefix_message_subject(metadata_meta.message, side_marker)
             prev_emitted = emitted_parent
             emitted_parent = emit_replayed_delta(
                 repo,
@@ -1232,17 +1241,22 @@ def flatten_side(
                 emitted_parent,
                 stats,
                 side_marker,
-                original,
+                metadata_meta,
                 expected_tree,
                 depth=depth,
-                pre_emit_log=format_squash_metadata_line(original),
+                pre_emit_log=(
+                    format_squash_metadata_line(original)
+                    if metadata_meta.sha == original.sha
+                    else None
+                ),
             )
             if emitted_parent != prev_emitted:
                 stats.squashed_merges += 1
+                used_metadata_shas.add(metadata_meta.sha)
                 side_emitted.append(
                     EmittedSideCommit(
                         meta,
-                        original,
+                        metadata_meta,
                         emitted_parent,
                         tree_of(repo, emitted_parent),
                         message,
@@ -1269,6 +1283,7 @@ def flatten_side(
                 depth=depth,
             )
             if emitted_parent != prev_emitted:
+                used_metadata_shas.add((metadata_meta or meta).sha)
                 side_emitted.append(
                     EmittedSideCommit(
                         meta,
@@ -1309,6 +1324,7 @@ def flatten_range(
             emitted_parent = emit_base_alignment(repo, base, emitted_parent, stats)
     upstream_tags = load_upstream_mysql_tags(repo) if preserve_upstream_imports else []
     upstream_tag_cache: dict[str, tuple[tuple[int, int, int], str] | None] = {}
+    used_metadata_shas: set[str] = set()
     prev_endpoint = base
     for sha in chain:
         meta = load_commit(repo, sha)
@@ -1333,6 +1349,7 @@ def flatten_range(
                 emitted_parent = emit_upstream_import_merge(
                     repo, meta, emitted_parent, direct_upstream_tag[1], stats
                 )
+                used_metadata_shas.add(meta.sha)
                 prev_endpoint = sha
                 continue
             stats.expanded_merges += 1
@@ -1350,6 +1367,7 @@ def flatten_range(
                 preserve_upstream_imports=preserve_upstream_imports,
                 upstream_tags=upstream_tags,
                 upstream_tag_cache=upstream_tag_cache,
+                used_metadata_shas=used_metadata_shas,
             )
         else:
             prev_emitted = emitted_parent
@@ -1361,6 +1379,7 @@ def flatten_range(
                 upstream_tag=first_parent_upstream_tag,
             )
             if emitted_parent != prev_emitted:
+                used_metadata_shas.add(meta.sha)
                 emitted_meta = load_commit(repo, emitted_parent)
                 log_commit_line(repo, "=> ", emitted_parent, emitted_meta.subject)
         prev_endpoint = sha

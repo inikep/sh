@@ -24,7 +24,11 @@ This skill is a sibling of `ps-replay+make-buildable`. Choose this one when:
 
 ## Inputs
 
-- `$INPUT_RANGE` — formatted as `$INPUT_BASE..$INPUT_TIP` (e.g. `mysql-5.6.26..ps-5.6.26`). Derive both endpoints from this.
+- `$INPUT_RANGE` — any `git rev-list` spec. Common shapes:
+  - Plain range: `mysql-5.6.26..ps-5.6.26`
+  - First-parent only (drop merged-in side-branches): `--first-parent mysql-5.6.26..ps-5.6.26`
+  - With exclusion (drop commits reachable from another ref, e.g. an even-newer upstream): `mysql-5.6.26..ps-5.6.26 ^mysql-5.7.44`
+  Derive `$INPUT_BASE` (the `..` left side) and `$INPUT_TIP` (the right side) for reporting; pass the full spec to `git rev-list --reverse` to generate the candidate list.
 - `$OUTPUT_RANGE` — formatted as `$OUTPUT_BASE..$OUTPUT_NAME` (e.g. `mysql-5.7.9..ps-5.7.9`). `$OUTPUT_NAME` is the branch this skill creates.
 - `$REFERENCE` — branch or commit. Final `$OUTPUT_NAME` must null-diff to it. Used both as the convergence target and as the source of truth for conflict resolution.
 - `$REPORT_FILE` — markdown report path (default `/tmp/ps-port-grouped-$OUTPUT_NAME.md`).
@@ -57,11 +61,14 @@ Use `$BUILD_DIR` incrementally. Per-commit log: `$BUILD_DIR/../logs/build-<grp>-
 
 ```sh
 git checkout -B "$OUTPUT_NAME" "$OUTPUT_BASE"
+git rerere clear     # drop any stale resolutions from prior runs
 ```
 
 Build at `$OUTPUT_BASE` **before any cherry-pick**. If `$OUTPUT_BASE` itself doesn't build with the configured toolchain, **stop and ask** — the run cannot start.
 
 Record `$OUTPUT_BASE`'s build PASS in `$REPORT_FILE`.
+
+**rerere hygiene during the run:** if `rerere` is enabled, treat every reuse as untrusted. Before staging a rerere-resolved file, verify each resolved hunk against `$REFERENCE` per Rule C/D below. A stale rerere resolution from a prior run is one of the easiest ways to silently drop content from the output.
 
 ### 2. Scan and Categorize
 
@@ -96,6 +103,35 @@ Categorize by inspecting the commit's **subject + changed paths**. Do not branch
 
 Record per commit in `$REPORT_FILE`: original SHA, subject, category, BUILD_CHANGING, changed-paths summary.
 
+### 2.5 Build the Hunk-Level Dependency Graph
+
+Before group assignment, build a **hunk-level dependency graph** of the input range. The graph is the single most important artifact for identifying pair candidates that the build chronology will trip over later. Skipping this step and discovering structure commit-by-commit through build failures is the #1 cause of long, frustrating runs.
+
+**What the graph contains.** For each commit, parse `git show -U0 --format=` and extract every hunk as a tuple `(file, new_start, new_end, old_start, old_end)`. Then for every pair `(A, B)` with `A` earlier than `B`:
+
+- **Hunk overlap edge** `A→B` if `B` modifies a line range on a file that `A` previously added or modified, with overlap measured on raw line numbers. Record the total overlap-line count as edge weight.
+- **Subject-pair edge** `A↔B` if `git log --format=%s A` equals `git log --format=%s B`. High-confidence signal: the same patch imported (or re-imported) twice.
+- **Author+timestamp edge** `A↔B` if `git log --format='%an %aI' A` equals the same on `B`. Catches split commits where the engineer or import tool wrote the same metadata to two commits intentionally (split for size, split for tooling).
+- **Tag-pair edge** `A↔B` if both subjects contain the same `[#NNN]`, `bug#NNN`, `lp:NNN`, or `BUG#NNN` token. High-confidence: tracked work item.
+
+A minimal Python implementation that scales to 500+ commits in under 10 minutes is sufficient. The graph drops to two TSVs:
+
+```
+hunks.tsv      idx, sha, file, new_start, new_end, old_start, old_end
+overlaps.tsv   idx_A, idx_B, file, A_new_range, B_old_range, overlap_lines
+```
+
+Subject/author/tag-pair edges can live in a third TSV or be re-computed cheaply from the per-commit `git log` metadata.
+
+**Caveat — line drift.** Raw line-number overlap is exact only for adjacent commits. Once intervening commits modify the same file, line numbers shift; `B`'s `old_start..old_end` is in `B`'s pre-image coordinate system, not `A`'s post-image coordinate system. So hunk-overlap is a **noisy** signal mid-range. Treat it as suggestive, not definitive. The subject/author/tag-pair edges have no drift problem and should dominate when they agree.
+
+**How to use the graph.** Three concrete consumers:
+
+1. **Pair detection for Rule-3 squash candidates** — any (A, B) with a subject-edge AND author+timestamp-edge is a near-certain split-pair. Pre-list these *before* execution starts so the run loop can plan squashes instead of stumbling into them as build failures.
+2. **Fix-candidate ranking on build failure** — when commit N fails to build at execution time, query: forward neighbors `M > N` ranked by `(subject-edge, author-edge, tag-edge, hunk-overlap-weight)`. The top candidate is almost always the right squash partner. Don't guess; query.
+
+Record the pair-detection output prominently in `$REPORT_FILE` (a dedicated "Pre-detected pairs" section). Each entry: `(idx_A, idx_B, subject, signals)` where `signals` is the set of edge types that fired. This makes the post-run report self-explanatory.
+
 ### 3. Assign Groups
 
 Each commit lands in exactly one group. Groups are processed in numeric order; within a group, prefer commits the user cares about (features first) unless the user specified otherwise. Chronological order does **not** control ordering.
@@ -113,6 +149,8 @@ Each commit lands in exactly one group. Groups are processed in numeric order; w
 1. **Tentative pass** — assign every commit a tentative group from its category + BUILD_CHANGING flag + a quick `git cherry-pick --no-commit` trial **on a throwaway worktree** (or in-place with `--abort` on every result). The trial is to gauge conflict shape, not to land anything.
 2. **Lock pass** — record the locked group for each commit before starting Group 1 execution. Re-grading mid-run is allowed only to demote (e.g. Group 1 → Group 4) when reality refutes the tentative grade; never promote (Group 4 → Group 1) just because resolution turned out cleaner than expected.
 
+**Batch the tentative pass.** A full upfront trial of every commit is expensive (500+ throwaway picks is a real cost). Trial in **~50-commit chunks**: trial chunk, grade it, run Group 1 from that chunk if helpful, then trial the next chunk. After ~3 chunks you'll know which categories tend to conflict and can skip the trial for low-risk categories (docs-only, test-only) and grade those by category alone. Source-bucket and reconciliation commits always get the trial.
+
 The tentative pass produces a working dataset; throwaway operations must not pollute `$OUTPUT_NAME`.
 
 ### 4. Execute Groups 1 → 5
@@ -121,7 +159,8 @@ For each group, in order:
 
 ```
 for each commit in group:
-    git cherry-pick <sha>
+    if commit has >1 parent (merge commit): git cherry-pick -m 1 <sha>
+    else:                                   git cherry-pick <sha>
     resolve conflicts (rules below)
     if cherry-pick is empty after resolution: git cherry-pick --skip; continue
     git cherry-pick --continue (or commit naturally on clean apply)
@@ -129,6 +168,8 @@ for each commit in group:
     if build fails: apply build-conflict rules (below)
     record outcome in $REPORT_FILE
 ```
+
+**Merge commits in the input range:** `git cherry-pick` requires `-m <parent-number>` for merges. With `--first-parent` in `$INPUT_RANGE` this rarely matters (merges normally get traversed via their first-parent edge, not picked as merges themselves). With a plain range, merges *will* appear in the list. Default to `-m 1` (apply the diff against parent 1, the mainline). If parent 1 isn't the right mainline for a particular merge, that's a stop-and-ask condition.
 
 After every group boundary, snapshot the SHA and confirm `$OUTPUT_NAME` is buildable at the boundary.
 
@@ -211,13 +252,24 @@ For each unresolved conflict region:
 
 **Why this rule exists:** the naive "take HEAD when HEAD is empty" heuristic is wrong most of the time when `$REFERENCE` is the desired final tree. By definition, every patch in the input range has *some* representation in REFERENCE — that's what REFERENCE is. So "HEAD-empty + REFERENCE has content" almost always means the patch's contribution is real and survived in REFERENCE, just at a different place or in a different form. Silently taking HEAD-empty drops live content from the output and produces an invisible residual diff at the end.
 
+**Maximum-danger configuration: `$REFERENCE` = `$INPUT_TIP`.** When REFERENCE is the input branch's own tip (e.g. you're porting `ps-5.6` onto `mysql-5.7.9` and using `ps-5.7.9` as REFERENCE), *every* input commit's surviving contribution is in REFERENCE by construction — that's how REFERENCE was produced. In this configuration the HEAD-empty trap is at maximum risk: virtually every "HEAD-empty + incoming has content" region must **not** pick HEAD. When grading conflict severity during the trial pass, assume `$REFERENCE` = `$INPUT_TIP` runs will need hunk-level decisions on essentially every non-clean cherry-pick; budget time accordingly.
+
+**Automated-resolver guardrail.** A hunk resolver that auto-tiebreaks to HEAD when both sides score zero overlap with `$REFERENCE` is **worse than stopping**. It produces silent, invisible drops at every region neither side resembles. Any helper used during this skill must, when both candidate sides have zero overlap with REFERENCE:
+
+- Read REFERENCE's content at the same path and look for a **third form**.
+- If a third form is found, surface the region as `unresolved, REFERENCE has third form at lines X–Y` with the excerpt and stop for manual transcription.
+- If no third form exists, surface the region as `unresolved, REFERENCE empty at this region — engineer must confirm HEAD-empty drop` and stop.
+
+Never tiebreak to HEAD silently. Stopping is recoverable; silent drops are not (they only surface at final-convergence time, mixed with all other residual, with no record of which commit caused which drop).
+
 **Red flags that signal you're about to fall into the HEAD-empty trap:**
 
 - The conflict region is between an empty HEAD side and an incoming side that adds new lines.
 - You're tempted to "just take HEAD because the upstream removed this" without grepping REFERENCE for the affected symbol.
 - A hunk-level resolver script picked a side automatically and you didn't read the REFERENCE excerpt at that path.
+- The run is in maximum-danger configuration (`$REFERENCE` = `$INPUT_TIP`) and you're treating any HEAD-empty conflict as a routine auto-pick.
 
-In all three cases: stop, run `git show $REFERENCE:<path>` and the symbol search, and apply the decision rule above.
+In all four cases: stop, run `git show $REFERENCE:<path>` and the symbol search, and apply the decision rule above.
 
 ## Build Conflict Rules
 
@@ -295,6 +347,10 @@ Every Rule-2 deferral: originating SHA, symbol/region deferred, predicted restor
 
 Every Rule-3 squash: SHAs squashed together, resulting SHA, justification.
 
+### Dep graph & pair detection
+
+Path to `hunks.tsv` and `overlaps.tsv`. List of pre-detected pairs with their edge-type signals (subject / author+timestamp / tag / hunk-overlap).
+
 ### Final convergence
 
 - `git diff $OUTPUT_NAME $REFERENCE` size before reconciliation
@@ -313,6 +369,7 @@ Every Rule-3 squash: SHAs squashed together, resulting SHA, justification.
 | Whole-file `git checkout REFERENCE -- path` to "fix the diff" at the end | Forbidden. Use targeted hunk-level reconciliation commits, or ask the engineer for explicit authorization. |
 | Squashing two commits because they share a category | Squashes are justified by build coupling, not category. Don't merge related-feature commits unless one literally cannot build without the other. |
 | Deferring code with no restore plan | Every deferral must name the commit that will restore it. Track restoration in the report. |
+| Skipping the dep graph and discovering pairs through build failures | The graph (§2.5) costs <10 min and surfaces every split-pair before execution. Discovering them via build failures wastes hours per pair. |
 
 ## Quick Reference
 

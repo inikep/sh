@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Prune a replayed Percona Server branch by running Phase A and Phase B from
-the ps-make-clean skill (Phase C is intentionally omitted).
+"""Prune a replayed Percona Server branch by running Phase A, Phase B and
+Phase C from the ps-make-clean skill.
 
 Phase A — strip transient paths
   A path is transient iff it is touched somewhere in BASE..SRC AND it is absent
@@ -24,7 +24,15 @@ Phase B — small-commit split and squash
   combined message (root_msg + "\n\n-----\n\n" + member_msg ...); everything
   else is plain cherry-pick.
 
-Both phases must end with `git diff $OUTPUT $SRC` == 0.
+Phase C — deletion-only squash
+  For each commit on the post-B branch, classify deletion-only commits
+  (insertions == 0, deletions > 0). For each, the prev-modifier is the most
+  recent prior commit that touched one of the same paths; chains are
+  resolved to the ultimate non-candidate root. If no prev-modifier exists,
+  the commit is kept as an orphan singleton. Application is identical to
+  Phase B: combined message, single resulting commit per root.
+
+All three phases must end with `git diff $OUTPUT $SRC` == 0.
 """
 from __future__ import annotations
 
@@ -241,9 +249,87 @@ def phase_b_analyze(base, output, log_dir):
     return plan
 
 
-def phase_b_apply(base, src, output, log_dir, plan):
-    chrono = plan['chrono']
-    squash = plan['small_nocpp_squash']
+def phase_c_analyze(base, output, log_dir):
+    """Per-file split: for each deletion-only commit X with files
+    [F1..Fn], each Fi is routed to the most recent prior NON-deletion-only
+    commit that touched Fi. Different files in X may land in different
+    roots. If every file of X has a target, X is fully absorbed and
+    dropped; otherwise X is kept intact (no partial split).
+    """
+    chrono = git_out('rev-list', '--reverse', f'{base}..{output}').split()
+    paths = {}
+    ins_lines = {}
+    del_lines = {}
+    for sha in chrono:
+        ps = git_out('show', '--name-only', '--format=', sha).strip().splitlines()
+        paths[sha] = [p for p in ps if p]
+        ss = git_out('show', '--shortstat', '--format=', sha).strip()
+        ins_lines[sha] = int(INS_RE.search(ss).group(1)) if INS_RE.search(ss) else 0
+        del_lines[sha] = int(DEL_RE.search(ss).group(1)) if DEL_RE.search(ss) else 0
+
+    del_only = [s for s in chrono if ins_lines[s] == 0 and del_lines[s] > 0]
+    del_only_set = set(del_only)
+    chrono_pos = {s: i for i, s in enumerate(chrono)}
+
+    # Per (source_sha, file) -> root_sha (most recent non-deletion-only
+    # prior commit touching that file).
+    per_file_target: dict[tuple[str, str], str] = {}
+    fully_absorbed: list[str] = []
+    partial_kept: list[str] = []
+    for sha in del_only:
+        idx = chrono_pos[sha]
+        ok = True
+        for f in paths[sha]:
+            target = None
+            for j in range(idx - 1, -1, -1):
+                cand = chrono[j]
+                if cand in del_only_set:
+                    continue
+                if f in paths[cand]:
+                    target = cand
+                    break
+            if target is None:
+                ok = False
+                break
+            per_file_target[(sha, f)] = target
+        if ok:
+            fully_absorbed.append(sha)
+        else:
+            # Roll back any per-file assignments for this source; we keep
+            # the source intact rather than splitting it partially.
+            for f in paths[sha]:
+                per_file_target.pop((sha, f), None)
+            partial_kept.append(sha)
+
+    # root_sha -> ordered list of (source_sha, file) absorbed there.
+    absorb_into: dict[str, list[tuple[str, str]]] = {}
+    for (src, f), root in per_file_target.items():
+        absorb_into.setdefault(root, []).append((src, f))
+    for root in absorb_into:
+        absorb_into[root].sort(key=lambda sf: (chrono_pos[sf[0]], sf[1]))
+
+    plan = {
+        'chrono': chrono,
+        'fully_absorbed': fully_absorbed,
+        'partial_kept': partial_kept,
+        # JSON-friendly serialization of (src,file) tuples.
+        'absorb_into': {
+            root: [{'source': s, 'file': f} for s, f in items]
+            for root, items in absorb_into.items()
+        },
+    }
+    (log_dir / 'phase-c-plan.json').write_text(json.dumps(plan, indent=2))
+
+    print(f"Total: {len(chrono)}")
+    print(f"  deletion-only: {len(del_only)}  "
+          f"fully-absorbed (drop): {len(fully_absorbed)}  "
+          f"partial-kept: {len(partial_kept)}")
+    return plan
+
+
+def squash_apply(base, src, output, log_dir, chrono, squash, *, phase, work_suffix):
+    """Generic apply: walk `chrono`, squashing absorbed commits into their
+    ultimate root with a combined message. Used by Phase B and Phase C."""
     absorbed_set = set(squash.keys())
 
     def resolve(s, depth=0):
@@ -259,11 +345,12 @@ def phase_b_apply(base, src, output, log_dir, plan):
     for k in absorb_into:
         absorb_into[k].sort(key=lambda s: chrono_pos[s])
 
-    work = f'{output}-phase-b'
+    work = f'{output}-{work_suffix}'
     run('git', 'branch', '-D', work, check=False)
     git('checkout', '-q', '-b', work, base)
 
     log_lines = []
+    log_path = log_dir / f'phase-{phase.lower()}-apply.log'
     for i, sha in enumerate(chrono, 1):
         subj = git_out('log', '-1', '--format=%s', sha).strip()[:55]
         if sha in absorbed_set:
@@ -281,7 +368,7 @@ def phase_b_apply(base, src, output, log_dir, plan):
                     run('git', 'cherry-pick', '--abort', check=False)
                     sys.stderr.write(r.stdout or '')
                     sys.stderr.write(r.stderr or '')
-                    (log_dir / 'phase-b-apply.log').write_text('\n'.join(log_lines))
+                    log_path.write_text('\n'.join(log_lines))
                     sys.exit(1)
                 msgs.append(git_out('log', '-1', '--format=%B', m).rstrip())
             combined = "\n\n-----\n\n".join(msgs)
@@ -293,6 +380,21 @@ def phase_b_apply(base, src, output, log_dir, plan):
                              ('%ce', 'GIT_COMMITTER_EMAIL'),
                              ('%cI', 'GIT_COMMITTER_DATE')]:
                 env[var] = git_out('log', '-1', '--format=' + fmt, sha).strip()
+            # Detect empty-after-squash: cherry-picks may net to zero
+            # (e.g. an addition cancelled by a later deletion). In that
+            # case there's nothing to commit; drop the merged commit
+            # rather than fail.
+            head_tree = git_out('rev-parse', 'HEAD^{tree}').strip()
+            staged_tree = subprocess.run(
+                ['git', 'write-tree'], capture_output=True, text=True, check=True
+            ).stdout.strip()
+            if staged_tree == head_tree:
+                log_lines.append(
+                    f"[{i}] DROP-EMPTY {sha[:11]} + {len(absorb_into[sha])} absorbed -> {subj}"
+                )
+                # Reset the (no-op) staged state cleanly.
+                run('git', 'reset', '-q', '--hard', 'HEAD', check=False)
+                continue
             fd, mp = tempfile.mkstemp()
             try:
                 os.write(fd, combined.encode())
@@ -305,7 +407,7 @@ def phase_b_apply(base, src, output, log_dir, plan):
                 os.unlink(mp)
             if r.returncode:
                 log_lines.append(f"COMMIT FAIL {sha[:11]}")
-                (log_dir / 'phase-b-apply.log').write_text('\n'.join(log_lines))
+                log_path.write_text('\n'.join(log_lines))
                 sys.stderr.write(r.stdout or '')
                 sys.stderr.write(r.stderr or '')
                 sys.exit(1)
@@ -318,18 +420,139 @@ def phase_b_apply(base, src, output, log_dir, plan):
                 log_lines.append(f"[{i}] CONFLICT singleton {sha[:11]} {subj}")
                 sys.stderr.write(r.stdout or '')
                 sys.stderr.write(r.stderr or '')
-                (log_dir / 'phase-b-apply.log').write_text('\n'.join(log_lines))
+                log_path.write_text('\n'.join(log_lines))
                 sys.exit(1)
             log_lines.append(f"[{i}] PICK {sha[:11]} {subj}")
 
-    (log_dir / 'phase-b-apply.log').write_text('\n'.join(log_lines) + '\n')
+    log_path.write_text('\n'.join(log_lines) + '\n')
 
     git('branch', '-f', output, work)
     git('checkout', '-q', output)
     git('branch', '-D', work)
 
-    print("Phase B applied")
-    verify_null_diff(output, src, phase='B')
+    print(f"Phase {phase} applied")
+    verify_null_diff(output, src, phase=phase)
+
+
+def phase_b_apply(base, src, output, log_dir, plan):
+    squash_apply(
+        base, src, output, log_dir,
+        plan['chrono'], plan['small_nocpp_squash'],
+        phase='B', work_suffix='phase-b',
+    )
+
+
+def phase_c_apply(base, src, output, log_dir, plan):
+    """Walk chronologically. For each non-absorbed commit:
+      * If absorb_into has entries for this commit, cherry-pick it, then
+        for every (source, file) pair: replace the file's index entry
+        with the source's blob for that file (deletion applied via
+        tree-level swap). Commit once with combined message.
+      * Otherwise plain cherry-pick.
+    Fully-absorbed sources are dropped entirely (DEFER)."""
+    chrono = plan['chrono']
+    fully_absorbed_set = set(plan['fully_absorbed'])
+    absorb_into = {
+        root: [(e['source'], e['file']) for e in items]
+        for root, items in plan['absorb_into'].items()
+    }
+
+    work = f'{output}-phase-c'
+    run('git', 'branch', '-D', work, check=False)
+    git('checkout', '-q', '-b', work, base)
+
+    log_lines = []
+    log_path = log_dir / 'phase-c-apply.log'
+
+    for i, sha in enumerate(chrono, 1):
+        subj = git_out('log', '-1', '--format=%s', sha).strip()[:55]
+        if sha in fully_absorbed_set:
+            log_lines.append(f"[{i}] DROP {sha[:11]} (fully absorbed per-file)")
+            continue
+
+        # Cherry-pick this commit (root or untouched non-deletion commit).
+        r = run('git', 'cherry-pick', sha, check=False)
+        if r.returncode:
+            log_lines.append(f"[{i}] CONFLICT cherry-pick {sha[:11]} {subj}")
+            sys.stderr.write(r.stdout or '')
+            sys.stderr.write(r.stderr or '')
+            log_path.write_text('\n'.join(log_lines))
+            sys.exit(1)
+
+        entries = absorb_into.get(sha)
+        if not entries:
+            log_lines.append(f"[{i}] PICK {sha[:11]} {subj}")
+            continue
+
+        # Apply per-file blob swaps for each (source, file) absorbed here.
+        for source_sha, fpath in entries:
+            ls = git_out('ls-tree', source_sha, '--', fpath).strip()
+            if not ls:
+                # Source deleted the file outright at this path. Remove
+                # the path from our index.
+                run('git', 'update-index', '--remove', '--force-remove',
+                    '--', fpath, check=False)
+                continue
+            # ls-tree format: "<mode> <type> <sha>\t<path>"
+            head, _ = ls.split('\t', 1)
+            mode, _typ, blob = head.split()
+            run('git', 'update-index', '--add', '--cacheinfo',
+                f'{mode},{blob},{fpath}')
+
+        # Amend the cherry-picked commit's tree to include the per-file
+        # blob swaps, combining the messages of the root and each
+        # contributing source.
+        head_tree = git_out('rev-parse', 'HEAD^{tree}').strip()
+        staged_tree = subprocess.run(
+            ['git', 'write-tree'], capture_output=True, text=True, check=True
+        ).stdout.strip()
+        if staged_tree == head_tree:
+            log_lines.append(
+                f"[{i}] PICK {sha[:11]} (no-op absorbs) {subj}"
+            )
+            continue
+
+        contributing = sorted({s for s, _ in entries},
+                              key=lambda s: chrono.index(s))
+        msgs = [git_out('log', '-1', '--format=%B', sha).rstrip()]
+        for contrib in contributing:
+            msgs.append(git_out('log', '-1', '--format=%B', contrib).rstrip())
+        combined = "\n\n-----\n\n".join(msgs)
+
+        env = os.environ.copy()
+        for fmt, var in [('%an', 'GIT_AUTHOR_NAME'),
+                         ('%ae', 'GIT_AUTHOR_EMAIL'),
+                         ('%aI', 'GIT_AUTHOR_DATE'),
+                         ('%cn', 'GIT_COMMITTER_NAME'),
+                         ('%ce', 'GIT_COMMITTER_EMAIL'),
+                         ('%cI', 'GIT_COMMITTER_DATE')]:
+            env[var] = git_out('log', '-1', '--format=' + fmt, sha).strip()
+        head_parent = git_out('rev-parse', 'HEAD^').strip()
+        fd, mp = tempfile.mkstemp()
+        try:
+            os.write(fd, combined.encode())
+            os.close(fd)
+            new_commit = subprocess.run(
+                ['git', 'commit-tree', staged_tree, '-p', head_parent,
+                 '-F', mp],
+                env=env, capture_output=True, text=True, check=True
+            ).stdout.strip()
+        finally:
+            os.unlink(mp)
+        run('git', 'reset', '-q', '--hard', new_commit)
+        log_lines.append(
+            f"[{i}] MERGE {sha[:11]} + {len(contributing)} source(s) "
+            f"({len(entries)} file ops) -> {subj}"
+        )
+
+    log_path.write_text('\n'.join(log_lines) + '\n')
+
+    git('branch', '-f', output, work)
+    git('checkout', '-q', output)
+    git('branch', '-D', work)
+
+    print("Phase C applied")
+    verify_null_diff(output, src, phase='C')
 
 
 def main():
@@ -359,8 +582,12 @@ def main():
         verify_null_diff(args.output, args.src, phase='A(skip)')
 
     print("=== PHASE B: small-commit split/squash ===")
-    plan = phase_b_analyze(args.base, args.output, log_dir)
-    phase_b_apply(args.base, args.src, args.output, log_dir, plan)
+    plan_b = phase_b_analyze(args.base, args.output, log_dir)
+    phase_b_apply(args.base, args.src, args.output, log_dir, plan_b)
+
+    print("=== PHASE C: deletion-only squash ===")
+    plan_c = phase_c_analyze(args.base, args.output, log_dir)
+    phase_c_apply(args.base, args.src, args.output, log_dir, plan_c)
 
     final = git_out('rev-list', '--count', f'{args.base}..{args.output}').strip()
     print("=== DONE ===")

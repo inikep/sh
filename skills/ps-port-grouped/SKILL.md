@@ -15,7 +15,30 @@ Port a Percona Server commit range from `$INPUT_BASE..$INPUT_TIP` onto a newer b
 
 The strategy is **easier-first by group**, not chronological. Easy commits land first and establish a buildable foundation; harder source-code conflicts land last when the surrounding patches are already in place.
 
-**Hard ordering rule:** the workflow is `§1 Prepare → §2 Scan → §2.5 Dep graph → §3 Assign Groups (tentative+lock, batched but completed for the entire range) → §3.5 Workflow Gate → §4 Execute Groups 1→5 → §5 Converge`. You may not begin §4 cherry-picks while §3 is still partial. Processing commits in `git rev-list` order with on-the-fly grouping is the failure mode this skill is built to prevent — see §3.6 for the red-flag list.
+## Workflow Phase Discipline
+
+The skill enforces phases. Each phase has a precondition (what must exist on disk before entering) and an output (what's produced). You may not begin a later phase while an earlier phase's output is absent.
+
+| Phase | Precondition | Output |
+|-------|--------------|--------|
+| §1 Prepare | nothing | `$OUTPUT_NAME` at `$OUTPUT_BASE`, base build PASS recorded in `$REPORT_FILE` |
+| §2 Scan | §1 output | per-commit table in `$REPORT_FILE` |
+| §2.5 Dep graph | §2 output | `hunks.tsv`, `overlaps.tsv`, pre-detected pairs list in `$REPORT_FILE` |
+| §3 Assign Groups | §2.5 output | **`$LOCKED_PLAN_FILE` written**, one row per commit, sorted by (group, intra-group order) |
+| §3.5 Gate | `$LOCKED_PLAN_FILE` complete | all checkboxes ticked in `$REPORT_FILE` |
+| §4 Execute | §3.5 passed | one cherry-pick per row of `$LOCKED_PLAN_FILE`, **iterated in file order** |
+| §5 Converge | §4 output | null diff to `$REFERENCE`, final build PASS |
+
+**The single failure mode this skill exists to prevent.** An LLM reads the skill, internalizes "easier-first by group," and then drifts into "process commits in `git rev-list --reverse` order, grade each as I pick, land what works, struggle on what doesn't." This *feels* like compliance — there are groups in the report, there is a trial pass — but it is chronological execution with cosmetic grouping. Recognize the fingerprints:
+
+- A single commit consuming disproportionate time. You are stuck because the next commit *by chronological index* was a Group 4/5 commit, not because no easier work remained in the range.
+- Cherry-picks landed on `$OUTPUT_NAME` before `$LOCKED_PLAN_FILE` existed on disk. (Check: `stat $LOCKED_PLAN_FILE` vs `git log --format=%aI $OUTPUT_BASE..$OUTPUT_NAME | tail -1`. If the file is missing or younger than the oldest pick, you drifted.)
+- The landed-SHA order on `$OUTPUT_NAME` corresponds to `git rev-list --reverse $INPUT_RANGE` order rather than (group, intra-group) order.
+- You did per-commit "trial pick → grade → land" in a single loop instead of completing the trial pass for the entire range up front.
+
+If any of those describe the current run, do not push through the stuck commit. Jump to §3.7 Recovery.
+
+**Why the on-disk plan file is non-negotiable.** Text guardrails ("batch the trial pass," "do not interleave") are easy for an LLM to agree with and then locally optimize away. A file is not. §4's loop is literally `for row in $LOCKED_PLAN_FILE`. If the file doesn't exist, §4 cannot start. If the file is sorted by group, the execution order is by group. Phase discipline is enforced by what exists on disk, not by what you remember the skill said.
 
 This skill is a sibling of `ps-replay+make-buildable`. Choose this one when:
 
@@ -34,6 +57,7 @@ This skill is a sibling of `ps-replay+make-buildable`. Choose this one when:
 - `$OUTPUT_RANGE` — formatted as `$OUTPUT_BASE..$OUTPUT_NAME` (e.g. `mysql-5.7.9..ps-5.7.9`). `$OUTPUT_NAME` is the branch this skill creates.
 - `$REFERENCE` — branch or commit. Final `$OUTPUT_NAME` must null-diff to it. Used both as the convergence target and as the source of truth for conflict resolution.
 - `$REPORT_FILE` — markdown report path (default `/tmp/ps-port-grouped-$OUTPUT_NAME.md`).
+- `$LOCKED_PLAN_FILE` — TSV path (default `/tmp/ps-port-grouped-$OUTPUT_NAME-plan.tsv`). Written by §3, consumed by §4. Its existence and completeness is the §3.5 gate's primary check. §4 iterates this file in row order; if it does not exist, §4 cannot start.
 - `$BUILD_DIR` — out-of-tree build directory under `/tmp` (default `/tmp/build-$OUTPUT_NAME`).
 
 ## Build Configuration
@@ -140,11 +164,13 @@ Each commit lands in exactly one group. Groups are processed in numeric order; w
 
 | Group | Definition |
 |-------|------------|
-| 1 | Applies cleanly OR with only trivial conflicts (whitespace, copyright, version strings, single-line context shifts). |
-| 2 | Small conflicts AND small/easily-portable build dependencies. May be BUILD_CHANGING. |
-| 3 | Larger conflicts BUT **not** BUILD_CHANGING (tests, docs, packaging, result files). Should never break the build. |
-| 4 | BUILD_CHANGING with source-code conflicts. Hardest group. |
-| 5 | Anything not applicable above — deferred / problem cases. |
+| 1 | **BC=0 only.** Any outcome (clean apply, empty, or conflict) — by construction these touch no `.h/.c/.cc/.cxx/.cpp/.hh/.hpp/.hxx/.cmake` paths and therefore cannot break the build. Land first; build verification not required mid-group, only at the group boundary. |
+| 2 | BC=1 (BUILD_CHANGING) commits whose trial outcome was **clean or empty**. They may still fail at build time (uses-before-defines from later commits), but the cherry-pick itself is conflict-free. |
+| 3 | BC=1 with **small conflict** in the trial pass (n_conflicts ≤ 3). |
+| 4 | BC=1 with **larger conflict** (n_conflicts > 3). Hardest group. |
+| 5 | Anything not applicable above — deferred / problem cases (other-fail trial outcomes, etc.). |
+
+**Why Group 1 is BC=0-only.** A previous version of this rubric admitted BC=1 commits into Group 1 whenever the cherry-pick trial happened to be clean. In practice, BC=1 "clean trial" commits routinely fail at build time because they use symbols a later commit defines (e.g. `expand_fast_index_creation`, `OPT_INNODB_OPTIMIZE_KEYS`, `page_hash_latch`). That forced a Rule-1 or Rule-2 build fix on every BC=1 commit in what was supposed to be the easiest group, inflating Group 1 wall-clock time disproportionately and undermining the "easier-first" framing. Restricting Group 1 to BC=0 means it lands fast (no per-commit builds needed; one build at the group boundary is enough), establishing a known-buildable foundation **before** any BC=1 commit is picked.
 
 **Assignment is a two-pass process.** You cannot fully grade conflict size by reading the commit; you have to try. So:
 
@@ -153,21 +179,62 @@ Each commit lands in exactly one group. Groups are processed in numeric order; w
 
 **Batch the tentative pass — required, not optional.** A full upfront trial of every commit is expensive (500+ throwaway picks is a real cost). Trial in **~50-commit chunks**, grade each chunk, then trial the next chunk. The tentative pass must cover the **entire** `$INPUT_RANGE` before Group 1 execution starts. The only permitted shortcut: skip the trial-pick for low-risk categories (docs-only, test-only, packaging-only) and grade those by category + BUILD_CHANGING alone after the first ~3 chunks have established the conflict pattern. Source-bucket, build, reconciliation, and any BUILD_CHANGING commit always get the trial.
 
-**Do not interleave trial chunks with Group 1 execution.** "Trial chunk 1 → land Group 1 from chunk 1 → trial chunk 2" is forbidden. It produces post-hoc grouping (you grade commits in the order they appear, then land them in roughly that order) and silently degenerates into chronological processing. Complete the tentative pass for the entire range, write the locked dataset, *then* begin §4.
+**Do not interleave trial chunks with Group 1 execution.** "Trial chunk 1 → land Group 1 from chunk 1 → trial chunk 2" is forbidden. It produces post-hoc grouping (you grade commits in the order they appear, then land them in roughly that order) and silently degenerates into chronological processing. Complete the tentative pass for the entire range, write `$LOCKED_PLAN_FILE`, *then* begin §4.
 
 The tentative pass produces a working dataset; throwaway operations must not pollute `$OUTPUT_NAME`.
 
+#### Writing `$LOCKED_PLAN_FILE`
+
+At the end of §3, **write the locked dataset to `$LOCKED_PLAN_FILE`** in this exact TSV format (tab-separated, header row included):
+
+```
+plan_pos	group	intra_group_order	orig_sha	rev_list_pos	category	build_changing	subject
+1	1	1	abc123def456	7	bugfix	false	Fix typo in error message
+2	1	2	...
+...
+N	5	K	...
+```
+
+Field semantics:
+
+- `plan_pos` — 1..N. This is the **execution order**. §4 iterates by this column. It is **not** the chronological index.
+- `group` — 1..5, the locked group from §3.
+- `intra_group_order` — 1..M within the group. Within a group, prefer commits the user cares about (features first) unless the user specified otherwise.
+- `orig_sha` — the source commit's full SHA.
+- `rev_list_pos` — the commit's index in `git rev-list --reverse $INPUT_RANGE`. **Reference only.** This is what `idx` meant in past conversations about this skill; surfaced here so you can detect chronological drift (if `rev_list_pos` is monotonically increasing along `plan_pos`, you have not actually grouped — you've sorted chronologically and labeled it).
+- `category`, `build_changing`, `subject` — as scanned in §2.
+
+Sort the file by `(group ASC, intra_group_order ASC)`. The file's row order **is** the execution order.
+
+Sanity checks before declaring §3 complete:
+
+```sh
+# Row count matches input-range commit count.
+test "$(tail -n +2 "$LOCKED_PLAN_FILE" | wc -l)" -eq "$(git rev-list --count $INPUT_RANGE)" || echo "PLAN INCOMPLETE"
+
+# plan_pos column is 1..N contiguous.
+awk -F'\t' 'NR>1 {print $1}' "$LOCKED_PLAN_FILE" | awk 'NR!=$1 {print "GAP at "NR; exit 1}'
+
+# rev_list_pos is NOT monotonically increasing along plan_pos (if it is, you didn't actually re-order by group — flag for manual review unless the range was genuinely already easier-first).
+awk -F'\t' 'NR>1 {if (prev!="" && $5<prev) mono=0; else if (prev!="" && $5>prev) inc++; prev=$5; tot++} END {if (inc==tot-1) print "WARNING: rev_list_pos monotonically increasing — verify groups are real, not cosmetic"}' "$LOCKED_PLAN_FILE"
+```
+
+If the warning fires, do not proceed to §4 — re-check that the trial pass actually graded conflict shape, not just category.
+
 ### 3.5 Workflow Gate — Preconditions for §4
 
-Before executing the first real cherry-pick (§4), confirm **all** of the following are true. If any answer is "no", you are not ready for §4 — return to the corresponding earlier step.
+Before executing the first real cherry-pick (§4), confirm **all** of the following are true. Each is independently verifiable on disk — do not "remember" them, run the check. If any answer is "no", you are not ready for §4 — return to the corresponding earlier step.
 
 - [ ] `$OUTPUT_BASE` built clean (§1) and the PASS is recorded in `$REPORT_FILE`.
-- [ ] Every commit in `$INPUT_RANGE` has a row in the §3 scan table with Category, BUILD_CHANGING, and a **locked** Group (1–5).
+- [ ] **`$LOCKED_PLAN_FILE` exists** (`test -f "$LOCKED_PLAN_FILE"`).
+- [ ] **`$LOCKED_PLAN_FILE` row count equals `git rev-list --count $INPUT_RANGE`** (see §3 sanity checks). A partial plan is not a plan.
+- [ ] **`$LOCKED_PLAN_FILE` rows are sorted by (group, intra_group_order).** Verify: `awk -F'\t' 'NR>1 {key=$2"."sprintf("%06d",$3); if (key<prev) {print "OUT OF ORDER at line "NR; exit 1} prev=key}' "$LOCKED_PLAN_FILE"`.
+- [ ] Every commit in `$INPUT_RANGE` has a row in the §3 scan table with Category, BUILD_CHANGING, and a locked Group (1–5).
 - [ ] The hunk-level dep graph (§2.5) has been built and the "Pre-detected pairs" section of `$REPORT_FILE` is populated (even if the list is empty — record "no pairs detected").
-- [ ] The locked dataset is written to `$REPORT_FILE` *before* the first `git cherry-pick` on `$OUTPUT_NAME`.
-- [ ] The next commit you intend to apply is the lowest-numbered Group still containing unlanded commits (i.e. Group 1 commits come before any Group 2 commit, regardless of chronology).
+- [ ] **`$OUTPUT_NAME` is at `$OUTPUT_BASE`.** Verify: `git rev-parse "$OUTPUT_NAME"` equals `git rev-parse "$OUTPUT_BASE"`. No commits have been cherry-picked yet. If commits exist, you either drifted (jump to §3.7) or you're resuming mid-run (different recovery — see §3.7).
+- [ ] The next commit you intend to apply is **row 1 of `$LOCKED_PLAN_FILE`**, not "the next commit by chronological index" or "the next commit I happen to remember."
 
-If the dataset is locked but you find yourself reaching for the next commit in input-list order rather than the next commit in Group order, **stop**. That is the rationalization the skill exists to prevent. Re-read §3 and the Red Flags below.
+If the dataset is locked but you find yourself reaching for the next commit in input-list order rather than the next row of `$LOCKED_PLAN_FILE`, **stop**. That is the rationalization the skill exists to prevent. Re-read §3 and the Red Flags below.
 
 ### 3.6 Red Flags — STOP and re-plan
 
@@ -182,29 +249,64 @@ You are about to (or already) violating the easier-first invariant if any of the
 
 If any of these fire: revert `$OUTPUT_NAME` to the last group-boundary buildable SHA, redo the tentative + lock passes for all unlanded commits, and resume from Group 1 of the re-planned dataset. The discarded work is the cost of skipping §3; the alternative (continuing chronologically and re-grading on the fly) compounds the cost commit by commit.
 
+### 3.7 Recovery — How to pivot when chronological drift is detected
+
+You are here because the Workflow Phase Discipline section, §3.5, or §3.6 fired and you've established that `$OUTPUT_NAME` has commits landed without `$LOCKED_PLAN_FILE` driving them. Do not push through the stuck commit. Pivot:
+
+1. **Inventory what's on `$OUTPUT_NAME` already.** Capture `git log --reverse --format='%H %s' $OUTPUT_BASE..$OUTPUT_NAME > /tmp/landed-so-far.txt`. These SHAs are the commits you already invested resolution work in — you don't want to throw that away unless necessary.
+
+2. **Find the last group-boundary buildable SHA.** Walk `$REPORT_FILE`'s "Group execution" section for the most recent recorded `Group-boundary buildable SHA`. If none exists (you never finished a group cleanly), use `$OUTPUT_BASE`.
+
+3. **Reset.** `git checkout "$OUTPUT_NAME" && git reset --hard <buildable-SHA>`. This is the irreversible step; confirm the SHA before running it.
+
+4. **Complete §2.5 and §3 for the unlanded commits.** Build the dep graph if you skipped it. Run the trial pass for all commits in `$INPUT_RANGE` that are not already reachable from the new `$OUTPUT_NAME` tip. Grade conflict shape — actually run the trial picks on a throwaway worktree, do not grade by category alone.
+
+5. **Write `$LOCKED_PLAN_FILE`.** The plan covers only commits not already landed. Run the §3 sanity checks. If the "rev_list_pos monotonically increasing" warning fires, your trial pass didn't grade conflict shape — re-do it.
+
+6. **Run the §3.5 gate.** Every checkbox.
+
+7. **Resume §4 from row 1 of the new `$LOCKED_PLAN_FILE`.** The cherry-picks you previously did that fall into Group 1 of the new plan can often be re-applied cleanly; the ones in Groups 2–5 may have been the wrong order anyway. Either way, the next pick comes from the plan file.
+
+8. **Record the pivot in `$REPORT_FILE`** under a dedicated "Pivots" section: the SHA you reset to, why (which red flag fired, which `plan_pos` or `rev_list_pos` you were stuck on), how many commits were re-planned. This is for the engineer reviewing the run, not for you — but writing it forces honest acknowledgement of what happened.
+
+**Sunk-cost trap.** "I've already done conflict resolution for commits 1–33, surely I can finish 34 and recover from there." No. The reason 34 is hard is that easier commits in the same range haven't landed yet to provide context. Pushing through 34 in isolation does not produce a better tree than 34 with the easier surrounding work applied first. Reset.
+
+**When `$REFERENCE` = `$INPUT_TIP` (maximum-danger config).** Chronological drift in this configuration risks silent HEAD-empty drops at the same time. After reset, re-examine every Rule-D decision made on the discarded commits when you re-do them. Do not assume past resolutions were correct.
+
 ### 4. Execute Groups 1 → 5
 
 **Precondition:** the §3.5 Workflow Gate has been satisfied. If you cannot tick every box in §3.5, do not run a single cherry-pick from this section.
 
-**Ordering invariant:** the iteration is `for g in 1..5: for commit in group[g]:`. It is **not** `for commit in input_list: cherry_pick(commit)`. If you find yourself reaching for the next commit by input-list index instead of by `(group, intra-group order)`, you have fallen back to chronological processing — stop and re-read §3.6.
+**Ordering invariant — the iteration is over `$LOCKED_PLAN_FILE` rows, not over `git rev-list` output.** The next commit to pick is *always* the lowest-numbered `plan_pos` not yet landed. If you find yourself reaching for a commit by `rev_list_pos` (i.e. chronological index), or by SHA-from-memory, you have fallen back to chronological processing — stop and re-read §3.6/§3.7.
 
-For each group, in order:
+The execution loop is, literally:
 
+```sh
+tail -n +2 "$LOCKED_PLAN_FILE" | while IFS=$'\t' read -r plan_pos group intra_order orig_sha rev_list_pos category build_changing subject; do
+    echo "=== plan_pos=$plan_pos group=$group orig_sha=$orig_sha (rev_list_pos=$rev_list_pos) ==="
+
+    # 1. Cherry-pick (use -m 1 if merge commit).
+    if [ "$(git cat-file -p "$orig_sha" | grep -c '^parent ')" -gt 1 ]; then
+        git cherry-pick -m 1 "$orig_sha" || true
+    else
+        git cherry-pick "$orig_sha" || true
+    fi
+
+    # 2. Resolve conflicts per Rules A–D (manual step; the loop pauses here).
+    # 3. If empty after resolution: git cherry-pick --skip; continue.
+    # 4. Otherwise: git cherry-pick --continue.
+    # 5. Build. If fail, apply build-conflict rules.
+    # 6. Record outcome in $REPORT_FILE (which plan_pos, new SHA, conflicts, build log).
+done
 ```
-for each commit in group:
-    if commit has >1 parent (merge commit): git cherry-pick -m 1 <sha>
-    else:                                   git cherry-pick <sha>
-    resolve conflicts (rules below)
-    if cherry-pick is empty after resolution: git cherry-pick --skip; continue
-    git cherry-pick --continue (or commit naturally on clean apply)
-    BUILD the project
-    if build fails: apply build-conflict rules (below)
-    record outcome in $REPORT_FILE
-```
+
+This loop is the contract. Every cherry-pick `$OUTPUT_NAME` receives must come from a `$LOCKED_PLAN_FILE` row, processed in `plan_pos` order. There is no other way to pick a commit. If you find yourself running `git cherry-pick <sha>` where `<sha>` did not come from reading the next unlanded row, you are violating §4.
+
+**Demotion mid-run.** If commit at `plan_pos = P` reveals itself to be Group 4/5 when tentative-graded Group 1/2 (the conflict shape was worse than the trial predicted), `git cherry-pick --abort`, edit `$LOCKED_PLAN_FILE` to move the row to its true group (re-numbering `plan_pos` accordingly), record the demotion in `$REPORT_FILE`, and proceed to the new `plan_pos = P`. Demotion is fine. Promotion (Group 4 → Group 1 because resolution turned out clean) is forbidden without re-running the trial pass for affected commits — clean resolution might depend on later commits not yet landed, which a re-trial would reveal.
 
 **Merge commits in the input range:** `git cherry-pick` requires `-m <parent-number>` for merges. With `--first-parent` in `$INPUT_RANGE` this rarely matters (merges normally get traversed via their first-parent edge, not picked as merges themselves). With a plain range, merges *will* appear in the list. Default to `-m 1` (apply the diff against parent 1, the mainline). If parent 1 isn't the right mainline for a particular merge, that's a stop-and-ask condition.
 
-After every group boundary, snapshot the SHA and confirm `$OUTPUT_NAME` is buildable at the boundary.
+After every group boundary (last row of group G processed and built), snapshot the SHA and confirm `$OUTPUT_NAME` is buildable at the boundary. Record the boundary SHA in `$REPORT_FILE` — this is the recovery point if §3.7 fires later.
 
 ### 5. Final Convergence
 
@@ -365,12 +467,19 @@ Table of every commit in `$INPUT_RANGE`:
 
 ### Group execution
 
+Reference: `$LOCKED_PLAN_FILE` is the source of truth for what was supposed to happen. This section records what actually happened against it.
+
 For each group 1..5:
 
-- Total commits, applied / skipped-empty / category-removed / deferred-to-later-group
-- For each applied commit: original SHA → new SHA, conflict files (if any) and the REFERENCE region cited, build log path, PASS/FAIL
-- For each skipped commit: original SHA, subject, reason (empty after resolution / category removed from REFERENCE / explicit engineer skip)
-- Group-boundary buildable SHA
+- Total commits (from plan), applied / skipped-empty / category-removed / deferred-to-later-group / demoted-out
+- For each applied commit: `plan_pos`, original SHA → new SHA, conflict files (if any) and the REFERENCE region cited, build log path, PASS/FAIL
+- For each skipped commit: `plan_pos`, original SHA, subject, reason (empty after resolution / category removed from REFERENCE / explicit engineer skip)
+- For each demoted commit: `plan_pos` before/after, group before/after, what the trial pass missed
+- Group-boundary buildable SHA (record this — it's the recovery point for §3.7 if drift is detected later)
+
+### Pivots (if §3.7 fired)
+
+For each pivot: which §3.6 red flag fired, `plan_pos` where the run was when detected, SHA reset to, count of commits re-planned, brief note on what changed about the locked plan after re-planning. If no pivots occurred, record "no pivots".
 
 ### Deferred code
 
@@ -396,6 +505,9 @@ Path to `hunks.tsv` and `overlaps.tsv`. List of pre-detected pairs with their ed
 |---------|-----|
 | Treating chronological order as the default | Groups override chronology. Scan and assign before cherry-picking the first commit. |
 | Processing commits in `git rev-list --reverse` order and grouping post-hoc | This is chronological with cosmetic grouping. The tentative + lock passes (§3) must finish for the **entire** range before any real cherry-pick. Symptom: you get stuck on a Group 4/5 commit at a mid-range index instead of skipping past it to easier work. |
+| Cherry-picking before `$LOCKED_PLAN_FILE` exists on disk | The plan is the execution contract. No `git cherry-pick` on `$OUTPUT_NAME` before §3 writes the file and §3.5 verifies it. If you have already drifted into this state, pivot per §3.7 rather than continuing. |
+| Plan file exists but `rev_list_pos` is monotonically increasing along `plan_pos` | You grouped on paper but ordered chronologically. The trial pass didn't actually grade conflict shape. Re-do §3 with real `git cherry-pick --no-commit` trials on a throwaway worktree. |
+| Picking the next commit "from memory" or by chronological index instead of by reading `$LOCKED_PLAN_FILE` row | The plan file is the source of truth for what comes next. Read it, pick the lowest unlanded `plan_pos`. |
 | Interleaving tentative-pass chunks with Group 1 execution | The "trial 50 → land Group 1 from those 50 → trial next 50" pattern degenerates into chronological order. Complete the tentative pass for the whole range first. |
 | Pushing through a hard commit because you've already started it | If a commit's actual conflict shape reveals it's Group 4/5 when tentative-graded Group 1/2, demote it, `cherry-pick --abort`, and continue with the next Group-1 commit. Sunk cost is not a reason to land a hard commit early. |
 | Skipping the `$OUTPUT_BASE` build | If the base doesn't build, no later state on `$OUTPUT_NAME` builds either. Always verify first. |
@@ -418,10 +530,9 @@ Path to `hunks.tsv` and `overlaps.tsv`. List of pre-detected pairs with their ed
 | Inspect REFERENCE region | `git show $REFERENCE:<path>` (inspection only) |
 | Search REFERENCE | `git grep -n '<symbol>' $REFERENCE -- '<dir>/'` |
 | Throwaway trial pick | `git cherry-pick --no-commit <sha>; git diff --name-only --diff-filter=U; git cherry-pick --abort` |
+| Plan file row count check | `test "$(tail -n +2 "$LOCKED_PLAN_FILE" \| wc -l)" -eq "$(git rev-list --count $INPUT_RANGE)"` |
+| Plan file sort check | `awk -F'\t' 'NR>1 {k=$2"."sprintf("%06d",$3); if (k<p) {print "OOO "NR; exit 1} p=k}' "$LOCKED_PLAN_FILE"` |
+| Drift detector | `git log --reverse --format=%H $OUTPUT_BASE..$OUTPUT_NAME` — landed SHAs should match `$LOCKED_PLAN_FILE`'s `orig_sha` column in `plan_pos` order |
+| Next commit to pick | `tail -n +2 "$LOCKED_PLAN_FILE" \| awk -v n=<next_plan_pos> -F'\t' '$1==n'` |
 | Final null-diff check | `git diff $OUTPUT_NAME $REFERENCE` |
 
-## When NOT to Use This Skill
-
-- The commit range has a meaningful `=== MARKER: GROUP 7 — Upstream bug fixes ===` boundary and chronological order is the desired shape — use `ps-replay+make-buildable` instead.
-- You don't have a `$REFERENCE` branch with the desired final tree. This skill is convergence-driven; without REFERENCE, conflict resolution loses its anchor.
-- You want a single squashed result rather than per-commit history — use `ps-squash-dag` after porting, or do the port chronologically and squash at the end.

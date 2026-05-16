@@ -36,6 +36,7 @@ import sys
 import tempfile
 from collections import defaultdict
 from dataclasses import dataclass
+from heapq import heappop, heappush
 from pathlib import Path
 
 
@@ -457,6 +458,39 @@ def commit_tree(repo: str | Path, tree: str, parent: str | None, meta: CommitMet
     args.extend(["-F", "-"])
     message = meta.message if meta.message.endswith("\n") else meta.message + "\n"
     return git(repo, *args, input_text=message, env=env).stdout.strip()
+
+
+def next_chain_touch_after(
+    repo: str | Path,
+    chain: list[str],
+    start_idx: int,
+    path: str,
+) -> str | None:
+    """Return the SHA of the first chain commit after `chain[start_idx]`
+    that touched `path` on the first-parent chain. None if no later
+    commit touched it.
+
+    Uses one `git log --first-parent --reverse -- <path>` query against
+    the original chain SHAs.
+    """
+    if start_idx >= len(chain) - 1:
+        return None
+    range_spec = f"{chain[start_idx]}..{chain[-1]}"
+    out = git_text(
+        repo,
+        "log",
+        "--first-parent",
+        "--reverse",
+        "--format=%H",
+        range_spec,
+        "--",
+        path,
+    )
+    for line in out.splitlines():
+        sha = line.strip()
+        if sha:
+            return sha
+    return None
 
 
 def parse_patch_path(raw: str) -> str | None:
@@ -893,7 +927,14 @@ def first_parent_index_after_base(
     return None
 
 
-def cherry_pick_tree(repo: str | Path, base: str | None, ours: str | None, theirs: str) -> str:
+def cherry_pick_tree(
+    repo: str | Path,
+    base: str | None,
+    ours: str | None,
+    theirs: str,
+    *,
+    skipped_out: list[Hunk | BinaryHunk] | None = None,
+) -> str:
     if base is None or ours is None:
         return tree_of(repo, theirs)
     result = git(
@@ -919,7 +960,7 @@ def cherry_pick_tree(repo: str | Path, base: str | None, ours: str | None, their
                 f"  {STYLE.yellow('replaying')} {short_sha(theirs)} onto "
                 f"{short_sha(ours)} with patch fallback"
             )
-            return patch_cherry_pick_tree(repo, base, ours, theirs)
+            return patch_cherry_pick_tree(repo, base, ours, theirs, skipped_out=skipped_out)
         except AbsorbError as fallback_exc:
             raise AbsorbError(
                 f"could not replay {theirs[:12]} onto {ours[:12]}\n"
@@ -933,7 +974,14 @@ def cherry_pick_tree(repo: str | Path, base: str | None, ours: str | None, their
     return tree
 
 
-def patch_cherry_pick_tree(repo: str | Path, base: str, ours: str, theirs: str) -> str:
+def patch_cherry_pick_tree(
+    repo: str | Path,
+    base: str,
+    ours: str,
+    theirs: str,
+    *,
+    skipped_out: list[Hunk | BinaryHunk] | None = None,
+) -> str:
     patch = git_text(
         repo,
         "diff",
@@ -946,7 +994,9 @@ def patch_cherry_pick_tree(repo: str | Path, base: str, ours: str, theirs: str) 
     hunks = parse_unified_diff(patch, emit_binary=True)
     if not hunks:
         return tree_of(repo, ours)
-    return apply_hunks_to_tree(repo, tree_of(repo, ours), hunks)
+    return apply_hunks_to_tree(
+        repo, tree_of(repo, ours), hunks, skipped_out=skipped_out
+    )
 
 
 def apply_binary_hunk_to_index(
@@ -976,7 +1026,12 @@ def apply_binary_hunk_to_index(
 
 
 def apply_hunks_to_tree(
-    repo: str | Path, tree: str, hunks: list[Hunk | BinaryHunk]
+    repo: str | Path,
+    tree: str,
+    hunks: list[Hunk | BinaryHunk],
+    *,
+    skip_on_failure: bool = False,
+    skipped_out: list[Hunk | BinaryHunk] | None = None,
 ) -> str:
     """Apply absorbed hunks to `tree`, batching textual hunks per file.
 
@@ -984,6 +1039,14 @@ def apply_hunks_to_tree(
     in a single patch so their offsets are interpreted against the
     pre-application file: applying them one at a time shifts line numbers
     and breaks --3way disambiguation when adjacent hunks share context.
+
+    With `skip_on_failure=True`, hunks that neither `git apply --3way`
+    nor the textual fallback can land are skipped with a warning rather
+    than aborting the rewrite. Callers that absorb hunks into prior
+    commits set this, because the source commit's own cherry-pick will
+    still replay the change later. Callers that use this function to
+    materialize a cherry-pick result (e.g. `patch_cherry_pick_tree`)
+    must leave it False so divergence aborts the rewrite.
     """
     fd, index_path = tempfile.mkstemp(prefix="ps-absorb-hunks-index-")
     os.close(fd)
@@ -1017,6 +1080,7 @@ def apply_hunks_to_tree(
                 git(repo, "read-tree", "--reset", current_tree, env=env)
                 for hunk in batch:
                     path = hunk.new_path or hunk.old_path or "<unknown>"
+                    pre_state = index_stage0_state(repo, env, path)
                     inner = git(
                         repo,
                         "apply",
@@ -1030,6 +1094,10 @@ def apply_hunks_to_tree(
                     )
                     if inner.returncode == 0:
                         continue
+                    # A failed --3way apply may leave stages 1/2/3 in the
+                    # index; rewind the file's entry so the fallback sees
+                    # the pre-apply stage-0 state.
+                    restore_index_path(repo, env, path, pre_state)
                     try:
                         apply_hunk_to_index_with_fallback(repo, env, hunk)
                         log(
@@ -1037,6 +1105,21 @@ def apply_hunks_to_tree(
                             f"{styled_path(path)}"
                         )
                     except AbsorbError as fallback_exc:
+                        if skip_on_failure or skipped_out is not None:
+                            # Leave the file at its pre-apply state and
+                            # skip this hunk; the caller (or the source
+                            # commit's later cherry-pick) is expected to
+                            # carry the change another way.
+                            restore_index_path(repo, env, path, pre_state)
+                            log(
+                                f"  {STYLE.yellow('skipped (apply failed):')} "
+                                f"{styled_path(path)} at "
+                                f"{styled_hunk_header(hunk)} — "
+                                f"{STYLE.dim(str(fallback_exc).splitlines()[0])}"
+                            )
+                            if skipped_out is not None:
+                                skipped_out.append(hunk)
+                            continue
                         raise AbsorbError(
                             f"could not apply hunk for {path} at {hunk.hunk_header.rstrip()}\n"
                             f"STDOUT:\n{colorize_conflicts(inner.stdout)}\n"
@@ -1260,6 +1343,53 @@ def index_file_entry(repo: str | Path, env: dict[str, str], path: str) -> tuple[
     return mode, blob
 
 
+def index_stage0_state(
+    repo: str | Path, env: dict[str, str], path: str
+) -> tuple[str, str] | None:
+    """Return (mode, blob) of the stage-0 entry for `path`, or None if absent.
+
+    Unlike `index_file_entry`, this returns None when the path is missing
+    or has unresolved conflict stages (1/2/3) rather than raising. Used to
+    capture the pre-apply index state so a failed `git apply --3way` can
+    be undone before invoking the textual fallback.
+    """
+    out = git(repo, "ls-files", "--stage", "--", path, env=env).stdout
+    for line in out.splitlines():
+        if not line.endswith(f"\t{path}"):
+            continue
+        meta, _ = line.split("\t", 1)
+        parts = meta.split()
+        if len(parts) >= 3 and parts[2] == "0":
+            return parts[0], parts[1]
+    return None
+
+
+def restore_index_path(
+    repo: str | Path,
+    env: dict[str, str],
+    path: str,
+    state: tuple[str, str] | None,
+) -> None:
+    """Clear all index stages for `path` and reseed stage 0 from `state`.
+
+    Used after `git apply --3way` leaves the index with unresolved
+    conflict stages (1/2/3): the fallback applier requires a clean
+    stage-0 entry, so we rewind the file's index entry to what it was
+    before the failed apply.
+    """
+    git(repo, "update-index", "--force-remove", "--", path, env=env, check=False)
+    if state is not None:
+        mode, blob = state
+        git(
+            repo,
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            f"{mode},{blob},{path}",
+            env=env,
+        )
+
+
 SUBPROJECT_PLUS = "+Subproject commit "
 SUBPROJECT_MINUS = "-Subproject commit "
 GITLINK_MODE = "160000"
@@ -1434,6 +1564,119 @@ def dispositions_by_target(
     return grouped
 
 
+def build_hunk_dag(
+    dispositions: list[HunkDisposition],
+    chain_index: dict[str, int],
+) -> tuple[dict[int, set[int]], dict[int, set[int]]]:
+    """Construct a hunk-level dependency DAG.
+
+    Edge A -> B (A depends on B; B applied first) when A and B touch
+    the same file AND either:
+      - B.target is a strict first-parent ancestor of A.target, OR
+      - B.target == A.target with B.old_start < A.old_start.
+
+    Returns (edges, reverse) keyed by hunk number, where
+    `edges[a]` = set of B that A depends on, and
+    `reverse[b]` = set of A that depend on B.
+    Only dispositions with a target contribute nodes.
+    """
+    by_file: dict[str, list[HunkDisposition]] = defaultdict(list)
+    for d in dispositions:
+        if d.target is None or isinstance(d.hunk, BinaryHunk):
+            continue
+        path = d.hunk.new_path or d.hunk.old_path or "<unknown>"
+        by_file[path].append(d)
+    edges: dict[int, set[int]] = defaultdict(set)
+    reverse: dict[int, set[int]] = defaultdict(set)
+    for path, group in by_file.items():
+        group.sort(
+            key=lambda x: (
+                chain_index.get(x.target, -1),
+                x.hunk.old_start,
+                x.number,
+            )
+        )
+        for i in range(len(group)):
+            a = group[i]
+            a_idx = chain_index[a.target]
+            for j in range(i):
+                b = group[j]
+                b_idx = chain_index[b.target]
+                if b_idx < a_idx or (
+                    b_idx == a_idx and b.hunk.old_start < a.hunk.old_start
+                ):
+                    edges[a.number].add(b.number)
+                    reverse[b.number].add(a.number)
+    return edges, reverse
+
+
+def topo_order_dispositions(
+    dispositions: list[HunkDisposition],
+    edges: dict[int, set[int]],
+    reverse: dict[int, set[int]],
+    chain_index: dict[str, int],
+) -> list[HunkDisposition]:
+    """Kahn's topological sort over dispositions with target, with
+    deterministic tie-break by
+    `(chain-index of target, file path, old_start, hunk number)`.
+    Dispositions without a target keep their original order in the
+    returned list (appended after the topo-ordered nodes)."""
+    by_id: dict[int, HunkDisposition] = {}
+    for d in dispositions:
+        if d.target is not None and not isinstance(d.hunk, BinaryHunk):
+            by_id[d.number] = d
+    in_deg: dict[int, int] = {nid: len(edges.get(nid, set())) for nid in by_id}
+
+    def sort_key(nid: int) -> tuple:
+        d = by_id[nid]
+        path = d.hunk.new_path or d.hunk.old_path or "<unknown>"
+        return (chain_index[d.target], path, d.hunk.old_start, d.number)
+
+    pq: list[tuple[tuple, int]] = []
+    for nid in by_id:
+        if in_deg[nid] == 0:
+            heappush(pq, (sort_key(nid), nid))
+    ordered: list[HunkDisposition] = []
+    while pq:
+        _, nid = heappop(pq)
+        ordered.append(by_id[nid])
+        for dependent in reverse.get(nid, ()):
+            in_deg[dependent] -= 1
+            if in_deg[dependent] == 0:
+                heappush(pq, (sort_key(dependent), dependent))
+    if len(ordered) != len(by_id):
+        unprocessed = [nid for nid in by_id if in_deg.get(nid, 0) > 0]
+        raise AbsorbError(
+            f"DAG has a cycle; {len(unprocessed)} of {len(by_id)} hunks unscheduled"
+        )
+    by_number = {d.number for d in ordered}
+    leftover = [d for d in dispositions if d.number not in by_number]
+    return ordered + leftover
+
+
+def write_hunk_dag_dot(
+    dispositions: list[HunkDisposition],
+    edges: dict[int, set[int]],
+    path: str,
+) -> None:
+    """Write a graphviz `.dot` rendering of the hunk DAG to `path`.
+    Only dispositions with a target are included as nodes."""
+    nodes = [d for d in dispositions if d.target is not None]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("digraph hunks {\n")
+        f.write("  rankdir=LR;\n")
+        f.write("  node [shape=box, fontsize=10];\n")
+        for d in nodes:
+            file_path = d.hunk.new_path or d.hunk.old_path or "<unknown>"
+            old_start = getattr(d.hunk, "old_start", 0)
+            label = f"#{d.number}\\n{file_path}\\nL{old_start} -> {d.target[:8]}"
+            f.write(f'  "{d.number}" [label="{label}"];\n')
+        for a, deps in edges.items():
+            for b in deps:
+                f.write(f'  "{a}" -> "{b}";\n')
+        f.write("}\n")
+
+
 def rewrite_branch(args: argparse.Namespace) -> int:
     repo = Path(args.repo).resolve()
     if not (repo / ".git").exists():
@@ -1494,15 +1737,30 @@ def rewrite_branch(args: argparse.Namespace) -> int:
     )
     log_numbered_hunks(repo, dispositions, source_meta)
 
+    chain_index = {sha: idx for idx, sha in enumerate(chain)}
+    dag_edges, dag_reverse = build_hunk_dag(dispositions, chain_index)
+    edge_count = sum(len(v) for v in dag_edges.values())
+    targeted_count = sum(1 for d in dispositions if d.target is not None)
+    log(
+        f"{STYLE.bold('Hunk DAG:')} {targeted_count} node(s), "
+        f"{edge_count} edge(s)"
+    )
+    if args.dag_output:
+        write_hunk_dag_dot(dispositions, dag_edges, args.dag_output)
+        log(f"DAG written to {args.dag_output}")
+    dispositions = topo_order_dispositions(
+        dispositions, dag_edges, dag_reverse, chain_index
+    )
+
     groups = dispositions_by_target(dispositions)
     if not groups:
-        log("No movable hunks found; branch left unchanged.")
-        if args.output_branch:
-            update_branch_ref(repo, output_branch, original_tip, output_expected_tip)
-            log(f"Created {output_branch} at unchanged tip {original_tip}")
-        return 0
-
-    earliest = min(chain_index[target] for target in groups)
+        # No hunks have an absorption target, but the source commit still
+        # holds content. Drive the rewrite anyway so source is dropped and
+        # its content reappears as the tail reconciliation commit.
+        log("No absorbable hunks; dropping source and routing its content to tail.")
+        earliest = chain_index[source]
+    else:
+        earliest = min(chain_index[target] for target in groups)
     if earliest == 0:
         raise AbsorbError("cannot absorb into the root commit")
 
@@ -1512,35 +1770,124 @@ def rewrite_branch(args: argparse.Namespace) -> int:
     )
     new_parent = chain[earliest - 1]
     rewritten: dict[str, str] = {}
+    # Hunks deferred from earlier cherry-pick failures, keyed by the
+    # ORIGINAL chain SHA at which they should be re-attempted. Populated
+    # on the fly by patch_cherry_pick_tree skipping unappliable hunks.
+    deferred_at: dict[str, list[Hunk | BinaryHunk]] = defaultdict(list)
+    # Hunks with no later chain commit touching the same path; applied
+    # in a single synthetic reconciliation commit at the end.
+    tail_hunks: list[Hunk | BinaryHunk] = []
+
+    def hunk_path_of(h: Hunk | BinaryHunk) -> str:
+        return h.new_path or h.old_path or "<unknown>"
+
+    def route_leftover(failing_idx: int, hunk: Hunk | BinaryHunk, *, from_defer: bool = False) -> None:
+        path = hunk_path_of(hunk)
+        # Deferred-application failures go straight to tail: routing the
+        # same hunk through multiple later commits cascades freshly-failing
+        # cherry-picks at every step without making progress.
+        target = None if from_defer else next_chain_touch_after(repo, chain, failing_idx, path)
+        if target is not None:
+            deferred_at[target].append(hunk)
+            log(
+                f"  {STYLE.yellow('deferred')} {styled_path(path)} -> "
+                f"first later chain commit touching path: {short_sha(target)}"
+            )
+        else:
+            tail_hunks.append(hunk)
+            log(
+                f"  {STYLE.yellow('queued for tail reconciliation:')} "
+                f"{styled_path(path)}"
+            )
 
     for idx in range(earliest, len(chain)):
         original = chain[idx]
         meta = load_commit(repo, original)
         original_parent = meta.parents[0] if meta.parents else None
-        new_tree = cherry_pick_tree(repo, original_parent, new_parent, original)
-        absorbed = groups.get(original, [])
-        if absorbed:
-            new_tree = apply_hunks_to_tree(
-                repo, new_tree, [d.hunk for d in absorbed]
-            )
-        if original == source and new_tree == tree_of(repo, new_parent):
+        if original == source:
+            # Always drop the source commit from the rewritten chain.
+            # Its absorbed hunks have already been folded into earlier
+            # commits; any hunks that couldn't be absorbed (no
+            # dispositioning target, or apply failures elsewhere) are
+            # reconciled by the synthetic tail commit at the end.
             log(
                 f"  {commit_label(meta)}  "
-                f"{STYLE.yellow('-> dropped (empty after absorption)')}"
+                f"{STYLE.yellow('-> dropped (source commit; leftovers go to tail)')}"
             )
             rewritten[original] = new_parent
             continue
+        leftover: list[Hunk | BinaryHunk] = []
+        new_tree = cherry_pick_tree(
+            repo, original_parent, new_parent, original, skipped_out=leftover,
+        )
+        for hunk in leftover:
+            route_leftover(idx, hunk, from_defer=False)
+        absorbed = groups.get(original, [])
+        deferred_here = deferred_at.pop(original, [])
+        # Apply absorbed first (with deferral on failure), then deferred
+        # (with tail on failure) so cascades terminate cleanly.
+        if absorbed:
+            abs_leftover: list[Hunk | BinaryHunk] = []
+            new_tree = apply_hunks_to_tree(
+                repo, new_tree, [d.hunk for d in absorbed],
+                skip_on_failure=True, skipped_out=abs_leftover,
+            )
+            for hunk in abs_leftover:
+                route_leftover(idx, hunk, from_defer=False)
+        if deferred_here:
+            def_leftover: list[Hunk | BinaryHunk] = []
+            new_tree = apply_hunks_to_tree(
+                repo, new_tree, deferred_here,
+                skip_on_failure=True, skipped_out=def_leftover,
+            )
+            for hunk in def_leftover:
+                route_leftover(idx, hunk, from_defer=True)
+        tags = []
         if absorbed:
             numbers = ", ".join(f"#{d.number}" for d in absorbed)
-            absorbed_tag = STYLE.green(
-                f"-> absorbed {pluralize(len(absorbed), 'hunk')} ({numbers})"
+            tags.append(
+                STYLE.green(f"-> absorbed {pluralize(len(absorbed), 'hunk')} ({numbers})")
             )
-            log(f"  {commit_label(meta)}  {absorbed_tag}")
+        if deferred_here:
+            tags.append(
+                STYLE.cyan(f"-> applied {pluralize(len(deferred_here), 'deferred hunk')}")
+            )
+        if tags:
+            log(f"  {commit_label(meta)}  {' '.join(tags)}")
         new_commit = commit_tree(repo, new_tree, new_parent, meta)
         rewritten[original] = new_commit
         new_parent = new_commit
 
     candidate_tip = new_parent
+
+    if tail_hunks or tree_of(repo, original_tip) != tree_of(repo, candidate_tip):
+        # Synthesize one reconciliation commit at the end that brings
+        # the rewritten tip's tree back to the original tip's tree.
+        # Using the original tip's tree directly is sound because the
+        # tail commit's diff is exactly the changes the rewrite failed
+        # to land at their intended positions.
+        tail_tree = tree_of(repo, original_tip)
+        if tail_tree != tree_of(repo, candidate_tip):
+            tail_message = source_meta.message
+            tail_meta = CommitMeta(
+                sha="",
+                tree=tail_tree,
+                parents=[candidate_tip],
+                author_name=source_meta.author_name,
+                author_email=source_meta.author_email,
+                author_date=source_meta.author_date,
+                committer_name=source_meta.committer_name,
+                committer_email=source_meta.committer_email,
+                committer_date=source_meta.committer_date,
+                message=tail_message,
+            )
+            new_commit = commit_tree(repo, tail_tree, candidate_tip, tail_meta)
+            log(
+                f"  {STYLE.cyan('-> tail reconciliation commit')} "
+                f"{short_sha(new_commit)} ({pluralize(len(tail_hunks), 'hunk')} reconciled)"
+            )
+            candidate_tip = new_commit
+
     if tree_of(repo, original_tip) != tree_of(repo, candidate_tip):
         raise AbsorbError(
             f"null-diff tree check failed: {original_tip[:12]} and {candidate_tip[:12]} differ"
@@ -1596,6 +1943,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-branch", default=None, help="Create/update this branch with the rewritten history.")
     parser.add_argument("--force", action="store_true", help="Replace an existing --output-branch.")
     parser.add_argument("--context", type=int, default=3, help="Unified diff context for hunk parsing.")
+    parser.add_argument(
+        "--dag-output",
+        default=None,
+        help="Write the hunk dependency DAG as graphviz dot to this path.",
+    )
     parser.add_argument(
         "--color",
         choices=("auto", "always", "never"),

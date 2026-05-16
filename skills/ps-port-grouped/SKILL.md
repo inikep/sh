@@ -195,6 +195,30 @@ Workflow when stuck on a non-trivial hunk:
 
 The conflict region is just where Git noticed disagreement. The right fix is wherever REFERENCE actually expresses the change.
 
+### Rule D — Per-region side selection (the HEAD-empty trap)
+
+Once you're at the right conflict region (Rule C), pick which side to keep using this algorithm. **Do not** default to HEAD just because HEAD is empty.
+
+For each unresolved conflict region:
+
+1. Read each candidate side's **distinct, non-trivial content** — strip whitespace, copyright, and noise; what does each side actually contribute?
+2. Check what `$REFERENCE` has at the same path around the same logical position. Use `git show $REFERENCE:<path>` and a token-overlap or substring check against each candidate's distinct content.
+3. Decide:
+   - REFERENCE contains content from exactly one side → **pick that side**.
+   - REFERENCE contains a **third form** distinct from both sides → **transcribe REFERENCE's exact lines** into the conflict region by hand (hunk-level edit; Rule A still applies — no whole-file replacement).
+   - REFERENCE contains content from both sides at different positions → split: keep each side at the position REFERENCE keeps it.
+   - REFERENCE has **nothing** at that region — neither side's content survives → only then take the HEAD-empty side. Document the drop in the report (path + region + brief reason).
+
+**Why this rule exists:** the naive "take HEAD when HEAD is empty" heuristic is wrong most of the time when `$REFERENCE` is the desired final tree. By definition, every patch in the input range has *some* representation in REFERENCE — that's what REFERENCE is. So "HEAD-empty + REFERENCE has content" almost always means the patch's contribution is real and survived in REFERENCE, just at a different place or in a different form. Silently taking HEAD-empty drops live content from the output and produces an invisible residual diff at the end.
+
+**Red flags that signal you're about to fall into the HEAD-empty trap:**
+
+- The conflict region is between an empty HEAD side and an incoming side that adds new lines.
+- You're tempted to "just take HEAD because the upstream removed this" without grepping REFERENCE for the affected symbol.
+- A hunk-level resolver script picked a side automatically and you didn't read the REFERENCE excerpt at that path.
+
+In all three cases: stop, run `git show $REFERENCE:<path>` and the symbol search, and apply the decision rule above.
+
 ## Build Conflict Rules
 
 After every commit lands, build. If the build fails:

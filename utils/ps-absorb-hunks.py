@@ -167,7 +167,7 @@ class BinaryHunk:
 
 @dataclass(frozen=True)
 class HunkDecision:
-    hunk: Hunk
+    hunk: Hunk | BinaryHunk
     target: str | None
     reason: str
 
@@ -175,7 +175,7 @@ class HunkDecision:
 @dataclass(frozen=True)
 class HunkDisposition:
     number: int
-    hunk: Hunk
+    hunk: Hunk | BinaryHunk
     target: str | None
     skip_reason: str | None
 
@@ -259,11 +259,15 @@ def commit_label(meta: CommitMeta) -> str:
     return f"{short_sha(meta.sha)} {meta.title}"
 
 
-def hunk_path(hunk: Hunk) -> str:
+def hunk_path(hunk: Hunk | BinaryHunk) -> str:
     return hunk.new_path or hunk.old_path or "<unknown>"
 
 
-def hunk_header_text(hunk: Hunk) -> str:
+def hunk_header_text(hunk: Hunk | BinaryHunk) -> str:
+    if isinstance(hunk, BinaryHunk):
+        if hunk.new_blob is None:
+            return "(binary deletion)"
+        return f"(binary blob {short_sha(hunk.new_blob)} mode {hunk.new_mode or '100644'})"
     return hunk.hunk_header.rstrip()
 
 
@@ -271,7 +275,7 @@ def styled_path(path: str) -> str:
     return STYLE.magenta(path)
 
 
-def styled_hunk_header(hunk: Hunk) -> str:
+def styled_hunk_header(hunk: Hunk | BinaryHunk) -> str:
     return STYLE.cyan(hunk_header_text(hunk))
 
 
@@ -349,8 +353,11 @@ def log_numbered_hunks(
             f"{number_tag} {styled_path(hunk_path(d.hunk))} "
             f"{styled_hunk_header(d.hunk)}"
         )
-        for line in d.hunk.hunk_lines:
-            log(styled_diff_line(line))
+        if isinstance(d.hunk, BinaryHunk):
+            log(STYLE.dim("  (binary content not shown)"))
+        else:
+            for line in d.hunk.hunk_lines:
+                log(styled_diff_line(line))
         if d.target:
             target_meta = load_commit(repo, d.target)
             log(
@@ -717,7 +724,7 @@ def newest_path_touch_target(
 def newest_path_touch_decision(
     repo: str | Path,
     chain: list[str],
-    hunk: Hunk,
+    hunk: Hunk | BinaryHunk,
     source_index: int,
     min_target_index: int,
     target_reason: str,
@@ -971,22 +978,29 @@ def apply_binary_hunk_to_index(
 def apply_hunks_to_tree(
     repo: str | Path, tree: str, hunks: list[Hunk | BinaryHunk]
 ) -> str:
+    """Apply absorbed hunks to `tree`, batching textual hunks per file.
+
+    Multiple textual hunks for the same file must be fed to `git apply`
+    in a single patch so their offsets are interpreted against the
+    pre-application file: applying them one at a time shifts line numbers
+    and breaks --3way disambiguation when adjacent hunks share context.
+    """
     fd, index_path = tempfile.mkstemp(prefix="ps-absorb-hunks-index-")
     os.close(fd)
     os.unlink(index_path)
     try:
         env = {"GIT_INDEX_FILE": index_path}
         current_tree = tree
-        for hunk in hunks:
+        # Group consecutive textual hunks that share a file_header into
+        # one batch. BinaryHunk and submodule hunks need separate handling
+        # and break the run.
+        batch: list[Hunk] = []
+        def flush_batch() -> None:
+            nonlocal current_tree
+            if not batch:
+                return
             git(repo, "read-tree", "--reset", current_tree, env=env)
-            if isinstance(hunk, BinaryHunk):
-                apply_binary_hunk_to_index(repo, env, hunk)
-                current_tree = git(repo, "write-tree", env=env).stdout.strip()
-                continue
-            if is_submodule_hunk(hunk):
-                apply_submodule_hunk_to_index(repo, env, hunk)
-                current_tree = git(repo, "write-tree", env=env).stdout.strip()
-                continue
+            patch = "".join(_combined_patch_text(batch))
             result = git(
                 repo,
                 "apply",
@@ -995,32 +1009,79 @@ def apply_hunks_to_tree(
                 "--whitespace=nowarn",
                 "-",
                 check=False,
-                input_text=hunk.patch_text(),
+                input_text=patch,
                 env=env,
             )
             if result.returncode != 0:
-                path = hunk.new_path or hunk.old_path or "<unknown>"
+                # Fall back to per-hunk application against a fresh tree.
                 git(repo, "read-tree", "--reset", current_tree, env=env)
-                try:
-                    apply_hunk_to_index_with_fallback(repo, env, hunk)
-                    log(
-                        f"  {STYLE.yellow('fallback-applied')} hunk for "
-                        f"{styled_path(path)}"
+                for hunk in batch:
+                    path = hunk.new_path or hunk.old_path or "<unknown>"
+                    inner = git(
+                        repo,
+                        "apply",
+                        "--cached",
+                        "--3way",
+                        "--whitespace=nowarn",
+                        "-",
+                        check=False,
+                        input_text=hunk.patch_text(),
+                        env=env,
                     )
-                except AbsorbError as fallback_exc:
-                    raise AbsorbError(
-                        f"could not apply hunk for {path} at {hunk.hunk_header.rstrip()}\n"
-                        f"STDOUT:\n{colorize_conflicts(result.stdout)}\n"
-                        f"STDERR:\n{result.stderr}\n"
-                        f"FALLBACK:\n{fallback_exc}"
-                    ) from fallback_exc
+                    if inner.returncode == 0:
+                        continue
+                    try:
+                        apply_hunk_to_index_with_fallback(repo, env, hunk)
+                        log(
+                            f"  {STYLE.yellow('fallback-applied')} hunk for "
+                            f"{styled_path(path)}"
+                        )
+                    except AbsorbError as fallback_exc:
+                        raise AbsorbError(
+                            f"could not apply hunk for {path} at {hunk.hunk_header.rstrip()}\n"
+                            f"STDOUT:\n{colorize_conflicts(inner.stdout)}\n"
+                            f"STDERR:\n{inner.stderr}\n"
+                            f"FALLBACK:\n{fallback_exc}"
+                        ) from fallback_exc
             current_tree = git(repo, "write-tree", env=env).stdout.strip()
+            batch.clear()
+
+        for hunk in hunks:
+            if isinstance(hunk, BinaryHunk):
+                flush_batch()
+                git(repo, "read-tree", "--reset", current_tree, env=env)
+                apply_binary_hunk_to_index(repo, env, hunk)
+                current_tree = git(repo, "write-tree", env=env).stdout.strip()
+                continue
+            if is_submodule_hunk(hunk):
+                flush_batch()
+                git(repo, "read-tree", "--reset", current_tree, env=env)
+                apply_submodule_hunk_to_index(repo, env, hunk)
+                current_tree = git(repo, "write-tree", env=env).stdout.strip()
+                continue
+            if batch and batch[-1].file_header != hunk.file_header:
+                flush_batch()
+            batch.append(hunk)
+        flush_batch()
         return current_tree
     finally:
         try:
             os.unlink(index_path)
         except OSError:
             pass
+
+
+def _combined_patch_text(hunks: list[Hunk]) -> list[str]:
+    """Serialize a run of same-file hunks into a single multi-hunk patch."""
+    if not hunks:
+        return []
+    pieces: list[str] = list(hunks[0].file_header)
+    for h in hunks:
+        pieces.append(h.hunk_header)
+        pieces.extend(h.hunk_lines)
+    if pieces and not pieces[-1].endswith("\n"):
+        pieces.append("\n")
+    return pieces
 
 
 def merge_tree_output_tree(output: str) -> str | None:
@@ -1284,12 +1345,33 @@ def build_hunk_dispositions(
         source_parent,
         source,
     )
-    hunks = parse_unified_diff(patch)
+    hunks = parse_unified_diff(patch, emit_binary=True)
     chain_index = {sha: idx for idx, sha in enumerate(chain)}
     source_index = chain_index[source]
     dispositions: list[HunkDisposition] = []
 
     for number, hunk in enumerate(hunks, start=1):
+        if isinstance(hunk, BinaryHunk):
+            # Binary diffs cannot be blamed line-by-line; route to the
+            # newest in-range commit that touched the same path, the same
+            # fallback used for added-only and submodule hunks.
+            decision = newest_path_touch_decision(
+                repo,
+                chain,
+                hunk,
+                source_index,
+                min_target_index,
+                "newest eligible commit that touched the same binary path",
+            )
+            dispositions.append(
+                HunkDisposition(
+                    number=number,
+                    hunk=hunk,
+                    target=decision.target,
+                    skip_reason=None if decision.target else decision.reason,
+                )
+            )
+            continue
         decision = choose_hunk_target_decision(
             repo,
             source_parent,

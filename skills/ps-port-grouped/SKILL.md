@@ -15,6 +15,8 @@ Port a Percona Server commit range from `$INPUT_BASE..$INPUT_TIP` onto a newer b
 
 The strategy is **easier-first by group**, not chronological. Easy commits land first and establish a buildable foundation; harder source-code conflicts land last when the surrounding patches are already in place.
 
+**Hard ordering rule:** the workflow is `§1 Prepare → §2 Scan → §2.5 Dep graph → §3 Assign Groups (tentative+lock, batched but completed for the entire range) → §3.5 Workflow Gate → §4 Execute Groups 1→5 → §5 Converge`. You may not begin §4 cherry-picks while §3 is still partial. Processing commits in `git rev-list` order with on-the-fly grouping is the failure mode this skill is built to prevent — see §3.6 for the red-flag list.
+
 This skill is a sibling of `ps-replay+make-buildable`. Choose this one when:
 
 - A `$REFERENCE` branch already exists with the desired final tree.
@@ -149,11 +151,42 @@ Each commit lands in exactly one group. Groups are processed in numeric order; w
 1. **Tentative pass** — assign every commit a tentative group from its category + BUILD_CHANGING flag + a quick `git cherry-pick --no-commit` trial **on a throwaway worktree** (or in-place with `--abort` on every result). The trial is to gauge conflict shape, not to land anything.
 2. **Lock pass** — record the locked group for each commit before starting Group 1 execution. Re-grading mid-run is allowed only to demote (e.g. Group 1 → Group 4) when reality refutes the tentative grade; never promote (Group 4 → Group 1) just because resolution turned out cleaner than expected.
 
-**Batch the tentative pass.** A full upfront trial of every commit is expensive (500+ throwaway picks is a real cost). Trial in **~50-commit chunks**: trial chunk, grade it, run Group 1 from that chunk if helpful, then trial the next chunk. After ~3 chunks you'll know which categories tend to conflict and can skip the trial for low-risk categories (docs-only, test-only) and grade those by category alone. Source-bucket and reconciliation commits always get the trial.
+**Batch the tentative pass — required, not optional.** A full upfront trial of every commit is expensive (500+ throwaway picks is a real cost). Trial in **~50-commit chunks**, grade each chunk, then trial the next chunk. The tentative pass must cover the **entire** `$INPUT_RANGE` before Group 1 execution starts. The only permitted shortcut: skip the trial-pick for low-risk categories (docs-only, test-only, packaging-only) and grade those by category + BUILD_CHANGING alone after the first ~3 chunks have established the conflict pattern. Source-bucket, build, reconciliation, and any BUILD_CHANGING commit always get the trial.
+
+**Do not interleave trial chunks with Group 1 execution.** "Trial chunk 1 → land Group 1 from chunk 1 → trial chunk 2" is forbidden. It produces post-hoc grouping (you grade commits in the order they appear, then land them in roughly that order) and silently degenerates into chronological processing. Complete the tentative pass for the entire range, write the locked dataset, *then* begin §4.
 
 The tentative pass produces a working dataset; throwaway operations must not pollute `$OUTPUT_NAME`.
 
+### 3.5 Workflow Gate — Preconditions for §4
+
+Before executing the first real cherry-pick (§4), confirm **all** of the following are true. If any answer is "no", you are not ready for §4 — return to the corresponding earlier step.
+
+- [ ] `$OUTPUT_BASE` built clean (§1) and the PASS is recorded in `$REPORT_FILE`.
+- [ ] Every commit in `$INPUT_RANGE` has a row in the §3 scan table with Category, BUILD_CHANGING, and a **locked** Group (1–5).
+- [ ] The hunk-level dep graph (§2.5) has been built and the "Pre-detected pairs" section of `$REPORT_FILE` is populated (even if the list is empty — record "no pairs detected").
+- [ ] The locked dataset is written to `$REPORT_FILE` *before* the first `git cherry-pick` on `$OUTPUT_NAME`.
+- [ ] The next commit you intend to apply is the lowest-numbered Group still containing unlanded commits (i.e. Group 1 commits come before any Group 2 commit, regardless of chronology).
+
+If the dataset is locked but you find yourself reaching for the next commit in input-list order rather than the next commit in Group order, **stop**. That is the rationalization the skill exists to prevent. Re-read §3 and the Red Flags below.
+
+### 3.6 Red Flags — STOP and re-plan
+
+You are about to (or already) violating the easier-first invariant if any of these are true:
+
+- You started cherry-picking onto `$OUTPUT_NAME` before every input-range commit had a locked Group.
+- You are processing commits in the order `git rev-list --reverse $INPUT_RANGE` produced them.
+- Your "Group 1" execution log includes commits you later re-graded as Group 4 *after* they failed to apply or build — i.e. the group was assigned post-hoc, after attempting the pick.
+- You are on commit N and the next commit you plan to attempt is N+1, without checking whether commits N+2…end contain easier (lower-group) work that should land first.
+- You're stuck on a hard commit (Group 4/5 shape) and your plan is "push through this one" rather than "skip past it, land the easier groups, return to it last."
+- You skipped §2.5 (the dep graph) because "the range is short" or "I'll discover pairs as I go."
+
+If any of these fire: revert `$OUTPUT_NAME` to the last group-boundary buildable SHA, redo the tentative + lock passes for all unlanded commits, and resume from Group 1 of the re-planned dataset. The discarded work is the cost of skipping §3; the alternative (continuing chronologically and re-grading on the fly) compounds the cost commit by commit.
+
 ### 4. Execute Groups 1 → 5
+
+**Precondition:** the §3.5 Workflow Gate has been satisfied. If you cannot tick every box in §3.5, do not run a single cherry-pick from this section.
+
+**Ordering invariant:** the iteration is `for g in 1..5: for commit in group[g]:`. It is **not** `for commit in input_list: cherry_pick(commit)`. If you find yourself reaching for the next commit by input-list index instead of by `(group, intra-group order)`, you have fallen back to chronological processing — stop and re-read §3.6.
 
 For each group, in order:
 
@@ -362,6 +395,9 @@ Path to `hunks.tsv` and `overlaps.tsv`. List of pre-detected pairs with their ed
 | Mistake | Fix |
 |---------|-----|
 | Treating chronological order as the default | Groups override chronology. Scan and assign before cherry-picking the first commit. |
+| Processing commits in `git rev-list --reverse` order and grouping post-hoc | This is chronological with cosmetic grouping. The tentative + lock passes (§3) must finish for the **entire** range before any real cherry-pick. Symptom: you get stuck on a Group 4/5 commit at a mid-range index instead of skipping past it to easier work. |
+| Interleaving tentative-pass chunks with Group 1 execution | The "trial 50 → land Group 1 from those 50 → trial next 50" pattern degenerates into chronological order. Complete the tentative pass for the whole range first. |
+| Pushing through a hard commit because you've already started it | If a commit's actual conflict shape reveals it's Group 4/5 when tentative-graded Group 1/2, demote it, `cherry-pick --abort`, and continue with the next Group-1 commit. Sunk cost is not a reason to land a hard commit early. |
 | Skipping the `$OUTPUT_BASE` build | If the base doesn't build, no later state on `$OUTPUT_NAME` builds either. Always verify first. |
 | Promoting a commit between groups based on hope | Demotion (easier → harder) is fine. Promotion (harder → easier) requires re-running the tentative pass. |
 | Cherry-picking before group assignment is locked | The trial pass uses throwaway worktree state. The real pass uses the locked dataset only. |

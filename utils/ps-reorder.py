@@ -2228,22 +2228,32 @@ def build_output_branch(args, input_hash, base_hash, plan):
     e, s = emit_split_bucket(plan['g7_bucket'], 'g7',
                              plan['removed_commits'])
     stats['g7_emitted'], stats['g7_skipped'] = e, s
-    promoted_g7_bucket = []
-    (promoted, conflict_kept, overlap_kept, mtr_kept, result_kept, myr_kept,
-     locked_kept) = promote_remaining_to_upstream(
-        plan['g10_bucket'], promoted_g7_bucket,
-        plan['g8_bucket'] + plan['g9_bucket'])
-    stats['g7_promoted_from_remaining'] = promoted
-    stats['g7_remaining_conflict_kept'] = conflict_kept
-    stats['g7_remaining_overlap_kept'] = overlap_kept
-    stats['g7_remaining_mtr_kept'] = mtr_kept
-    stats['g7_remaining_result_kept'] = result_kept
-    stats['g7_remaining_myr_kept'] = myr_kept
-    stats['g7_remaining_locked_kept'] = locked_kept
-    e, s = emit_split_bucket(promoted_g7_bucket, 'g7:promoted',
-                             plan['removed_commits'])
-    stats['g7_emitted'] += e
-    stats['g7_skipped'] += s
+    if getattr(args, 'no_g7_promotion', False):
+        log("  [g7<-g10] skipped (--no-g7-promotion)")
+        stats['g7_promoted_from_remaining'] = 0
+        stats['g7_remaining_conflict_kept'] = 0
+        stats['g7_remaining_overlap_kept'] = 0
+        stats['g7_remaining_mtr_kept'] = 0
+        stats['g7_remaining_result_kept'] = 0
+        stats['g7_remaining_myr_kept'] = 0
+        stats['g7_remaining_locked_kept'] = 0
+    else:
+        promoted_g7_bucket = []
+        (promoted, conflict_kept, overlap_kept, mtr_kept, result_kept, myr_kept,
+         locked_kept) = promote_remaining_to_upstream(
+            plan['g10_bucket'], promoted_g7_bucket,
+            plan['g8_bucket'] + plan['g9_bucket'])
+        stats['g7_promoted_from_remaining'] = promoted
+        stats['g7_remaining_conflict_kept'] = conflict_kept
+        stats['g7_remaining_overlap_kept'] = overlap_kept
+        stats['g7_remaining_mtr_kept'] = mtr_kept
+        stats['g7_remaining_result_kept'] = result_kept
+        stats['g7_remaining_myr_kept'] = myr_kept
+        stats['g7_remaining_locked_kept'] = locked_kept
+        e, s = emit_split_bucket(promoted_g7_bucket, 'g7:promoted',
+                                 plan['removed_commits'])
+        stats['g7_emitted'] += e
+        stats['g7_skipped'] += s
 
     # -- Group 8 ------------------------------------------------------------
     log("=== GROUP 8: Initial Percona Server tree ===")
@@ -2585,6 +2595,11 @@ def main():
                         help='Delete OUTPUT_BRANCH if it already exists.')
     parser.add_argument('--allow-dirty',   action='store_true',
                         help='Skip the clean-worktree check.')
+    parser.add_argument('--no-g7-promotion', action='store_true',
+                        help='Disable promotion of Remaining (g10) commits '
+                             'into Group 7 (Upstream bug fixes); only commits '
+                             'whose subject already starts with "[upstream]" '
+                             'land in g7.')
     parser.add_argument(
         '--color',
         choices=('auto', 'always', 'never'),

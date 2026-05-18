@@ -1542,6 +1542,26 @@ def build_hunk_dispositions(
                     fallback_target,
                     "newest eligible commit that touched the same path after base boundary",
                 )
+        if decision.target is None and hunk_file:
+            # No earlier in-range home. Fold into the FIRST downstream chain
+            # commit that touches the same path. The hunk's effect ends up at
+            # a later index than the source's original position, but the file
+            # state at that commit's parent in the rewrite (source dropped)
+            # is closer to the source's parent state than any pre-base or
+            # earlier-in-range commit, so the application usually succeeds.
+            # Without this, the cherry-pick replay of the very next chain
+            # commit touching the path fails to find its anchor text (source's
+            # contribution is missing), cascades through the deferral, and
+            # ultimately produces a tail reconciliation commit.
+            downstream_target = next_chain_touch_after(
+                repo, chain, source_index, hunk_file
+            )
+            if downstream_target:
+                decision = HunkDecision(
+                    hunk,
+                    downstream_target,
+                    "first downstream commit touching the same path",
+                )
         dispositions.append(
             HunkDisposition(
                 number=number,
@@ -1760,7 +1780,12 @@ def rewrite_branch(args: argparse.Namespace) -> int:
         log("No absorbable hunks; dropping source and routing its content to tail.")
         earliest = chain_index[source]
     else:
-        earliest = min(chain_index[target] for target in groups)
+        # Always include source's index so the rewrite covers it (and drops
+        # it). Targets may be downstream of source when the new downstream
+        # fallback fires; without this, source would survive in the chain
+        # because the rewrite loop would start past it.
+        earliest = min(chain_index[source],
+                       *(chain_index[target] for target in groups))
     if earliest == 0:
         raise AbsorbError("cannot absorb into the root commit")
 

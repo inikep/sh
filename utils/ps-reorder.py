@@ -357,9 +357,18 @@ CODE_EXTENSIONS = ('.h', '.c', '.cc', '.cxx', '.cpp',
                    '.hh', '.hpp', '.hxx', '.cmake')
 
 
+NON_CODE_CMAKELISTS = frozenset({
+    # CMakeLists.txt files that exist purely to install/package non-code
+    # script assets, with no real build-graph effect on the binaries.
+    'scripts/CMakeLists.txt',
+})
+
+
 def is_code_file(path):
     if path.endswith(CODE_EXTENSIONS):
         return True
+    if path in NON_CODE_CMAKELISTS:
+        return False
     base = os.path.basename(path)
     return base == 'CMakeLists.txt' or base.endswith('.cmake.in')
 
@@ -1521,6 +1530,38 @@ def can_move_without_git_conflict(source_hash):
         f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}")
 
 
+def try_cumulative_cherry_pick(source_hash):
+    """Cherry-pick `source_hash` onto current HEAD. On clean apply, the
+    cherry-pick auto-commits and HEAD advances. On conflict, the in-progress
+    cherry-pick is aborted and HEAD is left unchanged.
+
+    Returns True when the cherry-pick was clean (including empty/no-op cases
+    where HEAD does NOT advance, e.g. merge commits without -m, or already
+    applied diffs), False when git reported a true content conflict."""
+    r = run_git(['cherry-pick', source_hash], check=False)
+    combined = r.stdout + r.stderr
+    if r.returncode == 0:
+        return True
+    run_git(['cherry-pick', '--abort'], check=False)
+    if is_non_conflict_cherry_pick_failure(combined):
+        return True
+    if is_git_conflict_output(combined):
+        return False
+    raise RuntimeError(
+        f"git cherry-pick failed for {source_hash}:\n"
+        f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}")
+
+
+def probe_apply_item_state(item):
+    """For probe simulation: apply the item's file state and commit so HEAD
+    advances. Used between cumulative cherry-pick probes so that pre-existing
+    dest-bucket items and preserve items contribute their file state to the
+    base seen by subsequent candidate probes. These commits are reset away
+    after the probe loop completes."""
+    apply_item_file_states(item)
+    run_git(['commit', '--allow-empty', '-m', 'probe-stub'], check=False)
+
+
 def add_subject_prefix_with_original(subject, prefix, space_before_plain=False,
                                      original_subject=None):
     if subject.startswith(prefix):
@@ -1549,6 +1590,12 @@ _PATCH_HUNK_CACHE = {}
 _PATCH_HUNK_MAP_CACHE = {}
 _HUNK_RE = re.compile(
     r'^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@')
+
+# Module-level cache for the hunk dependency graph. Populated once by
+# `init_hunk_dependency_graph(plan)` before any group emission begins.
+# Keyed by `item_source_cache_key(item)` so it survives the shallow copies
+# that `_with_subject_prefix` produces during bucket routing.
+_HUNK_DEPENDENCY_GRAPH = None
 
 
 def _range_with_min_width(start, count):
@@ -1686,26 +1733,113 @@ def patch_overlap_keep_ids(candidates, protected_items):
     return keep_ids
 
 
+def _hunk_lists_overlap(hunks_a, hunks_b):
+    """Symmetric line-range overlap test for two hunk lists on the same path.
+    A hunk tuple is (path, old_range, new_range); paths are assumed equal."""
+    for ha in hunks_a:
+        for hb in hunks_b:
+            if ranges_overlap(ha[1], hb[1]) or ranges_overlap(ha[2], hb[2]):
+                return True
+    return False
+
+
+def build_hunk_dependency_graph(items):
+    """Build a symmetric hunk-overlap graph over `items`.
+
+    Two items have an undirected edge when they have hunks on a shared path
+    whose old-side OR new-side line ranges intersect. The graph keys are
+    `item_source_cache_key(item)` so lookups survive the shallow item copies
+    that bucket routing introduces.
+
+    Returns: dict mapping cache_key -> set of cache_keys (neighbors)."""
+    items_by_path = defaultdict(list)
+    for item in items:
+        cache_key = item_source_cache_key(item)
+        for path, hunks in item_patch_hunk_map(item).items():
+            items_by_path[path].append((cache_key, hunks))
+
+    graph = defaultdict(set)
+    for entries in items_by_path.values():
+        for i in range(len(entries)):
+            key_i, hunks_i = entries[i]
+            for j in range(i + 1, len(entries)):
+                key_j, hunks_j = entries[j]
+                if key_i == key_j:
+                    continue
+                if _hunk_lists_overlap(hunks_i, hunks_j):
+                    graph[key_i].add(key_j)
+                    graph[key_j].add(key_i)
+    return dict(graph)
+
+
+def init_hunk_dependency_graph(plan):
+    """Build and cache the hunk dependency graph over all bucketed plan items.
+
+    Called once at the start of `build_output_branch`, before any overlap
+    probe consults the cache. Subsequent calls to overlap helpers consult
+    `_HUNK_DEPENDENCY_GRAPH` via `item_source_cache_key` so bucket reshuffling
+    and subject-prefix copies don't invalidate the cache."""
+    global _HUNK_DEPENDENCY_GRAPH
+    items = []
+    for key in ('g2_bucket', 'g3_bucket', 'g4_bucket', 'g5_bucket',
+                'g6_bucket', 'g7_bucket', 'g8_bucket', 'g9_bucket',
+                'g10_bucket', 'g11_bucket'):
+        items.extend(plan.get(key, ()))
+    log(f"=== HUNK DEPENDENCY GRAPH ===")
+    start = time.monotonic()
+    _HUNK_DEPENDENCY_GRAPH = build_hunk_dependency_graph(items)
+    edges = sum(len(v) for v in _HUNK_DEPENDENCY_GRAPH.values()) // 2
+    log(f"  built over {len(items)} items: {len(_HUNK_DEPENDENCY_GRAPH)} "
+        f"nodes, {edges} edges ({time.monotonic() - start:.2f}s)")
+
+
+def _item_clobbered_by_full_state_replay(item, protected_items):
+    """Return True iff some `protected` item's whole-file-state replay would
+    clobber `item`'s diff.
+
+    Source-pos gated: only protected items strictly earlier in source order
+    can clobber. A later-source protected item's source state already includes
+    `item`'s diff, so its `apply_item_file_states` replay preserves rather
+    than overwrites the candidate's changes.
+
+    File-path coarse: `apply_item_file_states` rewrites the WHOLE file from
+    the protected item's source tree, so any shared path is a clobber risk
+    regardless of whether the candidate's hunks and the protected item's
+    hunks line-range-overlap. (A hunk-DAG-only check would let two
+    same-file changes at far-apart lines coexist on paper, then watch the
+    later-emitted full-state replay revert the candidate's hunks anyway.)"""
+    item_paths = set(item['files'])
+    if not item_paths:
+        return False
+    item_pos = item_source_pos(item)
+    for protected in protected_items:
+        if item_source_pos(protected) >= item_pos:
+            continue
+        if item_paths.intersection(protected['files']):
+            return True
+    return False
+
+
 def full_state_overlap_keep_ids(candidates, protected_items):
     """Return candidate ids clobbered by later full file-state replay.
 
-    The overlap probe is patch-aware for patch-like moves, but most buckets are
-    still emitted by materialising whole file states. For those later buckets,
-    any shared file can erase an earlier non-overlapping patch.
-    """
+    Source-pos gated: a candidate is blocked only when there is a protected
+    item with strictly earlier `source_pos` that shares a file path with the
+    candidate (the protected item's replay would overwrite the file with a
+    pre-candidate state). Later-source protected items already contain the
+    candidate's diff in their source state, so their replay preserves rather
+    than clobbers. The fixed-point loop propagates: a candidate kept due to
+    overlap becomes a protected item for the remaining candidates too."""
     keep_items = list(protected_items)
     keep_ids = set()
     changed = True
     while changed:
         changed = False
-        protected_paths = set()
-        for item in keep_items:
-            protected_paths.update(item['files'])
         for item in candidates:
             item_id = id(item)
             if item_id in keep_ids:
                 continue
-            if protected_paths.intersection(item['files']):
+            if _item_clobbered_by_full_state_replay(item, keep_items):
                 keep_ids.add(item_id)
                 keep_items.append(item)
                 changed = True
@@ -1722,9 +1856,9 @@ def item_source_pos(item):
 
 
 def item_full_state_overlaps_any(item, protected_items):
-    item_paths = set(item['files'])
-    return any(item_paths.intersection(protected['files'])
-               for protected in protected_items)
+    """Hunk-DAG-backed clobber check. See `_item_clobbered_by_full_state_replay`
+    for the gating rules (graph edge + earlier `source_pos`)."""
+    return _item_clobbered_by_full_state_replay(item, protected_items)
 
 
 def item_has_unsafe_overlap(item, protected_items):
@@ -1881,26 +2015,48 @@ def filter_with_drift_guard(*,
     log(f"  {log_tag} probing {len(candidates)} {unit_label} commit(s)"
         f"{skip_summary}")
 
+    # Cumulative cherry-pick probe: walk candidates in source-pos order and
+    # let each clean apply advance HEAD so the next candidate's probe sees its
+    # predecessors. A candidate whose diff is anchored on text introduced by an
+    # earlier sibling candidate no longer fails just because the isolated probe
+    # at the marker lacks that anchor text.
+    #
+    # For 'promote' the dest bucket may already contain items routed there by
+    # planning (e.g. source_group preservation): they emit before any new
+    # promotion at this group's marker, so we pre-apply their file states to
+    # HEAD before probing candidates. Preserve items inside the candidate set
+    # (g10's source_group==9 carve-out) bypass the cherry-pick but contribute
+    # their file state in turn.
+    #
+    # HEAD is reset to the baseline after probing so the subsequent emission
+    # phase starts from the right place.
+    probe_baseline_head = git_rev_parse('HEAD')
+    if direction == 'promote':
+        for dest_item in list(other_bucket):
+            probe_apply_item_state(dest_item)
+    ordered_candidates = sorted(candidates, key=item_source_pos)
     start = time.monotonic()
     clean_candidates = []
     conflict_ids = set()
     probed = 0
-    for i, item in enumerate(candidates, 1):
+    for i, item in enumerate(ordered_candidates, 1):
         iid = id(item)
         if iid in preserve_ids:
+            probe_apply_item_state(item)
             clean_candidates.append(item)
         else:
             probed += 1
-            if can_move_without_git_conflict(item['source_hash']):
+            if try_cumulative_cherry_pick(item['source_hash']):
                 clean_candidates.append(item)
             else:
                 conflict_ids.add(iid)
-        if probed and (i % PROGRESS_EVERY == 0 or i == len(candidates)):
+        if probed and (i % PROGRESS_EVERY == 0 or i == len(ordered_candidates)):
             elapsed = time.monotonic() - start
             rate = i / elapsed if elapsed > 0 else 0.0
-            log(f"  {log_tag} probed {i}/{len(candidates)} commits  "
+            log(f"  {log_tag} probed {i}/{len(ordered_candidates)} commits  "
                 f"({len(clean_candidates)} clean, {len(conflict_ids)} "
                 f"conflict)  {rate:5.1f} commits/s")
+    run_git(['reset', '--hard', probe_baseline_head])
 
     candidate_ids = {id(item) for item in candidates}
 
@@ -2300,6 +2456,8 @@ def build_output_branch(args, input_hash, base_hash, plan):
         run_git(['branch', '-D', args.output_branch])
 
     run_git(['checkout', '-b', args.output_branch, base_hash])
+
+    init_hunk_dependency_graph(plan)
 
     stats = {
         'g1_emitted': 0, 'g1_skipped': 0,

@@ -338,6 +338,8 @@ Replace only the conflict regions. Edit the conflicted file by hand to transcrib
 
 `git show $REFERENCE:<path>` for **inspection** is fine — it's how you decide what to write into the conflict region. Just don't redirect it into the worktree.
 
+**Never use snap-to-reference (whole-file `git checkout REFERENCE -- <path>`, or pulling a file wholesale from REFERENCE during Rule-1 fixes) unless the engineer explicitly approves it in the current conversation, naming the file or accepting the scope.** Snapping a file from REFERENCE pulls in EVERYTHING that file has — including symbols, fields, and call signatures introduced by *later* commits beyond the one you're trying to land. Those then-undefined symbols cascade into new "X was not declared" errors, often across multiple files; the Rule-1 fix is no longer minimal, and the cascade can grow without bound. Observed repeatedly: pulling `log0online.cc` from REFERENCE to satisfy a missing-symbol error introduced 4+ further undeclared symbols (`os_file_set_eof_at`, `innodb_file_bmp_key`, `SYNC_LOG_ONLINE`, `os_file_close_no_error_handling`) — each from a different deferred commit. Per-symbol Rule-1 (one decl, one enum value, one function body) is bounded; per-file snap is not.
+
 ### Rule B — Check REFERENCE for category removal
 
 Before resolving, look at `$REFERENCE` and ask: **did this commit's category survive?**
@@ -421,9 +423,26 @@ Squash the fix into the failing commit (`git commit --amend` or `git commit --fi
 
 ### Rule 2 — Defer cascading code
 
-If the minimal fix in Rule 1 pulls in code that itself fails to build (cascading missing symbols), don't expand the fix indefinitely. Instead **defer** the cascading portion:
+If the minimal fix in Rule 1 pulls in code that itself fails to build (cascading missing symbols), don't expand the fix indefinitely. Instead **defer** the cascading portion.
 
-- Comment it out or `#if 0` it with a `// TODO laurynas-style` marker referencing the originating commit's SHA and the deferred symbol.
+**Preferred form: delete the function/code block AND every caller.** When a function's body would have to be stubbed because all its dependencies are deferred, just remove the function definition entirely and remove every call site too — let the later commit that introduces the real dependency *also* re-introduce the function and its calls. The diff against REFERENCE stays smaller and there are no `#if 0` blocks or "no-op stub" comments cluttering the tree. Record the originating commit's SHA in the report's "Deferred code" section so the eventual restore is tracked.
+
+**Avoid (anti-pattern):**
+
+```c
+init_log_online(void)
+{
+    /* TODO laurynas-style: body deferred — uses srv_track_changed_pages,
+       log_online_read_init, srv_redo_log_follow_thread (changed-page-tracking
+       subsystem; lands ~idx=147). Stubbed as no-op until then. */
+}
+```
+
+**Prefer:** delete `init_log_online` entirely; delete `init_log_online();` from each caller too. The later changed-page-tracking commit will add the function definition *and* the calls in one self-contained landing.
+
+**Stub-with-`#if 0` is only acceptable when** the function or call cannot be removed (e.g. it's referenced by a function-pointer table, a virtual override, or a platform macro expansion) and the calling structure must stay present. In that case:
+
+- Replace the function body with `#if 0 … #endif` around the original lines plus a one-line `// TODO laurynas-style: restore at SHA <predicted-restore-SHA>` marker — keep the comment terse, no multi-paragraph explanation.
 - Record the deferral in the report's "Deferred code" section.
 - When the dependency-introducing commit later lands, restore the deferred code in the same commit (or in an immediate follow-up fix commit) and confirm it builds.
 

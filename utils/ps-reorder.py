@@ -1779,52 +1779,83 @@ def _with_subject_prefix(item, prefix, space_before_plain):
     return new_item
 
 
-def promote_with_drift_guard(*,
-                             source_bucket,
-                             dest_bucket,
-                             source_tag,
-                             dest_tag,
-                             unit_label,
-                             candidate_filter,
-                             skip_classifier=None,
-                             external_protected_items=None,
-                             overlap_strategy='per-candidate',
-                             promoted_subject_prefix=None,
-                             kept_subject_prefix=None,
-                             subject_prefix_space_before_plain=False,
-                             sort_moved_by_source_pos=True):
-    """Shared probe-and-overlap promotion used by g5/g6/g8.
+def filter_with_drift_guard(*,
+                            source_bucket,
+                            other_bucket,
+                            source_tag,
+                            other_tag,
+                            unit_label,
+                            direction,
+                            candidate_filter=None,
+                            skip_classifier=None,
+                            preserve_filter=None,
+                            external_protected_items=None,
+                            overlap_strategy='per-candidate',
+                            accept_subject_prefix=None,
+                            reject_subject_prefix=None,
+                            subject_prefix_space_before_plain=False,
+                            sort_accepted_by_source_pos=True):
+    """Shared probe-and-overlap classifier used by g5/g6/g8 (promote) and g10
+    (keep-in-place). Items in `source_bucket` are split into an accepted set
+    and a rejected set; `direction` controls which set ends up in which bucket:
 
-    For each item in `source_bucket`:
-      - If `candidate_filter(item)` is False the item is left untouched in
-        `source_bucket` (pass-through, no log).
-      - Otherwise `skip_classifier(item)` may return
-        `(skip_label, log_phrase)` to keep the item in `source_bucket` with
-        a logged reason; `kept_subject_prefix` is applied if set.
-      - Otherwise the item is probed via `can_move_without_git_conflict`.
-        Conflicting items stay in `source_bucket` (with `kept_subject_prefix`).
-      - Clean items are then overlap-checked against later protected groups
-        (`external_protected_items`) and the items kept in `source_bucket`.
-        Overlapping clean items stay (with `kept_subject_prefix`); the rest
-        move to `dest_bucket` (with `promoted_subject_prefix` if set), sorted
-        by `source_pos` when `sort_moved_by_source_pos` is True.
+      'promote'       — rejected items stay in `source_bucket`; accepted items
+                        move to `other_bucket`. Log tag is "[other<-source]".
+      'keep_in_place' — accepted items stay in `source_bucket`; rejected items
+                        fall back to `other_bucket`. Log tag is "[source]".
 
-    `overlap_strategy` chooses how protection is computed:
-      - 'per-candidate' uses `promotion_overlap_keep_ids` and only blocks a
-        candidate when an earlier-source kept item overlaps (used by g5/g6).
-      - 'global-unsafe' uses `unsafe_later_overlap_keep_ids` and blocks on
-        any overlap with the full protected set, regardless of source order
-        (used by g8 because Remaining replays whole file states).
+    Per item:
+      candidate_filter(item) is False           -> stays in source_bucket
+                                                   (silent pass-through; no
+                                                   subject prefix)
+      preserve_filter(item) is True             -> accepted without probing
+                                                   (also contributes to sibling
+                                                   overlap protection)
+      skip_classifier(item) -> (label, phrase)  -> rejected with logged reason
+      can_move_without_git_conflict is False    -> rejected ("conflict")
+      overlap_ids contains the item             -> rejected ("overlap")
+      otherwise                                 -> accepted
 
-    Returns a dict with: `promoted`, `conflict_kept`, `overlap_kept`, and
-    `skips` (a dict of skip_label -> count from `skip_classifier`)."""
-    log_tag = f"[{dest_tag}<-{source_tag}]"
+    `overlap_strategy`:
+      'per-candidate' — promotion_overlap_keep_ids; earlier-source remaining
+                        items only (used by g5/g6).
+      'global-unsafe' — unsafe_later_overlap_keep_ids; full protected set
+                        regardless of source position (used by g8/g10).
+
+    Returns: dict with `accepted`, `conflict_rejected`, `overlap_rejected`,
+    `preserved`, and `skips` (label -> count)."""
+    if direction == 'promote':
+        log_tag = f"[{other_tag}<-{source_tag}]"
+        reject_verb = 'keeping'
+        reject_location = source_tag
+    elif direction == 'keep_in_place':
+        log_tag = f"[{source_tag}]"
+        reject_verb = 'leaving'
+        reject_location = other_tag
+    else:
+        raise ValueError(f"unknown direction: {direction!r}")
+
+    if overlap_strategy == 'per-candidate':
+        overlap_phrase = ("because moving it before Remaining would overlap "
+                          "an earlier protected change")
+    elif overlap_strategy == 'global-unsafe':
+        overlap_phrase = "because a later patch overlaps"
+    else:
+        raise ValueError(f"unknown overlap_strategy: {overlap_strategy!r}")
+
     external_protected_items = list(external_protected_items or ())
+    if candidate_filter is None:
+        candidate_filter = lambda _item: True
 
     candidates = []
+    preserve_ids = set()
     skip_lookup = {}
     for item in source_bucket:
         if not candidate_filter(item):
+            continue
+        if preserve_filter is not None and preserve_filter(item):
+            preserve_ids.add(id(item))
+            candidates.append(item)
             continue
         skip = skip_classifier(item) if skip_classifier is not None else None
         if skip is not None:
@@ -1838,8 +1869,8 @@ def promote_with_drift_guard(*,
 
     if not candidates and not skip_lookup:
         log(f"  {log_tag} no {unit_label} commits to probe")
-        return {'promoted': 0, 'conflict_kept': 0, 'overlap_kept': 0,
-                'skips': {}}
+        return {'accepted': 0, 'conflict_rejected': 0, 'overlap_rejected': 0,
+                'preserved': 0, 'skips': {}}
 
     if skip_lookup:
         parts = ', '.join(f"{count} {label}"
@@ -1853,12 +1884,18 @@ def promote_with_drift_guard(*,
     start = time.monotonic()
     clean_candidates = []
     conflict_ids = set()
+    probed = 0
     for i, item in enumerate(candidates, 1):
-        if can_move_without_git_conflict(item['source_hash']):
+        iid = id(item)
+        if iid in preserve_ids:
             clean_candidates.append(item)
         else:
-            conflict_ids.add(id(item))
-        if i % PROGRESS_EVERY == 0 or i == len(candidates):
+            probed += 1
+            if can_move_without_git_conflict(item['source_hash']):
+                clean_candidates.append(item)
+            else:
+                conflict_ids.add(iid)
+        if probed and (i % PROGRESS_EVERY == 0 or i == len(candidates)):
             elapsed = time.monotonic() - start
             rate = i / elapsed if elapsed > 0 else 0.0
             log(f"  {log_tag} probed {i}/{len(candidates)} commits  "
@@ -1875,70 +1912,156 @@ def promote_with_drift_guard(*,
         overlap_ids = promotion_overlap_keep_ids(
             clean_candidates, external_protected_items,
             _build_protected_source_items())
-    elif overlap_strategy == 'global-unsafe':
+    else:  # 'global-unsafe' (validated above)
         overlap_ids = unsafe_later_overlap_keep_ids(
             clean_candidates,
             external_protected_items + _build_protected_source_items())
-    else:
-        raise ValueError(f"unknown overlap_strategy: {overlap_strategy!r}")
 
-    moved = []
-    kept = []
-    promoted = 0
-    conflict_kept = 0
-    overlap_kept = 0
+    # Preserve items are forced-clean: they never get rejected on overlap.
+    overlap_ids.difference_update(preserve_ids)
+
+    accepted_items = []
+    rejected_items = []
+    pass_through_items = []
+    accepted = 0
+    conflict_rejected = 0
+    overlap_rejected = 0
+    preserved = 0
     skip_counts = defaultdict(int)
+
     for item in source_bucket:
         iid = id(item)
         if iid in skip_lookup:
             skip_label, log_phrase = skip_lookup[iid]
-            log(f"  {log_tag} keeping {item['source_hash'][:12]} in "
-                f"{source_tag} {log_phrase}")
+            log(f"  {log_tag} {reject_verb} {item['source_hash'][:12]} in "
+                f"{reject_location} {log_phrase}")
             skip_counts[skip_label] += 1
-            kept.append(_with_subject_prefix(
-                item, kept_subject_prefix,
+            rejected_items.append(_with_subject_prefix(
+                item, reject_subject_prefix,
                 subject_prefix_space_before_plain))
             continue
         if iid not in candidate_ids:
-            kept.append(item)
+            pass_through_items.append(item)
             continue
         if iid in conflict_ids:
-            log(f"  {log_tag} keeping {item['source_hash'][:12]} in "
-                f"{source_tag} because cherry-pick probe reported a "
+            log(f"  {log_tag} {reject_verb} {item['source_hash'][:12]} in "
+                f"{reject_location} because cherry-pick probe reported a "
                 "conflict")
-            conflict_kept += 1
-            kept.append(_with_subject_prefix(
-                item, kept_subject_prefix,
+            conflict_rejected += 1
+            rejected_items.append(_with_subject_prefix(
+                item, reject_subject_prefix,
                 subject_prefix_space_before_plain))
         elif iid in overlap_ids:
-            log(f"  {log_tag} keeping {item['source_hash'][:12]} in "
-                f"{source_tag} because moving it before Remaining would "
-                "overlap an earlier protected change")
-            overlap_kept += 1
-            kept.append(_with_subject_prefix(
-                item, kept_subject_prefix,
+            log(f"  {log_tag} {reject_verb} {item['source_hash'][:12]} in "
+                f"{reject_location} {overlap_phrase}")
+            overlap_rejected += 1
+            rejected_items.append(_with_subject_prefix(
+                item, reject_subject_prefix,
                 subject_prefix_space_before_plain))
         else:
-            moved.append(_with_subject_prefix(
-                item, promoted_subject_prefix,
+            if iid in preserve_ids:
+                preserved += 1
+            else:
+                accepted += 1
+            accepted_items.append(_with_subject_prefix(
+                item, accept_subject_prefix,
                 subject_prefix_space_before_plain))
-            promoted += 1
 
-    if sort_moved_by_source_pos:
-        moved.sort(key=lambda it: it.get('source_pos', -1))
-    dest_bucket.extend(moved)
-    source_bucket[:] = kept
+    if sort_accepted_by_source_pos:
+        accepted_items.sort(key=lambda it: it.get('source_pos', -1))
 
-    parts = [f"{promoted} promoted",
-             f"{conflict_kept} conflict kept",
-             f"{overlap_kept} overlap kept"]
+    if direction == 'promote':
+        # Non-candidates stay in source (alongside rejects); accepted moves out.
+        other_bucket.extend(accepted_items)
+        source_bucket[:] = pass_through_items + rejected_items
+    else:  # 'keep_in_place'
+        # Non-candidates stay in source (alongside accepted); rejects move out.
+        source_bucket[:] = pass_through_items + accepted_items
+        other_bucket.extend(rejected_items)
+
+    parts = [f"{accepted + preserved} accepted",
+             f"{conflict_rejected} conflict rejected",
+             f"{overlap_rejected} overlap rejected"]
+    if preserved:
+        parts.append(f"{preserved} preserved")
     for label, count in sorted(skip_counts.items()):
-        parts.append(f"{count} {label} kept")
-    log(f"  {log_tag} {len(candidates) + len(skip_lookup)} eligible "
-        f"({', '.join(parts)})")
+        parts.append(f"{count} {label} rejected")
+    total_eligible = len(candidates) + len(skip_lookup)
+    log(f"  {log_tag} {total_eligible} eligible ({', '.join(parts)})")
 
-    return {'promoted': promoted, 'conflict_kept': conflict_kept,
-            'overlap_kept': overlap_kept, 'skips': dict(skip_counts)}
+    return {'accepted': accepted, 'conflict_rejected': conflict_rejected,
+            'overlap_rejected': overlap_rejected, 'preserved': preserved,
+            'skips': dict(skip_counts)}
+
+
+def promote_with_drift_guard(*,
+                             source_bucket,
+                             dest_bucket,
+                             source_tag,
+                             dest_tag,
+                             unit_label,
+                             candidate_filter,
+                             skip_classifier=None,
+                             external_protected_items=None,
+                             overlap_strategy='per-candidate',
+                             promoted_subject_prefix=None,
+                             kept_subject_prefix=None,
+                             subject_prefix_space_before_plain=False,
+                             sort_moved_by_source_pos=True):
+    """Promote pattern wrapper around `filter_with_drift_guard` used by
+    g5/g6/g8: clean candidates move from `source_bucket` to `dest_bucket`;
+    conflicts/overlaps/skips stay in `source_bucket`."""
+    result = filter_with_drift_guard(
+        source_bucket=source_bucket,
+        other_bucket=dest_bucket,
+        source_tag=source_tag,
+        other_tag=dest_tag,
+        unit_label=unit_label,
+        direction='promote',
+        candidate_filter=candidate_filter,
+        skip_classifier=skip_classifier,
+        external_protected_items=external_protected_items,
+        overlap_strategy=overlap_strategy,
+        accept_subject_prefix=promoted_subject_prefix,
+        reject_subject_prefix=kept_subject_prefix,
+        subject_prefix_space_before_plain=subject_prefix_space_before_plain,
+        sort_accepted_by_source_pos=sort_moved_by_source_pos,
+    )
+    return {'promoted': result['accepted'],
+            'conflict_kept': result['conflict_rejected'],
+            'overlap_kept': result['overlap_rejected'],
+            'skips': result['skips']}
+
+
+def keep_in_place_with_drift_guard(*,
+                                   source_bucket,
+                                   fallback_bucket,
+                                   source_tag,
+                                   fallback_tag,
+                                   unit_label,
+                                   candidate_filter=None,
+                                   preserve_filter=None,
+                                   skip_classifier=None,
+                                   external_protected_items=None,
+                                   overlap_strategy='global-unsafe'):
+    """Keep-in-place wrapper around `filter_with_drift_guard` used by g10:
+    clean candidates remain in `source_bucket`; conflicts/overlaps/skips fall
+    back to `fallback_bucket`. `preserve_filter` items bypass the probe and
+    are always accepted (they still contribute to overlap protection)."""
+    return filter_with_drift_guard(
+        source_bucket=source_bucket,
+        other_bucket=fallback_bucket,
+        source_tag=source_tag,
+        other_tag=fallback_tag,
+        unit_label=unit_label,
+        direction='keep_in_place',
+        candidate_filter=candidate_filter,
+        preserve_filter=preserve_filter,
+        skip_classifier=skip_classifier,
+        external_protected_items=external_protected_items,
+        overlap_strategy=overlap_strategy,
+        sort_accepted_by_source_pos=False,
+    )
 
 
 def promote_mysql_test_only_to_mtr(source_bucket, g5_bucket, source_tag,
@@ -2097,70 +2220,21 @@ def emit_conflict_aware_split_bucket(bucket, tag, fallback_bucket,
 
 
 def prepare_g10_bucket(g10_bucket, fallback_bucket, protected_items=None):
-    emitted_bucket = []
-    conflict_fallback = 0
-    overlap_fallback = 0
-    preserved_source_g10 = 0
-    total = len(g10_bucket)
-    if total == 0:
+    if not g10_bucket:
         log("  [g10] (empty bucket)")
         return [], 0, 0
-
-    total_files = sum(len(it['files']) for it in g10_bucket)
-    log(f"  [g10] probing {total} commits, {total_files} file-modifications")
-    start = time.monotonic()
-    protected = list(protected_items or ())
-    clean_items = []
-    conflict_ids = set()
-    preserve_ids = set()
-
-    for i, item in enumerate(g10_bucket, 1):
-        if item.get('source_group') == 9:
-            preserve_ids.add(id(item))
-            clean_items.append(item)
-        elif not can_move_without_git_conflict(item['source_hash']):
-            conflict_ids.add(id(item))
-            protected.append(item)
-        else:
-            clean_items.append(item)
-
-        if i % PROGRESS_EVERY == 0 or i == total:
-            elapsed = time.monotonic() - start
-            rate = i / elapsed if elapsed > 0 else 0.0
-            log(f"  [g10] probed {i}/{total} commits  "
-                f"({len(clean_items)} clean, {len(conflict_ids)} conflict)  "
-                f"{rate:5.1f} commits/s")
-
-    overlap_ids = unsafe_later_overlap_keep_ids(clean_items, protected)
-    overlap_ids.difference_update(preserve_ids)
-
-    for i, item in enumerate(g10_bucket, 1):
-        item_id = id(item)
-        if item_id in conflict_ids:
-            log(f"  [g10] leaving {item['source_hash'][:12]} in remaining "
-                "because cherry-pick probe reported a conflict")
-            fallback_bucket.append(item)
-            conflict_fallback += 1
-        elif item_id in overlap_ids:
-            log(f"  [g10] leaving {item['source_hash'][:12]} in remaining "
-                "because a later patch overlaps")
-            fallback_bucket.append(item)
-            overlap_fallback += 1
-        else:
-            if item_id in preserve_ids:
-                preserved_source_g10 += 1
-            emitted_bucket.append(item)
-
-        if i % PROGRESS_EVERY == 0 or i == total:
-            elapsed = time.monotonic() - start
-            rate = i / elapsed if elapsed > 0 else 0.0
-            log(f"  [g10] {i}/{total} commits  "
-                f"({len(emitted_bucket)} ready, {conflict_fallback} conflict "
-                f"fallback, {overlap_fallback} overlap fallback, "
-                f"{preserved_source_g10} source-g10 preserved)  "
-                f"{rate:5.1f} commits/s")
-
-    return emitted_bucket, conflict_fallback, overlap_fallback
+    working = list(g10_bucket)
+    result = keep_in_place_with_drift_guard(
+        source_bucket=working,
+        fallback_bucket=fallback_bucket,
+        source_tag='g10',
+        fallback_tag='remaining',
+        unit_label='MyRocks/kernel',
+        preserve_filter=lambda item: item.get('source_group') == 9,
+        external_protected_items=protected_items,
+        overlap_strategy='global-unsafe',
+    )
+    return working, result['conflict_rejected'], result['overlap_rejected']
 
 
 def emit_squash(input_hash, files_set, info, subject, tag):

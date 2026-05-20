@@ -19,6 +19,7 @@ description: Use when porting a Percona Server commit range onto an output branc
 - `BDF` / `Build-Driven Fix` — minimal build repair for the current commit. Pull only the smallest later-range or `$REFERENCE` *symbols, macros, enum values, declarations, or includes* needed to make the commit build — never a whole later commit, because its tail of unrelated additions (new sysvars, tests, headers) cascades into fresh undefined-symbol errors. BDF may defer incoming code, or code already committed in `$OUTPUT_NAME`, when deferral reduces the size or risk of the current fix. Every deferral must be recorded in `deferred_changes`. Do not pull unrelated future changes forward.
 - `deferred_changes` — active list of code intentionally deferred during BDF. For each entry, record the skipped hunk or symbol, why it was deferred, and the commit in `remaining_commits` that must reintroduce it. When processing that assigned commit, apply its `deferred_changes` entries before deciding whether the commit landed successfully.
 - `CDF` / `Conflict-Driven Fix` — hunk-by-hunk conflict resolution using later commits or `$REFERENCE`. Do not use whole-file snaps from `$REFERENCE` unless explicitly authorized.
+- `COUNTER_STATE_TSV` — durable attempt ledger for `remaining_commits`. Store it outside the source tree, usually `/tmp/$JOB_NAME.counter-state.tsv`. Each real attempt must upsert one row with `sha`, `n_conflicts`, `n_build_error`, `n_symbol_pull`, `status`, and `subject`.
 
 ## Prohibitions
 
@@ -36,18 +37,20 @@ description: Use when porting a Percona Server commit range onto an output branc
 - **P12** Do not expand BDF indefinitely when the fix exceeds the symbol budget, cascades into more missing dependencies, or reveals an internal patch bug.
 - **P13** Do not silently slide from pass execution into final convergence with an unexplained deferred set.
 - **P14** Do not accept a null-diff branch that builds only at the tip.
+- **P15** Do not end a pass without a `remaining_commits` report generated from `COUNTER_STATE_TSV`; a prose summary or partial list is not sufficient.
 
 ## Initial Pass
 
 - Parse commits in `$INPUT_RANGE` and compute `build_changing` for each commit.
 - Apply all `build_changing=0` commits to `$OUTPUT_NAME` first.
 - Initialize `remaining_commits` with the `build_changing=1` commits that still need to be ported. For each entry, initialize `n_conflicts=0`, `n_build_error=0`, `n_symbol_pull=0`, and an empty deferral history.
+- Initialize `COUNTER_STATE_TSV` before the first main pass. Use `scripts/record_attempt.sh` for every real commit attempt so pass-end reports do not depend on memory or chat history.
 - If the boundary build fails after the Initial Pass, use BDF to make `$OUTPUT_NAME` buildable before starting the main passes. Before editing any source, **triage errors by enclosing `#ifdef`/feature flag**: if >=3 errors share one flag, the first BDF move is to remove the `#define FLAG` line from its defining header (typically a one-line edit). Do not add source comments for the deferral. Record the deferral in the run notes/output as `deferred_changes: feature-flag FLAG - re-enabled by <introducing-commit>` (or, when no input-range commit re-enables it, by the final REFERENCE snap). Then build; only fall back to per-site surgical BDF for errors that remain.
 
 ## Main Passes
 
-- After each commit attempt, update that commit's `remaining_commits` entry with the measured `n_conflicts`, grouped `n_build_error`, and `n_symbol_pull`, then print those values and whether the commit landed or stayed in `remaining_commits`.
-- After each pass, print the full `remaining_commits` list with each commit's current `n_conflicts`, `n_build_error`, and `n_symbol_pull` values.
+- After each commit attempt, update that commit's `remaining_commits` entry with the measured `n_conflicts`, grouped `n_build_error`, and `n_symbol_pull`, then print those values and whether the commit landed or stayed in `remaining_commits`. Immediately persist the same counters with `scripts/record_attempt.sh "$COUNTER_STATE_TSV" "$SHA" "$n_conflicts" "$n_build_error" "$n_symbol_pull" "$status"`.
+- After each pass, regenerate the remaining SHA file and print the mandatory pass report with `scripts/report_remaining.sh "Pass N" "$REMAINING_SHAS" "$COUNTER_STATE_TSV"`. The report must list every current `remaining_commits` entry, in current pass order, with columns `sha`, `n_conflicts`, `n_build_error`, `n_symbol_pull`, `status`, and `subject`. If a commit has not yet been attempted, its counters must print as `0 0 0` and status as `UNTRIED`.
 - For each pass, iterate through the commits in the current `remaining_commits` order. Remove a commit from `remaining_commits` only after its counters are updated, it lands successfully, and the resulting output commit builds.
 - **Pass 1** — cherry-pick each commit and update `n_conflicts` from the real conflicted-file count. Resolve conflicts with CDF while `n_conflicts <= 4`, then build and update grouped `n_build_error` from the real build output. Repair with BDF while `n_build_error <= 4` and `n_symbol_pull <= 1`, updating `n_symbol_pull` as BDF pulls symbols. If any limit is exceeded, abort or roll back the attempt and keep the commit in `remaining_commits` with its latest counter values.
 - **Pass 2** — repeat the Pass 1 procedure for commits still in `remaining_commits`, but use wider limits: `n_conflicts <= 8`, `n_build_error <= 8`, and `n_symbol_pull <= 2`.
@@ -67,6 +70,8 @@ The `scripts/` directory holds small shell helpers that codify recurring mechani
 - `scripts/probe.sh <SHA>` — tentative cherry-pick + build that **always rolls back**. Prints TSV `sha\tn_conflicts\tn_build_error\tsubject`. Use to fingerprint each commit in `remaining_commits` before deciding pass order; never use it to make progress.
 - `scripts/try_apply.sh <SHA> [BUILD_DIR]` — the real per-commit attempt. Cherry-picks with `--allow-empty --keep-redundant-commits`; on conflict, **leaves the cherry-pick in progress** so the caller can do hunk-level CDF; on build failure rolls back. Exit code: `0`=LANDED, `1`=CONFLICT (CDF needed), `2`=BUILD-FAIL (BDF or defer). Always prints the three counters plus status.
 - `scripts/count_build_errors.sh` — normalizes build output into grouped root-cause errors. Use its count for `n_build_error`; do not substitute raw `grep -c` diagnostic counts.
+- `scripts/record_attempt.sh <COUNTER_STATE_TSV> <SHA> <n_conflicts> <n_build_error> <n_symbol_pull> <status>` — upserts one real-attempt row in the durable counter ledger. Run it after every landed, deferred, conflict, build-fail, aborted, or rolled-back attempt.
+- `scripts/report_remaining.sh <PASS_LABEL> <REMAINING_SHAS> <COUNTER_STATE_TSV>` — prints the mandatory full pass-end `remaining_commits` report. Run it before saying a pass is complete.
 
 Both `probe.sh` and `try_apply.sh` use `--allow-empty --keep-redundant-commits` so that commits whose tree-effect is already in HEAD (squashed earlier in the rebase) land as empty commits instead of getting stuck in a cherry-pick state.
 

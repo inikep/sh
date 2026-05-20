@@ -1,3 +1,10 @@
+---
+name: ps-port-grouped
+description: Use when porting a Percona Server commit range onto an output branch, grouping non-build-changing commits before build-changing commits, preserving per-commit buildability, resolving conflicts hunk-by-hunk, and requiring the final tree to match a reference branch.
+---
+
+# Percona Server Grouped Port
+
 ## Definitions
 
 - `$INPUT_RANGE` — source commit range to port, equal to `$INPUT_BASE..$INPUT_TIP` and enumerated with `git rev-list --reverse`.
@@ -15,32 +22,33 @@
 
 ## Prohibitions
 
-- Do not replay the range chronologically by default.
-- Do not cherry-pick from memory or from raw `git rev-list` order once the waiting set exists.
-- Do not keep pushing through a commit that exceeds the current pass budget.
-- Do not finish a commit attempt without printing `n_conflicts`, `n_build_error`, `n_symbol_pull`, and whether the commit landed or stayed in `remaining_commits`.
-- Do not leave a known-bad build on `$OUTPUT_NAME`.
-- Do not use whole-file snaps from `$REFERENCE` unless explicitly authorized.
-- Do not use bulk ours/theirs strategies.
-- Do not use auto-take-incoming sweepers.
-- Do not silently choose empty HEAD when `$REFERENCE` still contains the incoming content.
-- Do not pull unrelated future changes during BDF.
-- Do not cherry-pick the introducing commit as a BDF shortcut; cherry-picking drags unrelated additions that cascade. Pull only the specific symbols/macros/declarations needed, or defer the feature flag that gates the broken sites.
-- Do not expand BDF indefinitely when the fix exceeds the symbol budget, cascades into more missing dependencies, or reveals an internal patch bug.
-- Do not silently slide from pass execution into final convergence with an unexplained deferred set.
-- Do not accept a null-diff branch that builds only at the tip.
+- **P1** Do not replay the range chronologically by default.
+- **P2** Do not cherry-pick from memory or from raw `git rev-list` order once the waiting set exists.
+- **P3** Do not keep pushing through a commit that exceeds the current pass budget.
+- **P4** Do not finish a commit attempt without printing `n_conflicts`, `n_build_error`, `n_symbol_pull`, and whether the commit landed or stayed in `remaining_commits`.
+- **P5** Do not leave a known-bad build on `$OUTPUT_NAME`.
+- **P6** Do not use whole-file snaps from `$REFERENCE` unless explicitly authorized.
+- **P7** Do not use bulk ours/theirs strategies.
+- **P8** Do not use auto-take-incoming sweepers.
+- **P9** Do not silently choose empty HEAD when `$REFERENCE` still contains the incoming content.
+- **P10** Do not pull unrelated future changes during BDF.
+- **P11** Do not cherry-pick the introducing commit as a BDF shortcut; cherry-picking drags unrelated additions that cascade. Pull only the specific symbols/macros/declarations needed, or defer the feature flag that gates the broken sites.
+- **P12** Do not expand BDF indefinitely when the fix exceeds the symbol budget, cascades into more missing dependencies, or reveals an internal patch bug.
+- **P13** Do not silently slide from pass execution into final convergence with an unexplained deferred set.
+- **P14** Do not accept a null-diff branch that builds only at the tip.
 
 ## Initial Pass
 
 - Parse commits in `$INPUT_RANGE` and compute `build_changing` for each commit.
 - Apply all `build_changing=0` commits to `$OUTPUT_NAME` first.
 - Initialize `remaining_commits` with the `build_changing=1` commits that still need to be ported. For each entry, initialize `n_conflicts=0`, `n_build_error=0`, `n_symbol_pull=0`, and an empty deferral history.
-- If the boundary build fails after the Initial Pass, use BDF to make `$OUTPUT_NAME` buildable before starting the main passes. Before editing any source, **triage errors by enclosing `#ifdef`/feature flag**: if ≥3 errors share one flag, the first BDF move is to comment out the `#define FLAG` line in its defining header (typically a one-line edit). Record the deferral as `deferred_changes: feature-flag FLAG — re-enabled by <introducing-commit>` (or, when no input-range commit re-enables it, by the final REFERENCE snap). Then build; only fall back to per-site surgical BDF for errors that remain.
+- If the boundary build fails after the Initial Pass, use BDF to make `$OUTPUT_NAME` buildable before starting the main passes. Before editing any source, **triage errors by enclosing `#ifdef`/feature flag**: if >=3 errors share one flag, the first BDF move is to remove the `#define FLAG` line from its defining header (typically a one-line edit). Do not add source comments for the deferral. Record the deferral in the run notes/output as `deferred_changes: feature-flag FLAG - re-enabled by <introducing-commit>` (or, when no input-range commit re-enables it, by the final REFERENCE snap). Then build; only fall back to per-site surgical BDF for errors that remain.
 
 ## Main Passes
 
 - After each commit attempt, update that commit's `remaining_commits` entry with the measured `n_conflicts`, `n_build_error`, and `n_symbol_pull`, then print those values and whether the commit landed or stayed in `remaining_commits`.
-- For each pass, iterate through the commits still in `remaining_commits`. Remove a commit from `remaining_commits` only after its counters are updated, it lands successfully, and the resulting output commit builds.
+- After each pass, print the full `remaining_commits` list with each commit's current `n_conflicts`, `n_build_error`, and `n_symbol_pull` values.
+- For each pass, iterate through the commits in the current `remaining_commits` order. Remove a commit from `remaining_commits` only after its counters are updated, it lands successfully, and the resulting output commit builds.
 - **Pass 1** — cherry-pick each commit and update `n_conflicts` from the real conflicted-file count. Resolve conflicts with CDF while `n_conflicts <= 4`, then build and update `n_build_error` from the real build output. Repair with BDF while `n_build_error <= 4` and `n_symbol_pull <= 1`, updating `n_symbol_pull` as BDF pulls symbols. If any limit is exceeded, abort or roll back the attempt and keep the commit in `remaining_commits` with its latest counter values.
 - **Pass 2** — repeat the Pass 1 procedure for commits still in `remaining_commits`, but use wider limits: `n_conflicts <= 8`, `n_build_error <= 8`, and `n_symbol_pull <= 2`.
 - **Pass 3** — repeat the Pass 2 procedure for commits still in `remaining_commits`, but use wider limits: `n_conflicts <= 16`, `n_build_error <= 16`, and `n_symbol_pull <= 4`.
@@ -50,14 +58,35 @@
 - The run is complete only when every output commit builds, the final diff is null, and the final build passes.
 
 
+## Helper Scripts
+
+The `scripts/` directory holds small shell helpers that codify recurring mechanics. Use them; don't reinvent.
+
+- `scripts/classify_build_changing.sh <BASE> <TIP>` — emits a TSV (`sha\tbc\tn_files\tsubject`) for every commit in the range, with `bc=1` iff any changed path is build-relevant per the `build_changing` definition. Run once at Initial Pass to drive the bucketing.
+- `scripts/build_remaining.sh <OUTPUT_BASE> <INPUT_BASE> <INPUT_TIP> [BC_TSV]` — emits the subject-matched, not-yet-landed SHAs (one per line). Use to refresh `remaining_commits` after each landing; subject match handles cherry-pick SHA changes while keeping the input range and output branch base separate.
+- `scripts/probe.sh <SHA>` — tentative cherry-pick + build that **always rolls back**. Prints TSV `sha\tn_conflicts\tn_build_error\tsubject`. Use to fingerprint each commit in `remaining_commits` before deciding pass order; never use it to make progress.
+- `scripts/try_apply.sh <SHA> [BUILD_DIR]` — the real per-commit attempt. Cherry-picks with `--allow-empty --keep-redundant-commits`; on conflict, **leaves the cherry-pick in progress** so the caller can do hunk-level CDF; on build failure rolls back. Exit code: `0`=LANDED, `1`=CONFLICT (CDF needed), `2`=BUILD-FAIL (BDF or defer). Always prints the three counters plus status.
+
+Both `probe.sh` and `try_apply.sh` use `--allow-empty --keep-redundant-commits` so that commits whose tree-effect is already in HEAD (squashed earlier in the rebase) land as empty commits instead of getting stuck in a cherry-pick state.
+
 ## Build Configuration
 
-Use `/tmp` for builds.
-Default — override via task instructions if the user specifies:
+Use an out-of-tree build directory under `/tmp`. Define `JOB_NAME` from the output branch when the task does not specify one:
 
 ```sh
-CC=gcc-9 CXX=g++-9 cmake .. \
+SOURCE_DIR=$(git rev-parse --show-toplevel)
+JOB_NAME=${JOB_NAME:-${OUTPUT_NAME//[^A-Za-z0-9_.-]/_}}
+BUILD_DIR=${BUILD_DIR:-/tmp/$JOB_NAME}
+mkdir -p "$BUILD_DIR"
+cd "$BUILD_DIR"
+```
+
+Default build configuration — override via task instructions if the user specifies:
+
+```sh
+CC=gcc-9 CXX=g++-9 cmake "$SOURCE_DIR" \
   -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_CXX_FLAGS="-fpermissive" \
   -DCMAKE_C_COMPILER_LAUNCHER=ccache \
   -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
   -DMYSQL_MAINTAINER_MODE=OFF \

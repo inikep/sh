@@ -1,7 +1,7 @@
 ---
 
 ## name: ps-port-grouped
-description: Use when porting a Percona Server commit range from one MySQL base to a newer one (e.g. mysql-5.6.x → mysql-5.7.x) and a known-good REFERENCE branch exists, by categorizing commits, scheduling easy-first across reducing passes (each pass strictly shrinks the waiting set), building after every commit, and converging the output to a null diff against REFERENCE. Alternative to ps-replay+make-buildable when chronological order with a single build boundary is the wrong shape.
+description: Use when porting a Percona Server commit range from one MySQL base to a newer one (e.g. mysql-5.6.x → mysql-5.7.x) and a known-good REFERENCE branch exists, by categorizing commits, scheduling easy-first across pass budgets, building after every commit, and converging the output to a null diff against REFERENCE. Alternative to ps-replay+make-buildable when chronological order with a single build boundary is the wrong shape.
 
 # Percona Server Grouped Port
 
@@ -13,7 +13,7 @@ Port a Percona Server commit range from `$INPUT_BASE..$INPUT_TIP` onto a newer b
 2. Builds at **every** commit. **Hard requirement — not a goal, not a "nice to have".** Tip-only buildable is a failed run. If you cannot achieve per-commit buildability for some segment of the range, **stop and ask** (see Stop Conditions) — do not silently downgrade the deliverable.
 3. Has a null tree diff to `$REFERENCE` at the tip.
 
-The strategy is **easier-first across reducing passes**, not chronological. Each pass is an eligibility band chosen from a fresh trial sweep against the current `$OUTPUT_NAME` tip. The next pass lands only the easiest currently eligible band, then rewrites the waiting set. The waiting set strictly shrinks every pass. Easy commits land first and establish a buildable foundation; harder source-code conflicts land later as their prerequisite siblings drop their conflict and build cost on subsequent re-trials.
+The strategy is **easier-first across pass budgets**, not chronological. Each pass is an eligibility band with an explicit conflict/build/BDF budget. The pass itself is the measurement: attempt the eligible rows, land the ones that fit the current budget, and advance over-budget rows to a later pass. Each pass must make progress by landing rows or advancing rows to a later budget. Easy commits land first and establish a buildable foundation; harder source-code conflicts land later as their prerequisite siblings drop their conflict and build cost in later passes.
 
 ### Per-commit buildability is non-negotiable
 
@@ -22,7 +22,7 @@ The single most attractive failure mode for this skill is: cherry-pick all N com
 Telltale signs you are about to (or already did) deliver tip-only buildable as a fallback:
 
 - `$OUTPUT_BASE` does not build, and your plan is "land all commits chronologically and verify only at tip" because the tip commit happens to be a comprehensive end-fix (e.g., `Make part-1 prefix buildable`).
-- The first trial sweep showed 0 conflicts across the range, so you concluded "no work needed" and skipped per-commit builds.
+- The first pass had many clean cherry-picks, so you concluded "no work needed" and skipped per-commit builds.
 - You discovered tip-fix's hunks have cross-commit dependencies (later-introduced symbols, files added by later commits) and concluded "per-commit redistribution is structurally hard, deliver chronological instead."
 - The exec log records `clean` for every commit but only one `build PASS` entry exists.
 
@@ -56,26 +56,26 @@ The skill enforces phases. Each phase has a precondition (what must exist on dis
 | §1.5 Base-BDF (only if §1 base build FAIL)             | §1 FAIL                                            | `$OUTPUT_NAME` at Base-BDF SHA, Base-BDF build PASS recorded                                                 |
 | §2 Scan                                                | §1 output                                          | per-commit table in `$REPORT_FILE`                                                                           |
 | §2.5 Dep graph                                         | §2 output                                          | `hunks.tsv`, `overlaps.tsv`, pre-detected pairs list, SCC report in `$REPORT_FILE`                           |
-| §3 Plan First Pass                                     | §2.5 output                                        | `**$WAITING_FILE` written**, one row per still-unported commit, sorted by (landing_pass, intra_pass_order) for the first §4 pass |
+| §3 Plan First Pass                                     | §2.5 output                                        | `**$WAITING_FILE` written**, one row per still-unported commit, sorted by (next_pass, intra_pass_order) for the first §4 pass |
 | §3.5 Gate                                              | `$WAITING_FILE` complete                           | all checkboxes ticked in `$REPORT_FILE`                                                                      |
-| §4 Execute Iterative Passes                            | §3.5 passed                                        | loop {trial-sweep waiting set → land the lowest eligible pass band → rewrite `$WAITING_FILE`} until waiting set empty or pass adds 0 |
-| §4.5 Deferred-set management                           | §4 pass with 0 landings, or waiting set non-empty  | strategy choice recorded; deferred set handled per (a)/(b)/(c)/(d)                                           |
+| §4 Execute Iterative Passes                            | §3.5 passed                                        | loop {land the lowest eligible pass band → record observed metrics → rewrite `$WAITING_FILE`} until waiting set empty or no row lands/advances |
+| §4.5 Deferred-set management                           | §4 pass with no progress, current pass 6, or waiting set non-empty | strategy choice recorded; deferred set handled per (a)/(b)/(c)/(d)                                           |
 | §5 Converge                                            | §4.5 output (or §4 finished with empty waiting set) | null diff to `$REFERENCE`, final build PASS                                                                  |
 
 
-**Pass invariant.** Each entry into the pass loop trial-sweeps every commit still in `$WAITING_FILE` against the current `$OUTPUT_NAME` tip, assigns a `landing_pass` (1–5) based on **right-now** conflict + build difficulty, then executes only the lowest eligible pass band present in the file. At the end of every pass, `$WAITING_FILE` has strictly fewer rows than at the start (or the pass terminates the loop by adding 0 commits → §4.5). `landing_pass` is therefore current-state eligibility, not a one-time locked grade — a commit assigned to landing pass 4 in an earlier round may be assigned to landing pass 2 later once its prerequisites have landed. This is **expected**; every value comes from a fresh trial against the live tip.
+**Pass invariant.** Each entry into the pass loop executes only the lowest `next_pass` band present in `$WAITING_FILE`. During that real landing attempt, the loop observes conflict count, build error spread, and BDF forward-symbol count. Rows that fit the current pass budget land; rows that exceed it stay in `$WAITING_FILE` with `next_pass` advanced. At the end of every pass, either `$WAITING_FILE` has fewer rows, or at least one row moved to a later `next_pass`; otherwise the pass terminates the loop → §4.5. `next_pass` is therefore a retry state, not a one-time locked grade.
 
-**The single failure mode this skill exists to prevent.** An LLM reads the skill, internalizes "easier-first by pass," and then drifts into "process commits in `git rev-list --reverse` order, grade each as I pick, land what works, struggle on what doesn't." This *feels* like compliance — there are pass assignments in the report, there is a trial sweep — but it is chronological execution with cosmetic scheduling. Recognize the fingerprints:
+**The single failure mode this skill exists to prevent.** An LLM reads the skill, internalizes "easier-first by pass," and then drifts into "process commits in `git rev-list --reverse` order, land what works, struggle on what doesn't." This *feels* like compliance — there are pass labels in the report — but it is chronological execution with cosmetic scheduling. Recognize the fingerprints:
 
-- A single commit consuming disproportionate time. You are stuck because the next commit *by chronological index* belonged to landing pass 4/5, not because no easier work remained in the waiting set.
+- A single commit consuming disproportionate time. You are stuck because the next commit *by chronological index* belonged to pass 5/6, not because no easier work remained in the waiting set.
 - Cherry-picks landed on `$OUTPUT_NAME` before `$WAITING_FILE` existed on disk. (Check: `stat $WAITING_FILE` vs `git log --format=%aI $OUTPUT_BASE..$OUTPUT_NAME | tail -1`. If the file is missing or younger than the oldest pick, you drifted.)
 - The landed-SHA order on `$OUTPUT_NAME` corresponds to `git rev-list --reverse $INPUT_RANGE` order rather than `(execution pass, intra_pass_order)` order.
-- You did per-commit "trial pick → assign pass → land" in a single loop instead of completing one **trial sweep** of the entire waiting set, writing `$WAITING_FILE`, then executing the lowest eligible pass band.
-- `$WAITING_FILE` was written once at the start of §4 and never rewritten — that's the locked-plan anti-pattern. The file must be rewritten at the start of every pass with fresh trial-sweep numbers.
+- You skipped `$WAITING_FILE` and picked the next SHA from memory or chronological order.
+- `$WAITING_FILE` was written once at the start of §4 and never rewritten — that's the locked-plan anti-pattern. The file must be rewritten after every pass with observed metrics and updated `next_pass`.
 
 If any of those describe the current run, do not push through the stuck commit. Jump to §3.7 Recovery.
 
-**Why the on-disk waiting file is non-negotiable.** Text guardrails ("batch the trial sweep," "do not interleave") are easy for an LLM to agree with and then locally optimize away. A file is not. Each pass's landing loop is literally `for row in $WAITING_FILE`. If the file doesn't exist, the pass cannot start. If the file is sorted by `landing_pass` ascending, the landing order is pass-ascending. Phase discipline is enforced by what exists on disk, not by what you remember the skill said. **Snapshot `$WAITING_FILE` to `$WAITING_FILE.passN` at the start of every pass** so the audit trail records what each pass attempted.
+**Why the on-disk waiting file is non-negotiable.** Text guardrails ("process pass bands," "do not drift chronologically") are easy for an LLM to agree with and then locally optimize away. A file is not. Each pass's landing loop is literally `for row in $WAITING_FILE`. If the file doesn't exist, the pass cannot start. If the file is sorted by `next_pass` ascending, the landing order is pass-ascending. Phase discipline is enforced by what exists on disk, not by what you remember the skill said. **Snapshot `$WAITING_FILE` to `$WAITING_FILE.passN` at the start of every pass** so the audit trail records what each pass attempted.
 
 This skill is a sibling of `ps-replay+make-buildable`. Choose this one when:
 
@@ -94,7 +94,7 @@ This skill is a sibling of `ps-replay+make-buildable`. Choose this one when:
 - `$OUTPUT_RANGE` — formatted as `$OUTPUT_BASE..$OUTPUT_NAME` (e.g. `mysql-5.7.9..ps-5.7.9`). `$OUTPUT_NAME` is the branch this skill creates.
 - `$REFERENCE` — branch or commit. Final `$OUTPUT_NAME` must null-diff to it. Used both as the convergence target and as the source of truth for conflict resolution.
 - `$REPORT_FILE` — markdown report path (default `/tmp/ps-port-grouped-$OUTPUT_NAME.md`).
-- `$WAITING_FILE` — TSV path (default `/tmp/ps-port-grouped-$OUTPUT_NAME-waiting.tsv`). Written first by §3 for the first §4 pass, then **rewritten at the start of every subsequent pass** in §4 to reflect the current waiting set with fresh trial-sweep pass assignments. Its existence and completeness is the §3.5 gate's primary check. Each pass iterates this file in row order for the lowest `landing_pass` present; if it does not exist or is empty, the pass cannot start (empty waiting set means §5 is next, not "skip the pass").
+- `$WAITING_FILE` — TSV path (default `/tmp/ps-port-grouped-$OUTPUT_NAME-waiting.tsv`). Written first by §3 for the first §4 pass, then **rewritten after every pass** in §4 to reflect the current waiting set, observed metrics, and updated `next_pass` values. Its existence and completeness is the §3.5 gate's primary check. Each pass iterates this file in row order for the lowest `next_pass` present; if it does not exist or is empty, the pass cannot start (empty waiting set means §5 is next, not "skip the pass").
 - A snapshot `$WAITING_FILE.passN` is written at the start of pass N for audit. Never delete these snapshots until the run completes.
 - `$BUILD_DIR` — out-of-tree build directory under `/tmp` (default `/tmp/build-$OUTPUT_NAME`).
 
@@ -147,8 +147,8 @@ A non-building `$OUTPUT_BASE` is no longer a hard stop. Per-commit buildability 
   - `**$REFERENCE` (or `$INPUT_TIP`) tip-fix commit**, if the input range contains an end-of-range "make buildable" commit (subject like `Make … buildable`, `Build/Compilation fix`, etc.). Split it into per-file patches up front; the patches whose target files are at base context apply cleanly here and supply most of the base-fix material. **This is the common case** for ranges where prior tooling already collected the buildability fixes.
   - **Cherry-pick of relevant later-range commits**, when the fix lives in a later input-range commit (Rule-1 prereq pull pattern from BDF.md). Pull only the symbol/decl/macro needed; don't drag the whole later commit forward.
 3. **Apply as a single Base-BDF commit on `$OUTPUT_NAME`.** Call it `Base-BDF: make $OUTPUT_BASE buildable`. Its diff is the minimum set of hunks needed to flip the base's build from FAIL to PASS. Record its SHA in `$REPORT_FILE`.
-4. **Build and confirm PASS.** This commit becomes the new "buildable foundation" — landing pass 1 starts on top of it.
-5. **Reconcile with the tip-fix commit (if §1.5 sourced from it).** When the tip-fix commit's own cherry-pick eventually lands in §4 (in whichever pass its trial sweep first grades it landable), the hunks already folded into Base-BDF will be no-ops; the remaining hunks (those that needed later-commit context) will apply normally. The tip-fix commit ends up with a smaller diff than it started with, but `$OUTPUT_NAME`'s final tree still null-diffs to `$REFERENCE` because the same hunks are present, just landed earlier.
+4. **Build and confirm PASS.** This commit becomes the new "buildable foundation" — pass 1 starts on top of it.
+5. **Reconcile with the tip-fix commit (if §1.5 sourced from it).** When the tip-fix commit's own cherry-pick eventually lands in §4 (in whichever pass first fits its conflict/build/BDF budget), the hunks already folded into Base-BDF will be no-ops; the remaining hunks (those that needed later-commit context) will apply normally. The tip-fix commit ends up with a smaller diff than it started with, but `$OUTPUT_NAME`'s final tree still null-diffs to `$REFERENCE` because the same hunks are present, just landed earlier.
 
 **Bounding.** Base-BDF is subject to the same Bounded Rule-1 thresholds from BDF.md: if the prereq set grows past ~5 distinct symbols per file region, or any error is internal-patch-bug class, or a fix cascades into 3+ further undeclared symbols, **stop applying Rule-1 and surface the blocker** rather than continue chasing. Base-BDF is "small, bounded fix to flip base build", not "rewrite the base wholesale." If it cannot be bounded, that's a Stop Condition — see "BDF-futile" below.
 
@@ -201,7 +201,7 @@ Categorize by inspecting the commit's **subject + changed paths**. Do not branch
 
 (case-insensitive). Plain `.txt`, `.result`, `.test`, `.md`, `.spec` etc. do **not** trigger BUILD_CHANGING. A single matching path forces the flag true. (`.i` and `.ic` are InnoDB inline-include headers — same treatment as `.h`.)
 
-**CMAKE_ONLY flag** — true if **all** changed paths basename-match `CMakeLists.txt` (any directory) AND BUILD_CHANGING is false. CMakeLists.txt by itself doesn't match the BC regex (`.txt` extension), but its content drives `cmake ..` reconfigure — flag it explicitly so landing pass 1 can include it without conflating with BC=0 docs/test commits.
+**CMAKE_ONLY flag** — true if **all** changed paths basename-match `CMakeLists.txt` (any directory) AND BUILD_CHANGING is false. CMakeLists.txt by itself doesn't match the BC regex (`.txt` extension), but its content drives `cmake ..` reconfigure — flag it explicitly so pass 1 can include it without conflating with BC=0 docs/test commits.
 
 ```sh
 # Pseudo-shell for the flag
@@ -248,9 +248,9 @@ Record the pair-detection output prominently in `$REPORT_FILE` (a dedicated "Pre
 
 #### Cycle detection (predict BDF futility up-front)
 
-After the trial pass (§3) classifies each commit, compute **strongly-connected components of the conflict-pending subgraph**:
+Before pass execution, compute **strongly-connected components of the dependency graph**:
 
-- Nodes: commits whose trial outcome is `conflict` or whose later state will be `deferred-build-fail` (in practice, BC=1 with trial=conflict and any BC=1 likely to build-fail).
+- Nodes: BC=1 commits and any commit likely to require BDF based on touched source/header paths.
 - Edges: from `hunks.tsv` / `overlaps.tsv` — `A→B` where `B` modifies code `A` previously touched. Restrict to edges where both endpoints are in the pending set.
 - Treat the graph as undirected for SCC; report largest connected component sizes.
 
@@ -265,7 +265,7 @@ A minimal SCC computation in Python (Tarjan or simple union-find over `overlaps.
 
 `git patch-id --stable` produces an identifier for a commit's diff that is independent of context line numbers, surrounding offsets, and small reformattings. Two commits whose tree changes are equivalent (the same patch applied in two places — e.g. an upstream cherry-pick already merged into `$OUTPUT_BASE`, an `Import foo.patch` re-import, or content folded into Base-BDF that originally lived in a later input-range commit) share the same patch-id even when their commit SHAs differ.
 
-Build the coverage map **once** at this point in the workflow, then maintain it incrementally in §4 as commits land. Pre-computing empties is strictly cheaper than discovering them via the §3 trial sweep cherry-pick or the §4 `cherry-pick --skip` path. Crucially, it also removes those commits from the pass-assignment accounting so they do not consume landing-pass budget for work that will be skipped — and it surfaces, before the first pass starts, the count of commits whose content is already covered.
+Build the coverage map **once** at this point in the workflow, then maintain it incrementally in §4 as commits land. Pre-computing empties is strictly cheaper than discovering them via the §4 `cherry-pick --skip` path. Crucially, it also removes those commits from pass accounting so they do not consume pass budget for work that will be skipped — and it surfaces, before the first pass starts, the count of commits whose content is already covered.
 
 **Two patch-id sets, computed up front:**
 
@@ -308,13 +308,13 @@ join -t$'\t' -1 1 -2 1 \
 
 Every row in `predicted-empty.tsv` is an input-range commit whose tree-change is already in HEAD. The intent of the input commit is already satisfied; cherry-picking it would produce no diff and the §4 landing loop would `cherry-pick --skip` it anyway.
 
-**§3 trial-sweep integration.** Before invoking `git cherry-pick --no-commit` for any commit, look it up in `predicted-empty.tsv`. If present:
+**§3 waiting-set integration.** Before writing `$WAITING_FILE`, look each source SHA up in `predicted-empty.tsv`. If present:
 
-- **Do not run the trial cherry-pick.** The commit is excluded from this pass's `$WAITING_FILE`.
+- **Do not write a waiting row.** The commit is excluded from this pass's `$WAITING_FILE`.
 - **Log once** in `$REPORT_FILE` under a "Predicted-empty (patch-id coverage)" section: `source_sha`, subject, the `head_sha` that already carries the same patch-id, and the pass at which the prediction fired.
-- **No landing pass is assigned.** Predicted-empty commits never enter `$WAITING_FILE` and never count against pass landing budgets.
+- **No pass is assigned.** Predicted-empty commits never enter `$WAITING_FILE` and never count against pass landing budgets.
 
-This trims the waiting set before §3's lock sweep runs. For runs onto a destination base that already absorbed many upstream cherry-picks (common in PS port runs), this can remove 10–30 % of the nominal input range up front, with zero cost beyond the patch-id computation.
+This trims the waiting set before §3 writes `$WAITING_FILE`. For runs onto a destination base that already absorbed many upstream cherry-picks (common in PS port runs), this can remove 10–30 % of the nominal input range up front, with zero cost beyond the patch-id computation.
 
 **§4 landing-loop integration.** After every successful landing on `$OUTPUT_NAME`, append the new commit's patch-id to `head-patch-ids.tsv`:
 
@@ -325,7 +325,7 @@ new_pid=$(git show "$new_sha" | git patch-id --stable | awk '{print $1}')
 [ -n "$new_pid" ] && printf '%s\t%s\n' "$new_pid" "$new_sha" >> .ps-port-grouped/head-patch-ids.tsv
 ```
 
-Then, when the next pass's §3 trial sweep runs, **re-intersect** input-patch-ids with the extended head-patch-ids before assigning the new waiting set. This catches commits whose net diff collapsed to empty because some of their hunks landed via fold operations into an earlier commit during this pass — the dependent commit's patch-id may now match one of HEAD's commits. Without re-intersection, those commits would consume a full trial-sweep slot (and possibly an early-pass landing slot) only to skip-empty in §4 step 3.
+Then, before the next pass starts, **re-intersect** input-patch-ids with the extended head-patch-ids before rewriting the waiting set. This catches commits whose net diff collapsed to empty because some of their hunks landed via fold operations into an earlier commit during this pass — the dependent commit's patch-id may now match one of HEAD's commits. Without re-intersection, those commits would consume a landing slot only to skip-empty in §4 step 3.
 
 **Bounds and caveats.**
 
@@ -345,7 +345,7 @@ Then, when the next pass's §3 trial sweep runs, **re-intersect** input-patch-id
 - `head-patch-ids.tsv` — `patch_id<TAB>head_sha` (append-only during §4; re-sort before each pass's re-intersection).
 - `predicted-empty.tsv` — `source_sha<TAB>patch_id<TAB>head_sha` (recomputed each pass via the `join` above).
 
-**Performance.** For 500 commits, computing patch-ids is ~30–60 s (single-pass `git show | git patch-id`). The `join`-based intersection is sub-second. Per-pass append-and-reintersect is sub-second after the first pass. This is dwarfed by the per-pass trial-build cost — the coverage map is essentially free relative to §3's trial sweep.
+**Performance.** For 500 commits, computing patch-ids is ~30–60 s (single-pass `git show | git patch-id`). The `join`-based intersection is sub-second. Per-pass append-and-reintersect is sub-second after the first pass. The coverage map is essentially free relative to normal cherry-pick/build work.
 
 **§3.5 gate addition.** Add these checks to the workflow gate:
 
@@ -356,91 +356,66 @@ Then, when the next pass's §3 trial sweep runs, **re-intersect** input-patch-id
 
 A missing coverage map is a §3.5 gate stop in its own right: continue and you'll re-discover the empties one cherry-pick at a time, inflating pass cost.
 
-**Why this matters at the rubric level.** Without the coverage map, an input commit whose content is already in HEAD goes through the trial cherry-pick (returns clean/empty, n_conflicts=0), gets assigned to landing pass 1 or 2, lands at its `land_pos`, runs the empty-skip path, contributes one row to the audit trail and produces no tree change. With the coverage map, the same commit is identified before any trial cherry-pick runs; it is logged once in `predicted-empty.tsv` and the report, and is excluded from `$WAITING_FILE` entirely. For large input ranges with significant input/HEAD overlap (common when the destination base already absorbed upstream cherry-picks, or when the input range re-imports patches the base already contains), this removes dozens to hundreds of empty-skip cycles per run with no risk to correctness — the §4 runtime empty check is preserved as the final guard for the un-predicted cases.
+**Why this matters at the rubric level.** Without the coverage map, an input commit whose content is already in HEAD gets a waiting row, reaches §4, runs the empty-skip path, contributes one row to the audit trail and produces no tree change. With the coverage map, the same commit is identified before any cherry-pick runs; it is logged once in `predicted-empty.tsv` and the report, and is excluded from `$WAITING_FILE` entirely. For large input ranges with significant input/HEAD overlap (common when the destination base already absorbed upstream cherry-picks, or when the input range re-imports patches the base already contains), this removes dozens to hundreds of empty-skip cycles per run with no risk to correctness — the §4 runtime empty check is preserved as the final guard for the un-predicted cases.
 
 ### 3. Plan First Pass
 
-The skill iterates **passes** in §4. Each pass strictly reduces the waiting set. §3 builds the data for the first pass: a trial sweep of every commit in `$INPUT_RANGE` against `$OUTPUT_BASE` (or post-Base-BDF tip), assigned to a `landing_pass`, and written to `$WAITING_FILE`. §4 will rewrite `$WAITING_FILE` for every subsequent pass using the same procedure against the then-current `$OUTPUT_NAME` tip.
+The skill iterates **passes** in §4. Each pass must either land rows or advance rows to a later budget. §3 builds only the initial waiting file: one row per not-yet-covered commit, with `next_pass=1` for BC=0/CMake-only work and `next_pass=2` for BC=1 work. §4 is where commits are actually cherry-picked, built, measured, landed, or advanced to a later pass.
 
-A commit's `landing_pass` is its eligibility-to-land right now. It is assigned from the pass definitions in §4, not from chronological order. Within the selected pass, prefer commits the user cares about (features first) unless the user specified otherwise, optionally re-sorted by descending `fwd-weight` for large pass bands (see §4 intra-pass ordering).
+A commit's `next_pass` is the earliest pass that should try it next. It is initialized from scan data and then updated from real §4 outcomes, not from a dry run. Within the selected pass, prefer commits the user cares about (features first) unless the user specified otherwise, optionally re-sorted by descending `fwd-weight` for large pass bands (see §4 intra-pass ordering).
 
-`**build_conflicts` metric.** During the trial sweep, for every BC=1 commit:
+**Initial planning is a file-writing pass, not a cherry-pick pass.** At the end of §3:
 
-1. Cherry-pick `--no-commit` against the trial base (current `$OUTPUT_NAME` tip for the pass being planned).
-2. If the cherry-pick produced conflicts, also run `make -j$N` against the conflicted-but-staged tree. If it didn't conflict, run `make` directly.
-3. Parse `build.log` for `error:` lines, extract the source file path, count **distinct files**. That count is the commit's `build_conflicts` for this pass.
-4. `git cherry-pick --abort` (if pending) and `git reset --hard $TRIAL_BASE`; `git clean -fdq`.
-
-This adds a build step per BC=1 commit during the trial sweep. With warm ccache, each trial build is typically 30–120 s. For 300 BC=1 commits that's ~2–10 hours of trial cost per pass — front-loaded so the pass assignments reflect real build difficulty against the **current** tip, not just cherry-pick conflict shape and not the previous pass's stale numbers. If the cost is prohibitive for the run scale, skip the trial-build for any commit whose `n_conflicts` already exceeds 16 (it will land no earlier than pass 4 regardless) and skip for commits whose touched paths are exclusively `mysql-test/` (no build impact).
-
-Record both `n_conflicts` and `build_conflicts` columns in the trial output TSV; the lock sweep uses both to assign the next landing pass.
-
-**Planning a pass is a two-sweep process.** You cannot fully grade conflict size by reading the commit; you have to try against the live tip. So at the start of every pass (including pass 1, which §3 plans):
-
-0. **Patch-ID empty filter (§2.6).** Before the trial sweep, re-intersect `input-patch-ids.tsv` with the current `head-patch-ids.tsv` (regenerated by appending each landed commit's patch-id during §4) and rewrite `predicted-empty.tsv`. Exclude every commit whose source SHA appears in `predicted-empty.tsv` from this pass's waiting set — they do not get trialed, assigned a landing pass, or written to `$WAITING_FILE`. Log them in the "Predicted-empty" section of `$REPORT_FILE` with the head SHA that already carries their patch-id. The lock sweep operates on the post-filter set.
-1. **Trial sweep** — for every commit in the current (post-filter) waiting set, run a quick `git cherry-pick --no-commit` trial **on a throwaway worktree** (or in-place with `--abort` on every result), plus the BC=1 trial build above. Compute `(n_conflicts, build_conflicts)` against the live tip.
-2. **Lock sweep** — assign each waiting commit a `landing_pass` from the pass definitions in §4 and write `$WAITING_FILE` for this pass. If reality later refutes the trial, defer the row to the next pass rather than moving it in place. The **next** pass's trial sweep is where re-assignment happens cleanly — by construction it produces fresh values against the new tip.
-
-**Batch the trial sweep — required, not optional.** A full sweep of every waiting commit is expensive (500+ throwaway picks is a real cost in pass 1; smaller in later passes). Trial in **~50-commit chunks**, assign each chunk, then trial the next chunk. The trial sweep must cover the **entire** waiting set before any cherry-pick lands in this pass. The only permitted shortcut: skip the trial-pick for low-risk categories (docs-only, test-only, packaging-only) and assign those by category + BUILD_CHANGING alone after the first ~3 chunks have established the conflict pattern. Source-bucket, build, reconciliation, and any BUILD_CHANGING commit always get the trial.
-
-**Do not interleave trial chunks with pass-1 landings inside a pass.** "Trial chunk 1 → land pass 1 from chunk 1 → trial chunk 2" is forbidden inside a single pass. It produces post-hoc scheduling (you assign commits in the order they appear, then land them in roughly that order) and silently degenerates into chronological processing. Complete the trial sweep for the entire waiting set, write `$WAITING_FILE` for this pass, *then* begin landings. (Across **passes** this looks similar — pass 2's trial sweep happens after pass 1's landings — but that's *the design*: re-trialing against a different live tip yields different pass assignments. Inside one pass, do not interleave.)
-
-The trial sweep produces a working dataset; throwaway operations must not pollute `$OUTPUT_NAME`.
+1. **Patch-ID empty filter (§2.6).** Re-intersect `input-patch-ids.tsv` with the current `head-patch-ids.tsv` and rewrite `predicted-empty.tsv`. Exclude every commit whose source SHA appears in `predicted-empty.tsv` from `$WAITING_FILE`. Log them in the "Predicted-empty" section of `$REPORT_FILE` with the head SHA that already carries their patch-id.
+2. **Initial pass assignment.** For every remaining source commit, set `next_pass=1` if `build_changing=0` or `cmake_only=1`; otherwise set `next_pass=2`. Leave `n_conflicts`, `build_conflicts`, and `forward_symbols` as `NA` until §4 observes them during a real landing attempt.
+3. **Write `$WAITING_FILE`.** Sort by `(next_pass ASC, intra_pass_order ASC)`, snapshot it, and run the sanity checks. No cherry-pick or build happens in §3.
 
 #### Writing `$WAITING_FILE`
 
 At the end of §3 (and at the start of every subsequent pass in §4), **write the current waiting set to `$WAITING_FILE`** in this exact TSV format (tab-separated, header row included):
 
 ```
-land_pos	landing_pass	intra_pass_order	orig_sha	rev_list_pos	category	build_changing	cmake_only	n_conflicts	build_conflicts	attempt_round	subject
-1	1	1	abc123def456	7	bugfix	0	0	0	0	1	Fix typo in error message
+land_pos	next_pass	intra_pass_order	orig_sha	rev_list_pos	category	build_changing	cmake_only	n_conflicts	build_conflicts	forward_symbols	attempt_round	subject
+1	1	1	abc123def456	7	bugfix	0	0	NA	NA	NA	1	Fix typo in error message
 2	1	2	...
 ...
 M	5	K	...
 ```
 
-The file holds **M rows for M still-unlanded commits**. M shrinks every pass. A row is removed once its commit successfully lands; a row stays (with refreshed `landing_pass`/`n_conflicts`/`build_conflicts` and incremented `attempt_round`) when its commit is not yet attempted or attempted and rolled back.
+The file holds **M rows for M still-unlanded commits**. M shrinks every pass. A row is removed once its commit successfully lands; a row stays (with updated `next_pass` plus observed `n_conflicts`/`build_conflicts`/`forward_symbols`, and incremented `attempt_round`) when its commit is attempted and rolled back or left for a later pass.
 
 Field semantics:
 
 - `land_pos` — 1..M within this pass. The **landing order for this pass**. Re-numbered every pass. Not stable across passes.
-- `landing_pass` — 1..5, current-pass eligibility band from the trial sweep and §4 pass definitions.
-- `intra_pass_order` — 1..K within the `landing_pass` for this pass.
+- `next_pass` — 1..6, earliest pass that should try this row next. Initialized in §3, updated from real §4 outcomes.
+- `intra_pass_order` — 1..K within the `next_pass` for this pass.
 - `orig_sha` — the source commit's full SHA. Stable across passes.
 - `rev_list_pos` — the commit's index in `git rev-list --reverse $INPUT_RANGE`. **Reference only.** Surfaced here so you can detect chronological drift: if `rev_list_pos` is monotonically increasing along `land_pos`, you have not actually scheduled by pass — you've sorted chronologically and labeled it.
 - `category`, `build_changing`, `subject` — as scanned in §2. Stable across passes.
-- `cmake_only` — 1 if the commit's changed paths are **exclusively** `CMakeLists.txt` files (any directory); 0 otherwise. Used together with `build_changing=0` for landing pass 1 admittance.
-- `n_conflicts` — count of files reported unmerged after `git cherry-pick --no-commit` in this pass's trial sweep. 0 for clean/empty trial outcomes. **Refreshed every pass.**
-- `build_conflicts` — count of distinct source files emitting `error:` lines during this pass's trial build. **Refreshed every pass.** May drop dramatically once a prereq sibling lands in an earlier pass.
-- `attempt_round` — how many times this commit has been present during a §4 re-plan (1, 2, 3, …). Lets you see how long each commit has been waiting without overloading `landing_pass`.
+- `cmake_only` — 1 if the commit's changed paths are **exclusively** `CMakeLists.txt` files (any directory); 0 otherwise. Used together with `build_changing=0` for pass 1 admittance.
+- `n_conflicts` — count of files reported unmerged during the most recent real `git cherry-pick` attempt for this row. `NA` until attempted.
+- `build_conflicts` — count of distinct source files emitting `error:` lines during the most recent real build for this row. May drop dramatically once a prereq sibling lands in an earlier pass. `NA` until attempted.
+- `forward_symbols` — count of distinct later-range symbols/declarations/macros that BDF needed, or would need, to pull forward to make this commit build now. Count only bounded Rule-1 style pulls; unbounded or internal-patch-bug fixes are pass-6/deferred shape, not a low `forward_symbols` value. `NA` until attempted.
+- `attempt_round` — how many times this commit has been present during a §4 re-plan (1, 2, 3, …). Lets you see how long each commit has been waiting without overloading `next_pass`.
 
-A commit's `(landing_pass, n_conflicts, build_conflicts)` changing across passes is the **point** of the pass model — it shows the waiting set is being de-risked by the landings, not just shuffled.
+A commit's `(next_pass, n_conflicts, build_conflicts, forward_symbols)` changing across passes is the **point** of the pass model — it shows the waiting set is being de-risked by the landings, not just shuffled.
 
-#### Landing-pass assignment pseudocode (for the lock sweep)
+#### Initial pass assignment pseudocode
 
 ```python
-def landing_pass_for(t):
+def initial_next_pass_for(t):
     bc = (t['build_changing'] == '1')
     cmake_only = (t['cmake_only'] == '1')
-    nc = int(t['n_conflicts'])
-    bf = int(t['build_conflicts'])
 
     # Pass 1: BC=0 OR cmake_only
     if (not bc) or cmake_only:
         return 1
-
-    # BC=1 from here on. Both metrics must satisfy the threshold (AND).
-    if nc <= 4 and bf <= 4:
-        return 2
-    if nc <= 16 and bf <= 16:
-        return 3
-    # Anything else BC=1
-    return 4
+    return 2
 ```
 
-`other-fail` trial outcomes (cherry-pick exit code != 0 with no conflicts and no clean status) -> landing pass 5.
+`other-fail` outcomes (cherry-pick exit code != 0 with no conflicts and no clean status) move to pass 6 when §4 observes them.
 
-Sort the file by `(landing_pass ASC, intra_pass_order ASC)`. The file's row order **is** the candidate landing order for this pass; §4 will execute only the lowest `landing_pass` present before re-planning.
+Sort the file by `(next_pass ASC, intra_pass_order ASC)`. The file's row order **is** the candidate landing order for this pass; §4 will execute only the lowest `next_pass` present before rewriting the file.
 
 Sanity checks before declaring the pass plan complete (run at the end of §3 for pass 1; run at the top of each pass in §4 for pass 2+):
 
@@ -452,18 +427,8 @@ test "$(tail -n +2 "$WAITING_FILE" | wc -l)" -eq "$expected_M" || echo "WAITING 
 # land_pos column is 1..M contiguous.
 awk -F'\t' 'NR>1 {print $1}' "$WAITING_FILE" | awk 'NR!=$1 {print "GAP at "NR; exit 1}'
 
-# rev_list_pos is NOT monotonically increasing along land_pos (if it is, you didn't actually schedule by pass — flag for manual review unless the waiting set is genuinely already easier-first).
+# rev_list_pos is NOT monotonically increasing along land_pos (if it is, verify the waiting set is genuinely already easier-first).
 awk -F'\t' 'NR>1 {if (prev!="" && $5<prev) mono=0; else if (prev!="" && $5>prev) inc++; prev=$5; tot++} END {if (inc==tot-1) print "WARNING: rev_list_pos monotonically increasing — verify pass assignments are real, not cosmetic"}' "$WAITING_FILE"
-
-# Pass thresholds: verify pass 2 rows have n_conflicts ≤ 4 AND build_conflicts ≤ 4;
-# pass 3 rows have ≤16 on both; pass 4 rows exceed 16 on at least one.
-# (Field positions per the documented TSV: n_conflicts=col 9, build_conflicts=col 10.)
-awk -F'\t' 'NR>1 {
-  g=$2; nc=$9+0; bf=$10+0;
-  if (g==2 && (nc>4 || bf>4)) print "Pass 2 row violates thresholds at line "NR": nc="nc" bf="bf;
-  if (g==3 && (nc>16 || bf>16)) print "Pass 3 row violates thresholds at line "NR": nc="nc" bf="bf;
-  if (g==4 && nc<=16 && bf<=16) print "Pass 4 row should have been in pass 3 at line "NR": nc="nc" bf="bf;
-}' "$WAITING_FILE"
 
 # Pass 1 admittance: BC=0 OR cmake_only=1. (build_changing=col 7, cmake_only=col 8.)
 awk -F'\t' 'NR>1 && $2==1 {
@@ -475,7 +440,7 @@ awk -F'\t' 'NR>1 && $2==1 {
 cp "$WAITING_FILE" "$WAITING_FILE.pass${PASS_NUM}"
 ```
 
-If any of these warnings fire, do not proceed to the landing loop — re-check that the trial sweep actually graded conflict shape (and ran the trial build for `build_conflicts`) against the current tip, not just category or stale numbers from the previous pass.
+If any of these warnings fire, do not proceed to the landing loop — re-check that §3 wrote the full waiting set and that pass-1 admittance is category-based, not chronological.
 
 ### 3.5 Workflow Gate — Preconditions for §4
 
@@ -484,13 +449,13 @@ Before executing the first real cherry-pick of pass 1 (§4), confirm **all** of 
 - `$OUTPUT_BASE` (or the Base-BDF SHA from §1.5) built clean (§1/§1.5) and the PASS is recorded in `$REPORT_FILE`.
 - `**$WAITING_FILE` exists** (`test -f "$WAITING_FILE"`).
 - `**$WAITING_FILE` row count equals the unlanded-and-not-predicted-empty commit count** — for pass 1 this is `git rev-list --count $INPUT_RANGE` minus the row count of `.ps-port-grouped/predicted-empty.tsv`. (Pass 2+: `(input count − landed count − predicted-empty count)`.) A partial waiting set is not a waiting set.
-- `**Patch-ID coverage map exists** (`test -s .ps-port-grouped/input-patch-ids.tsv` and `test -s .ps-port-grouped/head-patch-ids.tsv`) **and was re-intersected for this pass** (`predicted-empty.tsv` mtime is newer than the most recent landing on `$OUTPUT_NAME`). A missing or stale coverage map means §3.0 was skipped — return to §2.6 and §3 step 0 before proceeding.
-- `**$WAITING_FILE` rows are sorted by (landing_pass, intra_pass_order).** Verify: `awk -F'\t' 'NR>1 {key=$2"."sprintf("%06d",$3); if (key<prev) {print "OUT OF ORDER at line "NR; exit 1} prev=key}' "$WAITING_FILE"`.
+- `**Patch-ID coverage map exists** (`test -s .ps-port-grouped/input-patch-ids.tsv` and `test -s .ps-port-grouped/head-patch-ids.tsv`) **and was re-intersected for this pass** (`predicted-empty.tsv` mtime is newer than the most recent landing on `$OUTPUT_NAME`). A missing or stale coverage map means the §3 empty filter was skipped — return to §2.6 and §3 before proceeding.
+- `**$WAITING_FILE` rows are sorted by (next_pass, intra_pass_order).** Verify: `awk -F'\t' 'NR>1 {key=$2"."sprintf("%06d",$3); if (key<prev) {print "OUT OF ORDER at line "NR; exit 1} prev=key}' "$WAITING_FILE"`.
 - A `$WAITING_FILE.pass1` snapshot exists.
-- Every commit in `$INPUT_RANGE` has a row in the §3 scan table with Category, BUILD_CHANGING, and a first-pass `landing_pass` (1–5).
+- Every non-predicted-empty commit in `$INPUT_RANGE` has a row in the §3 scan table with Category, BUILD_CHANGING, and an initial `next_pass` (1 for BC=0/CMake-only, 2 for BC=1).
 - The hunk-level dep graph (§2.5) has been built and the "Pre-detected pairs" section of `$REPORT_FILE` is populated (even if the list is empty — record "no pairs detected").
 - `**$OUTPUT_NAME` is at `$OUTPUT_BASE` (or Base-BDF SHA).** Verify: `git rev-parse "$OUTPUT_NAME"` equals the expected SHA. No commits have been cherry-picked yet for pass 1. If commits exist, you either drifted (jump to §3.7) or you're resuming mid-run (different recovery — see §3.7).
-- The next commit you intend to apply is **row 1 of `$WAITING_FILE`** (the lowest-landing-pass, intra-pass-first row), not "the next commit by chronological index" or "the next commit I happen to remember."
+- The next commit you intend to apply is **row 1 of `$WAITING_FILE`** (the lowest-`next_pass`, intra-pass-first row), not "the next commit by chronological index" or "the next commit I happen to remember."
 
 If the waiting set is written but you find yourself reaching for the next commit in input-list order rather than the next row of `$WAITING_FILE`, **stop**. That is the rationalization the skill exists to prevent. Re-read §3 and the Red Flags below.
 
@@ -498,15 +463,15 @@ If the waiting set is written but you find yourself reaching for the next commit
 
 You are about to (or already) violating the easier-first invariant if any of these are true:
 
-- You started cherry-picking onto `$OUTPUT_NAME` before every commit in the waiting set had a current-pass `landing_pass`.
+- You started cherry-picking onto `$OUTPUT_NAME` before every non-predicted-empty commit in the waiting set had a `$WAITING_FILE` row and initial `next_pass`.
 - You are processing commits in the order `git rev-list --reverse $INPUT_RANGE` produced them.
-- Your "pass 1 of execution pass N" landings include commits you later reassigned to pass 4 *after* they failed to apply or build — i.e. the pass was assigned post-hoc, after attempting the pick.
+- Your "pass 1 of execution pass N" landings include BC=1 commits that were not CMake-only — i.e. the initial pass assignment ignored the scan flags.
 - You are on commit N and the next commit you plan to attempt is N+1 (by `rev_list_pos`), without checking whether commits later in this pass's `$WAITING_FILE` contain easier (lower-pass) work that should land first.
-- You're stuck on a hard commit (landing pass 4/5 shape) inside a pass and your plan is "push through this one" rather than "skip past it, land the easier passes, let the next pass's trial sweep re-assign it once its siblings have landed."
-- `$WAITING_FILE` is the same on disk as when you started the pass — i.e. you never rewrote it after pass N's landings. The next pass cannot start until pass N+1's trial sweep produces fresh pass assignments.
+- You're stuck on a hard commit (pass 5/6 shape) inside an earlier pass and your plan is "push through this one" rather than "abort it, advance its `next_pass`, and keep landing easier rows."
+- `$WAITING_FILE` is the same on disk as when you started the pass — i.e. you never rewrote it after pass N's landings and deferrals. The next pass cannot start until the file records removals, observed metrics, and advanced `next_pass` values.
 - You skipped §2.5 (the dep graph) because "the range is short" or "I'll discover pairs as I go."
 
-If any of these fire: revert `$OUTPUT_NAME` to the last pass-boundary buildable SHA, redo the trial + lock sweeps for the unlanded waiting set, and resume from row 1 of the re-planned pass. The discarded work is the cost of skipping the pass discipline; the alternative (continuing chronologically and re-assigning on the fly) compounds the cost commit by commit.
+If any of these fire: revert `$OUTPUT_NAME` to the last pass-boundary buildable SHA, rewrite `$WAITING_FILE` for the unlanded waiting set, and resume from row 1 of the re-planned pass. The discarded work is the cost of skipping the pass discipline; the alternative (continuing chronologically) compounds the cost commit by commit.
 
 ### 3.7 Recovery — How to pivot when chronological drift is detected
 
@@ -515,14 +480,14 @@ You are here because the Workflow Phase Discipline section, §3.5, or §3.6 fire
 1. **Inventory what's on `$OUTPUT_NAME` already.** Capture `git log --reverse --format='%H %s' $OUTPUT_BASE..$OUTPUT_NAME > /tmp/landed-so-far.txt`. These SHAs are the commits you already invested resolution work in — you don't want to throw that away unless necessary.
 2. **Find the last pass-boundary buildable SHA.** Walk `$REPORT_FILE`'s "Pass execution" section for the most recent recorded `Pass-N end buildable SHA`. If none exists (you never finished a pass cleanly), use `$OUTPUT_BASE` (or Base-BDF SHA).
 3. **Reset.** `git checkout "$OUTPUT_NAME" && git reset --hard <buildable-SHA>`. This is the irreversible step; confirm the SHA before running it.
-4. **Re-do the trial sweep for the unlanded commits** against the new tip. Run the trial picks on a throwaway worktree, do not grade by category alone. This is functionally a fresh pass plan (§3 procedure, but with a smaller waiting set).
-5. **Rewrite `$WAITING_FILE`.** The waiting set covers only commits not already landed. Run the sanity checks. If the "rev_list_pos monotonically increasing" warning fires, your trial sweep didn't grade conflict shape — re-do it.
+4. **Rebuild `$WAITING_FILE` for the unlanded commits.** Use the §3 procedure with a smaller waiting set: exclude predicted-empty rows, set `next_pass=1` for BC=0/CMake-only rows, and `next_pass=2` for BC=1 rows unless the report already contains an observed over-budget result that should advance the row.
+5. **Rewrite `$WAITING_FILE`.** The waiting set covers only commits not already landed. Run the sanity checks. If the "rev_list_pos monotonically increasing" warning fires, verify the order is genuinely easier-first before proceeding.
 6. **Snapshot to `$WAITING_FILE.pass<N>-recovered`** so the audit shows the pivot.
 7. **Run the §3.5 gate.** Every checkbox.
-8. **Resume §4 from row 1 of the rewritten `$WAITING_FILE`.** The cherry-picks you previously did that fall into landing pass 1 of the new plan can often be re-applied cleanly; the ones in later passes may have been the wrong order anyway. Either way, the next pick comes from the file.
+8. **Resume §4 from row 1 of the rewritten `$WAITING_FILE`.** The cherry-picks you previously did that fall into pass 1 of the new plan can often be re-applied cleanly; the ones in later passes may have been the wrong order anyway. Either way, the next pick comes from the file.
 9. **Record the pivot in `$REPORT_FILE`** under a dedicated "Pivots" section: the SHA you reset to, why (which red flag fired, which `land_pos` or `rev_list_pos` you were stuck on, what pass you were in), how many commits were re-planned. This is for the engineer reviewing the run, not for you — but writing it forces honest acknowledgement of what happened.
 
-**Sunk-cost trap.** "I've already done conflict resolution for commits 1–33 this pass, surely I can finish 34 and recover from there." No. The reason 34 is hard is that easier commits in the same waiting set haven't landed yet to provide context — and the next pass's re-trial would have surfaced that 34 should be deferred. Pushing through 34 in isolation does not produce a better tree than 34 with the easier surrounding work applied first. Reset.
+**Sunk-cost trap.** "I've already done conflict resolution for commits 1–33 this pass, surely I can finish 34 and recover from there." No. If 34 exceeds the current pass budget, abort it, advance its `next_pass`, and continue with easier rows. Pushing through 34 in isolation does not produce a better tree than 34 with the easier surrounding work applied first. Reset if you already landed out of order.
 
 **When `$REFERENCE` = `$INPUT_TIP` (maximum-danger config).** Chronological drift in this configuration risks silent HEAD-empty drops at the same time. After reset, re-examine every Rule-D decision made on the discarded commits when you re-do them. Do not assume past resolutions were correct.
 
@@ -530,74 +495,79 @@ You are here because the Workflow Phase Discipline section, §3.5, or §3.6 fire
 
 **Precondition:** the §3.5 Workflow Gate has been satisfied for the first pass. If you cannot tick every box in §3.5, do not run a single cherry-pick from this section.
 
-§4 is the pass loop. The former scheduling buckets are the passes: pass 1 is the easiest work that can land now, pass 4 is the hardest still-BDF-eligible work, and pass 5 is the deferred/problem set. **Each pass executes only the lowest `landing_pass` present in `$WAITING_FILE`, then rewrites `$WAITING_FILE` from a fresh trial sweep before choosing the next pass.** Each pass strictly reduces `$WAITING_FILE`'s row count, or it terminates the loop by adding 0 commits → §4.5. The loop runs until the waiting set is empty (success → §5) or a whole pass yields 0 landings (escalate → §4.5).
+§4 is the pass loop. The former scheduling buckets are the passes: pass 1 is the easiest work that can land now, pass 5 is the hardest still-BDF-eligible work, and pass 6 is the deferred/problem set. **Each pass executes only the lowest `next_pass` present in `$WAITING_FILE`, measures difficulty during the real landing attempt, then rewrites `$WAITING_FILE` before choosing the next pass.** Each pass must either land at least one row or advance at least one row to a later `next_pass`; otherwise it terminates the loop → §4.5. The loop runs until the waiting set is empty (success → §5), current `next_pass` is 6, or a whole pass makes no progress.
 
 #### Pass Definitions
 
-| Landing pass | Definition |
+| Pass | Definition |
 | ------------ | ---------- |
-| 1 | **BC=0 commits + CMakeLists.txt-only commits.** Any trial outcome (clean apply, empty, or conflict). Two admittance shapes: (a) commits whose changed paths match no `.h/.c/.cc/.cxx/.cpp/.hh/.hpp/.hxx/.cmake/.i/.ic` extension (per the BC regex); (b) commits whose changed paths are **exclusively** `CMakeLists.txt` (any directory). Land first; build verification is required at the pass boundary, not after every row by default. |
-| 2 | BC=1 with **trial n_conflicts <= 4 AND trial-build error-file count <= 4** against the current tip. Lightest BC=1 pass. Includes BC=1 commits whose trial outcome was clean/empty (n_conflicts = 0) as long as their trial build produces <= 4 error-files. |
-| 3 | BC=1 with **trial n_conflicts <= 16 AND trial-build error-file count <= 16**, AND not already in pass 2. Medium pass. |
-| 4 | BC=1 with **n_conflicts > 16 OR trial-build error-file count > 16**. All remaining BC=1 that is still BDF-eligible. |
-| 5 | Anything not applicable above: deferred/problem cases such as `other-fail` trial outcomes (cherry-pick rc != 0 with no conflicts and no clean status). Pass-5 rows are not attempted while earlier passes exist; they roll forward to the next trial sweep, where their assignment may change as the tip evolves. |
+| 1 | **BC=0 commits + CMakeLists.txt-only commits.** Two admittance shapes: (a) commits whose changed paths match no `.h/.c/.cc/.cxx/.cpp/.hh/.hpp/.hxx/.cmake/.i/.ic` extension (per the BC regex); (b) commits whose changed paths are **exclusively** `CMakeLists.txt` (any directory). Land first; build verification is required at the pass boundary, not after every row by default. |
+| 2 | BC=1 rows whose real landing attempt stays within **n_conflicts <= 4 AND build error-file count <= 4 AND BDF forward-symbol pull count <= 1**. Lightest BC=1 pass. If `n_conflicts > 4`, build error-file count > 4, or BDF forward-symbol pull count > 1, abort/roll back and advance the row to pass 3. |
+| 3 | BC=1 rows whose real landing attempt stays within **n_conflicts <= 8 AND build error-file count <= 8 AND BDF forward-symbol pull count <= 2**, AND that did not fit pass 2. If `n_conflicts > 8`, build error-file count > 8, or BDF forward-symbol pull count > 2, abort/roll back and advance the row to pass 4. |
+| 4 | BC=1 rows whose real landing attempt stays within **n_conflicts <= 16 AND build error-file count <= 16 AND BDF forward-symbol pull count <= 4**, AND that did not fit pass 3. If `n_conflicts > 16`, build error-file count > 16, or BDF forward-symbol pull count > 4, abort/roll back and advance the row to pass 5. |
+| 5 | BC=1 with **n_conflicts > 16 OR build error-file count > 16 OR BDF forward-symbol pull count > 4**. All remaining BC=1 that is still BDF-eligible. |
+| 6 | Anything not applicable above: deferred/problem cases such as `other-fail` outcomes (cherry-pick rc != 0 with no conflicts and no clean status), unbounded BDF, or internal-patch-bug shape. Pass-6 rows are not attempted while earlier passes exist; they are handled by §4.5. |
 
-Both pass-2 and pass-3 admission requires **both thresholds** to hold (AND, not OR). A commit with n_conflicts=2 but 30 trial-build errors -> pass 4. A commit with n_conflicts=8 but 2 trial-build errors -> pass 3 (8 <= 16 AND 2 <= 16). The two metrics are independent signals: cherry-pick conflict density and build-time symbol-dependency density.
+Pass 2, pass 3, and pass 4 admission requires **all three thresholds** to hold (AND, not OR). A commit with n_conflicts=2, build_conflicts=2, but 12 forward symbols advances to pass 5. A commit with n_conflicts=16, build_conflicts=12, and forward_symbols=4 fits pass 4. The three metrics are independent signals: cherry-pick conflict density, build-time error spread, and BDF forward-symbol pull size.
 
-**Why pass 1 admits CMakeLists.txt-only.** CMake files affect `cmake ..` configure-time orchestration (which sources are listed in `INNOBASE_SOURCES`, which plugins are built) but contain no C++ that gets compiled. Broken CMake content surfaces as `cmake` errors at the next reconfigure, not as `error:` messages during `make`. Putting CMakeLists.txt-only commits in pass 1 lets them land alongside docs/tests/MTR commits without forcing build verification at every row. A commit that touches both CMakeLists.txt AND `.cc` source is BC=1 (the `.cc` triggers the BC regex) and lands in pass 2/3/4 by its trial metrics.
+**Why pass 1 admits CMakeLists.txt-only.** CMake files affect `cmake ..` configure-time orchestration (which sources are listed in `INNOBASE_SOURCES`, which plugins are built) but contain no C++ that gets compiled. Broken CMake content surfaces as `cmake` errors at the next reconfigure, not as `error:` messages during `make`. Putting CMakeLists.txt-only commits in pass 1 lets them land alongside docs/tests/MTR commits without forcing build verification at every row. A commit that touches both CMakeLists.txt AND `.cc` source is BC=1 (the `.cc` triggers the BC regex) and lands in pass 2/3/4/5 by its observed metrics.
 
-**Why pass 1 is BC=0-only otherwise.** A previous version of this rubric admitted BC=1 commits into the earliest bucket whenever the cherry-pick trial happened to be clean. In practice, BC=1 "clean trial" commits routinely fail at build time because they use symbols a later commit defines (e.g. `expand_fast_index_creation`, `OPT_INNODB_OPTIMIZE_KEYS`, `page_hash_latch`). That forced a Rule-1 or Rule-2 build fix on every BC=1 commit in what was supposed to be the easiest pass, inflating pass-1 wall-clock time disproportionately and undermining the "easier-first" framing. Restricting pass 1 to BC=0 (plus CMakeLists.txt-only as a known-safe extension) means it lands fast, establishing a known-buildable foundation **before** any BC=1 commit is picked.
+**Why pass 1 is BC=0-only otherwise.** A previous version of this rubric admitted BC=1 commits into the earliest bucket whenever the cherry-pick happened to be clean. In practice, BC=1 clean cherry-picks routinely fail at build time because they use symbols a later commit defines (e.g. `expand_fast_index_creation`, `OPT_INNODB_OPTIMIZE_KEYS`, `page_hash_latch`). That forced a Rule-1 or Rule-2 build fix on every BC=1 commit in what was supposed to be the easiest pass, inflating pass-1 wall-clock time disproportionately and undermining the "easier-first" framing. Restricting pass 1 to BC=0 (plus CMakeLists.txt-only as a known-safe extension) means it lands fast, establishing a known-buildable foundation **before** any BC=1 commit is picked.
 
-**Why the `(n_conflicts, build_conflicts)` two-axis assignment for passes 2–4.** Trial cherry-pick conflicts measure code that overlaps with the live tip's edits in the same file regions. Trial-build error count measures symbol-dependency on commits that haven't landed yet — a completely different failure mode. A commit can be cherry-pick-clean but build-fail on 30 files (uses-before-defines); another can have 8-file cherry-pick conflicts but build-clean once those are resolved. The dual threshold separates these.
+**Why the `(n_conflicts, build_conflicts, forward_symbols)` budgets for passes 2–5.** Cherry-pick conflicts measure code that overlaps with the live tip's edits in the same file regions. Build error count measures build failure spread. `forward_symbols` measures how much BDF has to pull from future commits to make the current commit build. A commit can be cherry-pick-clean but build-fail on 30 files (uses-before-defines); another can have modest build spread but require too many future symbols. The three-signal budget separates these without a duplicate dry run.
 
 ```text
 pass = 1
 while $WAITING_FILE has rows:
-    # (a) Plan this pass — §3 procedure applied to the current waiting set.
-    if pass > 1:
-        run §3 trial sweep against the current $OUTPUT_NAME tip for every row
-        rewrite $WAITING_FILE with fresh landing_pass / n_conflicts / build_conflicts / attempt_round columns
-        run the §3 sanity checks; if they fail, fix before proceeding
-    current_landing_pass = lowest landing_pass value present in $WAITING_FILE
-    if current_landing_pass == 5:
+    # (a) Select the next pass band from the waiting file.
+    current_next_pass = lowest next_pass value present in $WAITING_FILE
+    if current_next_pass == 6:
         invoke §4.5 deferred-set management; break
     cp $WAITING_FILE $WAITING_FILE.pass${pass}    # audit snapshot
 
     landed_this_pass = 0
     skipped_this_pass = 0
+    advanced_this_pass = 0
 
-    # (b) Landing loop — iterate only rows for current_landing_pass, in row order.
-    tail -n +2 "$WAITING_FILE" | rows where row.landing_pass == current_landing_pass | while read row; do
+    # (b) Landing loop — iterate only rows for current_next_pass, in row order.
+    tail -n +2 "$WAITING_FILE" | rows where row.next_pass == current_next_pass | while read row; do
         attempt cherry-pick of row.orig_sha
-        if applied + built clean:
+        measure n_conflicts / build_conflicts / forward_symbols from this real attempt
+        if current pass budget is exceeded:
+            git cherry-pick --abort (or roll back the local commit)
+            update row metrics and advance row.next_pass
+            advanced_this_pass += 1
+            skipped_this_pass += 1
+        elif applied + built clean:
             landed_this_pass += 1
             remove row from $WAITING_FILE in-memory
         else:
             git cherry-pick --abort (or roll back the local commit)
-            leave row in $WAITING_FILE (next pass will re-trial it)
+            update row metrics and advance row.next_pass
+            advanced_this_pass += 1
             skipped_this_pass += 1
-        record outcome in $REPORT_FILE under "Pass ${pass} (landing_pass=${current_landing_pass})"
+        record outcome in $REPORT_FILE under "Pass ${pass} (next_pass=${current_next_pass})"
     done
 
     # (c) End-of-pass bookkeeping.
     write the surviving rows back to $WAITING_FILE
     record pass-end buildable SHA in $REPORT_FILE
-    if landed_this_pass == 0:
+    if landed_this_pass == 0 and advanced_this_pass == 0:
         invoke §4.5 deferred-set management; break
 
     pass += 1
 ```
 
-**Ordering invariant — within a pass, the iteration is over `$WAITING_FILE` rows for the selected `landing_pass`, not over `git rev-list` output.** The next commit to pick is *always* the lowest-numbered `land_pos` in the current `landing_pass` not yet attempted in this pass. If you find yourself reaching for a commit by `rev_list_pos` (i.e. chronological index), or by SHA-from-memory, you have fallen back to chronological processing — stop and re-read §3.6/§3.7.
+**Ordering invariant — within a pass, the iteration is over `$WAITING_FILE` rows for the selected `next_pass`, not over `git rev-list` output.** The next commit to pick is *always* the lowest-numbered `land_pos` in the current `next_pass` not yet attempted in this pass. If you find yourself reaching for a commit by `rev_list_pos` (i.e. chronological index), or by SHA-from-memory, you have fallen back to chronological processing — stop and re-read §3.6/§3.7.
 
 The intra-pass landing loop, in shell-style:
 
 ```sh
-current_landing_pass=$(awk -F'\t' 'NR>1 {if (min=="" || $2<min) min=$2} END {print min}' "$WAITING_FILE")
-tail -n +2 "$WAITING_FILE" | awk -F'\t' -v p="$current_landing_pass" '$2 == p' | while IFS=$'\t' read -r land_pos landing_pass intra_order orig_sha rev_list_pos category build_changing cmake_only n_conflicts build_conflicts attempt_round subject; do
-    echo "=== pass=$pass landing_pass=$landing_pass land_pos=$land_pos orig_sha=$orig_sha (rev_list_pos=$rev_list_pos) ==="
+current_next_pass=$(awk -F'\t' 'NR>1 {if (min=="" || $2<min) min=$2} END {print min}' "$WAITING_FILE")
+tail -n +2 "$WAITING_FILE" | awk -F'\t' -v p="$current_next_pass" '$2 == p' | while IFS=$'\t' read -r land_pos next_pass intra_order orig_sha rev_list_pos category build_changing cmake_only n_conflicts build_conflicts forward_symbols attempt_round subject; do
+    echo "=== pass=$pass next_pass=$next_pass land_pos=$land_pos orig_sha=$orig_sha (rev_list_pos=$rev_list_pos) ==="
 
-    # 0. Patch-ID guard (§2.6). The §3.0 filter already excluded predicted-empty
+    # 0. Patch-ID guard (§2.6). The §3 filter already excluded predicted-empty
     #    commits from $WAITING_FILE, so this row should not be predicted-empty.
     #    Re-check defensively in case the coverage map was extended mid-pass:
     if grep -q "^${orig_sha}\b" .ps-port-grouped/predicted-empty.tsv; then
@@ -619,7 +589,8 @@ tail -n +2 "$WAITING_FILE" | awk -F'\t' -v p="$current_landing_pass" '$2 == p' |
     #    that the §2.6 patch-id map could not match. It is the final guard, not the primary
     #    detection path.)
     # 4. Otherwise: git cherry-pick --continue.
-    # 5. Build. If fail: apply Bounded Rule 1; if that's blown, git reset --hard HEAD~ and leave the row in $WAITING_FILE for the next pass.
+    # 5. Build. If fail: apply Bounded Rule 1 within this pass's budget; if the
+    #    budget is exceeded, git reset --hard HEAD~ and advance next_pass.
     # 6. On success:
     #    - remove the row from $WAITING_FILE;
     #    - append the new commit's patch-id to .ps-port-grouped/head-patch-ids.tsv:
@@ -631,9 +602,9 @@ tail -n +2 "$WAITING_FILE" | awk -F'\t' -v p="$current_landing_pass" '$2 == p' |
 done
 ```
 
-This loop is the per-pass contract. Every cherry-pick `$OUTPUT_NAME` receives must come from a `$WAITING_FILE` row in the selected `landing_pass`, processed in `land_pos` order, on a snapshot that already reflects this pass's trial sweep. There is no other way to pick a commit. If you find yourself running `git cherry-pick <sha>` where `<sha>` did not come from reading the next un-attempted row, you are violating §4.
+This loop is the per-pass contract. Every cherry-pick `$OUTPUT_NAME` receives must come from a `$WAITING_FILE` row in the selected `next_pass`, processed in `land_pos` order, on the pass snapshot. There is no other way to pick a commit. If you find yourself running `git cherry-pick <sha>` where `<sha>` did not come from reading the next un-attempted row, you are violating §4.
 
-**Reassignment waits for the next pass.** If commit at `land_pos = P` reveals itself to require a later landing pass than the trial assigned (for example, pass 1/2 work that actually has pass 4/5 shape), `git cherry-pick --abort`, leave the row in `$WAITING_FILE`, record the mismatch in `$REPORT_FILE`, and continue with the next row in the current pass. Do not edit the row into a different pass and keep going inside the same pass. The next pass's trial sweep is the only place pass reassignment happens; fresh numbers against the new tip are the point of the model.
+**Advance over-budget rows, do not push through.** If commit at `land_pos = P` exceeds the current pass budget (for example, pass 2 work reveals later-pass shape), `git cherry-pick --abort` or roll back the local commit, record observed metrics in `$WAITING_FILE`, advance `next_pass`, and continue with the next row in the current pass. Do not keep forcing the hard row inside an easier pass.
 
 **Merge commits in the input range:** `git cherry-pick` requires `-m <parent-number>` for merges. With `--first-parent` in `$INPUT_RANGE` this rarely matters (merges normally get traversed via their first-parent edge, not picked as merges themselves). With a plain range, merges *will* appear in the list. Default to `-m 1` (apply the diff against parent 1, the mainline). If parent 1 isn't the right mainline for a particular merge, that's a stop-and-ask condition.
 
@@ -642,36 +613,36 @@ After every **pass boundary** (`landed_this_pass > 0` and waiting set non-empty)
 **Termination conditions for the pass loop:**
 
 - **Success** — `$WAITING_FILE` empty. Go to §5.
-- **Stall** — a whole pass with `landed_this_pass == 0`. Go to §4.5. This is the canonical signal that per-commit BDF won't progress without a strategy choice; do not start another pass with the same waiting set hoping for a different result.
+- **Stall** — a whole pass with `landed_this_pass == 0` and `advanced_this_pass == 0`. Go to §4.5. This is the canonical signal that per-commit BDF won't progress without a strategy choice; do not start another pass with the same waiting set hoping for a different result.
 - **Hard budget exhausted** — engineer-set wall-clock or pass-count budget. Stop and ask; do not silently switch to "land everything chronologically and verify only at tip."
 
 #### Intra-pass ordering: topological by dep-graph forward weight
 
-`$WAITING_FILE` is sorted by `(landing_pass, intra_pass_order)`, but the *intra-pass* default sort is `rev_list_pos` (maintainer order). For pass bands large enough to matter (typically landing pass 3 and landing pass 4), the dep graph offers a better intra-pass sort: **descending `fwd-weight`** — i.e. land first the commits that unblock the most others.
+`$WAITING_FILE` is sorted by `(next_pass, intra_pass_order)`, but the *intra-pass* default sort is `rev_list_pos` (maintainer order). For pass bands large enough to matter (typically passes 3-5), the dep graph offers a better intra-pass sort: **descending `fwd-weight`** — i.e. land first the commits that unblock the most others.
 
-The `fwd-weight` is the sum of overlap weights on outgoing edges from `commit A → other-pending`. Landing a high-`fwd-weight` commit means its declarations/struct-field additions are in HEAD before the dependents try to land — converting conflict commits into clean picks, often moving them into an earlier landing pass in the **next** pass's trial sweep.
+The `fwd-weight` is the sum of overlap weights on outgoing edges from `commit A → other-pending`. Landing a high-`fwd-weight` commit means its declarations/struct-field additions are in HEAD before the dependents try to land — converting conflict commits into clean picks, often letting them fit an earlier pass budget when they are next attempted.
 
 When to use topological order instead of `rev_list_pos`:
 
-- Landing pass 3 / landing pass 4 large (>=30 commits each) in this pass's waiting set.
-- Trial showed many `BC=1 conflict` commits whose conflicts are on the same shared headers (univ.i, buf0buf.h, sql_class.h, etc.).
+- Pass 3 / pass 4 / pass 5 large (>=30 commits each) in this pass's waiting set.
+- Earlier attempts showed many `BC=1 conflict` commits whose conflicts are on the same shared headers (univ.i, buf0buf.h, sql_class.h, etc.).
 - A `depq.py hot` (or equivalent) query lists 5+ commits with `fwd-weight > 50`.
 
-How to use: in the pass's lock sweep, secondary-sort within each `landing_pass` by `fwd-weight DESC` after the first-pass `rev_list_pos`. Keep the original `rev_list_pos` in the row for traceability. Record the choice in `$REPORT_FILE` so a re-runner knows whether to expect maintainer-chronological vs topological order.
+How to use: when rewriting `$WAITING_FILE`, secondary-sort within each `next_pass` by `fwd-weight DESC` after the first-pass `rev_list_pos`. Keep the original `rev_list_pos` in the row for traceability. Record the choice in `$REPORT_FILE` so a re-runner knows whether to expect maintainer-chronological vs topological order.
 
-Caveat: topological order only makes sense for commits inside the trial-graded *conflict* set (landing passes 3 and 4). Pass 1 (BC=0) and pass 2 (BC=1 clean/empty/light) have no incoming-graph reason to deviate from maintainer order.
+Caveat: topological order only makes sense for commits inside the observed conflict set (passes 3-5). Pass 1 (BC=0) and pass 2 (BC=1 clean/empty/light) have no incoming-graph reason to deviate from maintainer order.
 
-### 4.5 Deferred-set Management — invoked when a pass yields 0 landings
+### 4.5 Deferred-set Management — invoked when pass execution stalls
 
-Most non-trivial runs reach a state where one entire pass through `$WAITING_FILE` lands zero commits. That is the §4 stall condition — the deferred set is what's left in `$WAITING_FILE` at that point:
+Most non-trivial runs reach a state where the next pass through `$WAITING_FILE` cannot land or advance any rows, or the lowest remaining `next_pass` is 6. That is the §4 stall condition — the deferred set is what's left in `$WAITING_FILE` at that point:
 
 - Built but failed (per-commit build) and were rolled back;
 - Hit conflict at cherry-pick time and were skipped via `cherry-pick --abort`;
-- Sat in landing pass 5 (other-fail) across multiple passes without ever becoming landable.
+- Sat in pass 6 (other-fail) across multiple passes without ever becoming landable.
 
 §5 ("Final Convergence to null diff") assumes you're handling residual file content. §4.5 sits between §4 and §5 and explicitly decides **how** to deal with the deferred set before measuring residual.
 
-**Precondition:** a §4 pass completed with `landed_this_pass == 0` (or the engineer authorized an early §4.5 invocation); branch is buildable at HEAD.
+**Precondition:** a §4 pass completed with no landings and no `next_pass` advancements, the lowest remaining `next_pass` is 6, or the engineer authorized an early §4.5 invocation; branch is buildable at HEAD.
 
 **Step 1 — Inventory.** Count outcomes by family from `$EXEC`:
 
@@ -692,7 +663,7 @@ Most non-trivial runs reach a state where one entire pass through `$WAITING_FILE
 
 | Strategy                                | When appropriate                                                                                                          | Workflow                                                                                                                                                                                                                                                                                                                              |
 | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **(a) Iterative BDF re-attempt**        | Small deferred set (≤30), no SCC, mostly `deferred-build-fail` from isolated symbols                                      | Run BDF (see `BDF.md`) over the deferred set repeatedly until a whole pass yields 0 new landings. Bounded Rule-1 still applies — defer at the same thresholds.                                                                                                                                                                        |
+| **(a) Iterative BDF re-attempt**        | Small deferred set (≤30), no SCC, mostly `deferred-build-fail` from isolated symbols                                      | Run BDF (see `BDF.md`) over the deferred set repeatedly until a whole pass makes no progress. Bounded Rule-1 still applies — defer at the same thresholds.                                                                                                                                                                            |
 | **(b) Per-family reconciliation**       | Deferred set has a clear feature-family structure (xtradb-log-archive, threadpool, userstat, ...) and the engineer agrees | For each family, write a single reconciliation commit that lands all related deferred work together — by cherry-picking the cluster as one operation and resolving conflicts in the combined state. Each family-commit builds. Engineer authorization required if any commit in the family requires file-path-scoped REFERENCE pulls. |
 | **(c) Cluster-as-one**                  | Deferred set is one SCC of 50–200 commits; per-commit BDF demonstrably futile                                             | Single multi-commit cherry-pick of the SCC; resolve all conflicts in the combined state; apply BDF to the resulting tip (which now has everyone's symbols present). One big commit, audit trail preserved via the cherry-pick range.                                                                                                  |
 | **(d) Explicit reconciliation commits** | Deferred set is small but heterogeneous; null-diff is the only goal, traceability isn't                                   | Add one or more named-file reconciliation commits at §5 directly. Engineer-authorized snap-to-reference is the typical mechanism here.                                                                                                                                                                                                |
@@ -798,7 +769,7 @@ For each unresolved conflict region:
 
 **Why this rule exists:** the naive "take HEAD when HEAD is empty" heuristic is wrong most of the time when `$REFERENCE` is the desired final tree. By definition, every patch in the input range has *some* representation in REFERENCE — that's what REFERENCE is. So "HEAD-empty + REFERENCE has content" almost always means the patch's contribution is real and survived in REFERENCE, just at a different place or in a different form. Silently taking HEAD-empty drops live content from the output and produces an invisible residual diff at the end.
 
-**Maximum-danger configuration: `$REFERENCE` = `$INPUT_TIP`.** When REFERENCE is the input branch's own tip (e.g. you're porting `ps-5.6` onto `mysql-5.7.9` and using `ps-5.7.9` as REFERENCE), *every* input commit's surviving contribution is in REFERENCE by construction — that's how REFERENCE was produced. In this configuration the HEAD-empty trap is at maximum risk: virtually every "HEAD-empty + incoming has content" region must **not** pick HEAD. When grading conflict severity during the trial pass, assume `$REFERENCE` = `$INPUT_TIP` runs will need hunk-level decisions on essentially every non-clean cherry-pick; budget time accordingly.
+**Maximum-danger configuration: `$REFERENCE` = `$INPUT_TIP`.** When REFERENCE is the input branch's own tip (e.g. you're porting `ps-5.6` onto `mysql-5.7.9` and using `ps-5.7.9` as REFERENCE), *every* input commit's surviving contribution is in REFERENCE by construction — that's how REFERENCE was produced. In this configuration the HEAD-empty trap is at maximum risk: virtually every "HEAD-empty + incoming has content" region must **not** pick HEAD. Assume `$REFERENCE` = `$INPUT_TIP` runs will need hunk-level decisions on essentially every non-clean cherry-pick; budget time accordingly.
 
 **Automated-resolver guardrail.** A hunk resolver that auto-tiebreaks to HEAD when both sides score zero overlap with `$REFERENCE` is **worse than stopping**. It produces silent, invisible drops at every region neither side resembles. Any helper used during this skill must, when both candidate sides have zero overlap with REFERENCE:
 
@@ -917,7 +888,7 @@ Stop and ask the engineer when:
 - A commit's conflict resolution requires whole-file replacement from `$REFERENCE`.
 - The minimal build fix would require pulling more than ~30 lines from a later commit (cascading fix territory — Rule 2 may not isolate cleanly).
 - A deferral can't be restored at the input commit you predicted, and no obvious successor commit will restore it.
-- The landing-pass-5 residual after the §4 pass loop terminates still contains commits the engineer expected to apply.
+- The pass-6 residual after the §4 pass loop terminates still contains commits the engineer expected to apply.
 - Final convergence after the pass loop / §4.5 still has a residual to `$REFERENCE` that no targeted reconciliation commit can close without whole-tree snap.
 - **You realize per-commit buildability is structurally hard** for some portion of the range (e.g., end-fix-style tip-fix with many cross-commit hunk dependencies, large pending-set SCC, or the run scale exceeds the session budget). **Stop and surface options** — do NOT silently fall back to chronological-with-tip-only-build. Acceptable options to propose: (a) extend the session and commit to the per-commit BDF work; (b) split the input range so the difficult segment is handled separately; (c) deliver a partial-coverage branch with explicit per-commit-build attestation for the covered subset and an explicitly-marked unbuildable tail. Tip-only buildable as the deliverable for the whole range is **never** acceptable.
 
@@ -938,7 +909,7 @@ Write `$REPORT_FILE` (markdown). Sections:
 Table of every commit in `$INPUT_RANGE`:
 
 
-| Idx | SHA | Subject | Category | BUILD_CHANGING | First landing pass | Paths summary |
+| Idx | SHA | Subject | Category | BUILD_CHANGING | Initial next_pass | Paths summary |
 | --- | --- | ------- | -------- | -------------- | ----------- | ------------- |
 
 
@@ -948,12 +919,12 @@ Reference: `$WAITING_FILE.passN` snapshots are the source of truth for what each
 
 For each pass 1..K (until success or §4.5 stall):
 
-- Waiting set size at pass start, at pass end. Delta = landings this pass (must be > 0 except on the stall pass).
-- Per-landing-pass breakdown for this pass: applied / skipped-empty / category-removed / rolled-back-build / left-for-next-pass
-- For each applied commit: `pass`, `landing_pass`, `land_pos`, original SHA → new SHA, conflict files (if any) and the REFERENCE region cited, build log path, PASS/FAIL
+- Waiting set size at pass start and pass end, plus rows advanced to later `next_pass`. Progress = landings + advancements (must be > 0 except on the stall pass).
+- Per-pass breakdown for this pass: applied / skipped-empty / category-removed / rolled-back-build / left-for-next-pass
+- For each applied commit: `pass`, `next_pass`, `land_pos`, original SHA → new SHA, conflict files (if any) and the REFERENCE region cited, build log path, PASS/FAIL
 - For each skipped commit (within this pass): `pass`, `land_pos`, original SHA, subject, reason (empty after resolution / category removed from REFERENCE / explicit engineer skip)
 - For each commit rolled back to the waiting set: `pass`, `land_pos`, original SHA, why it failed (cherry-pick conflict unresolvable now / build failed past Bounded Rule-1), expected pass for retry
-- For each commit whose actual shape did not match its assigned pass: `land_pos`, `landing_pass`, what this pass's trial sweep missed, and that it was left for the next pass
+- For each over-budget commit: `land_pos`, `next_pass` before/after, observed `n_conflicts` / `build_conflicts` / `forward_symbols`, and why it was left for the next pass
 - The **pass-end buildable SHA** (record this — it is the recovery point for §3.7 if drift is detected later)
 
 ### Pivots (if §3.7 fired)
@@ -991,20 +962,20 @@ Path to `hunks.tsv` and `overlaps.tsv`. List of pre-detected pairs with their ed
 
 | Mistake                                                                                                                  | Fix                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | ------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Treating chronological order as the default                                                                              | Pass-ascending landing overrides chronology. Run the trial sweep and write `$WAITING_FILE` before cherry-picking the first commit of each pass.                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| Processing commits in `git rev-list --reverse` order and assigning passes post-hoc                                       | This is chronological with cosmetic scheduling. The trial + lock sweeps (§3 / start of each pass) must finish for the **entire** waiting set before any real cherry-pick. Symptom: you get stuck on a landing-pass-4/5 commit at a mid-pass index instead of skipping past it and letting the next pass re-trial it.                                                                                                                                                                                                                                                           |
-| Cherry-picking before `$WAITING_FILE` exists on disk                                                                     | The waiting file is the per-pass execution contract. No `git cherry-pick` on `$OUTPUT_NAME` before the trial sweep writes the file and §3.5 (pass 1) or the pass-start sanity checks (pass 2+) verify it. If you have already drifted into this state, pivot per §3.7 rather than continuing.                                                                                                                                                                                                                                                                                |
-| Reusing a stale `$WAITING_FILE` across passes without re-trialing                                                        | `landing_pass` values are pass-specific. Pass 2's trial sweep against the new tip will produce different numbers; reusing pass 1's file is functionally identical to a locked plan and re-introduces the failure mode this rewrite was designed to remove. Rewrite `$WAITING_FILE` at every pass start.                                                                                                                                                                                                                                                                         |
-| Waiting file exists but `rev_list_pos` is monotonically increasing along `land_pos`                                      | You assigned passes on paper but ordered chronologically. The trial sweep didn't actually grade conflict shape. Re-do the sweep with real `git cherry-pick --no-commit` trials on a throwaway worktree against the current tip.                                                                                                                                                                                                                                                                                                                                               |
+| Treating chronological order as the default                                                                              | Pass-ascending landing overrides chronology. Write `$WAITING_FILE` before cherry-picking the first commit and always pick from the lowest `next_pass` band.                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Processing commits in `git rev-list --reverse` order and assigning passes post-hoc                                       | This is chronological with cosmetic scheduling. §3 must write the **entire** waiting set before any real cherry-pick, and §4 must always select from the lowest `next_pass`. Symptom: you get stuck on a pass-5/6 commit at a mid-pass index instead of advancing it and continuing with easier rows.                                                                                                                                                                                                                                                                          |
+| Cherry-picking before `$WAITING_FILE` exists on disk                                                                     | The waiting file is the per-pass execution contract. No `git cherry-pick` on `$OUTPUT_NAME` before §3 writes the file and §3.5 verifies it. If you have already drifted into this state, pivot per §3.7 rather than continuing.                                                                                                                                                                                                                                                                                                                                                |
+| Reusing a stale `$WAITING_FILE` across passes                                                                            | `next_pass` values and observed metrics are pass-specific. Reusing pass 1's file is functionally identical to a locked plan and re-introduces the failure mode this rewrite was designed to remove. Rewrite `$WAITING_FILE` after every pass.                                                                                                                                                                                                                                                                                                                                 |
+| Waiting file exists but `rev_list_pos` is monotonically increasing along `land_pos`                                      | You may have ordered chronologically. Verify this is genuinely the easiest-first order from scan flags and prior observed metrics; otherwise rewrite the waiting file.                                                                                                                                                                                                                                                                                                                                                                                                         |
 | Picking the next commit "from memory" or by chronological index instead of by reading the next `$WAITING_FILE` row       | The waiting file is the source of truth for what comes next in this pass. Read it, pick the lowest un-attempted `land_pos`.                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| Interleaving trial-sweep chunks with pass-1 landings inside one pass                                                     | The "trial 50 → land pass 1 from those 50 → trial next 50" pattern degenerates into chronological order. Complete the trial sweep for the whole pass's waiting set first.                                                                                                                                                                                                                                                                                                                                                                                                     |
-| Running another pass after one yielded 0 landings                                                                        | A 0-landing pass is the stall signal — go to §4.5, do not start another pass with the same waiting set hoping for a different result.                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| Pushing through a hard commit because you've already started it                                                          | If a commit's actual conflict shape reveals it belongs to landing pass 4/5 when this pass's sweep assigned it to pass 1/2, abort it, leave it in `$WAITING_FILE`, and continue with the next pass-1 row. The next pass's trial sweep will re-assign it cleanly. Sunk cost is not a reason to land a hard commit early.                                                                                                                                                                                                                                                        |
+| Building the waiting set in chunks and landing between chunks                                                            | The "write 50 rows → land pass 1 from those 50 → write next 50" pattern degenerates into chronological order. Write the whole waiting set first.                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Running another pass after one made no progress                                                                          | A pass with no landings and no `next_pass` advancements is the stall signal — go to §4.5, do not start another pass with the same waiting set hoping for a different result.                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Pushing through a hard commit because you've already started it                                                          | If a commit exceeds the current pass budget, abort it, update its observed metrics, advance `next_pass`, and continue with the next row. Sunk cost is not a reason to land a hard commit early.                                                                                                                                                                                                                                                                                                                                                                                |
 | Skipping the `$OUTPUT_BASE` build                                                                                        | If the base doesn't build, no later state on `$OUTPUT_NAME` builds either. Always verify first; if it fails, run §1.5 Base-BDF.                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| Reassigning a commit inside a single pass based on hope                                                                  | Do not move rows between pass bands while executing a pass. Leave failed/mismatched rows in `$WAITING_FILE`; the next pass's fresh trial sweep produces the new `landing_pass`.                                                                                                                                                                                                                                                                                                                                                                                                |
+| Reassigning a commit inside a single pass based on hope                                                                  | Do not move rows between pass bands while executing a pass. If a row exceeds the current budget, abort or roll it back, record observed metrics, advance `next_pass`, and continue with the next row.                                                                                                                                                                                                                                                                                                                                                                          |
 | Letting a build failure stay on `$OUTPUT_NAME`                                                                           | Every commit must build. Amend or squash the fix into the failing commit before moving on, or roll the commit back into `$WAITING_FILE` for the next pass.                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | **Delivering tip-only-buildable as a fallback when per-commit BDF is hard**                                              | Per-commit buildability is a hard requirement, not a goal. If the work is structurally difficult (end-fix style tip-fix, many cross-commit hunk dependencies, large pending SCC), **stop and surface options to the engineer** (extend session / split range / partial-coverage with explicit attestation). A null-diff-but-only-tip-builds branch is a failed run — it is functionally `ps-replay+make-buildable` output, and the wrong tool was chosen. The exec log recording `clean` for every commit but only one `build PASS` entry is the fingerprint of this mistake. |
-| Skipping per-commit builds because the trial sweep had 0 conflicts                                                       | "Clean cherry-pick" ≠ "buildable commit". A commit can apply cleanly and still fail to build because it uses symbols later commits define, or because the cumulative state has pre-existing errors the commit doesn't fix. Per-commit builds verify what the trial sweep cannot. The only build a clean trial-sweep authorizes you to skip is the per-commit-build for BC=0 commits in pass 1 (and even those need a pass-1 boundary build).                                                                                                                                  |
+| Skipping per-commit builds because cherry-picks were clean                                                               | "Clean cherry-pick" ≠ "buildable commit". A commit can apply cleanly and still fail to build because it uses symbols later commits define, or because the cumulative state has pre-existing errors the commit doesn't fix. Per-commit builds verify what cherry-pick success cannot. The only per-commit build you can skip is for BC=0 commits in pass 1, and even those need a pass-1 boundary build.                                                                                                                                                                           |
 | Whole-file `git checkout REFERENCE -- path` to "fix the diff" at the end                                                 | Forbidden. Use targeted hunk-level reconciliation commits, or ask the engineer for explicit authorization.                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | Squashing two commits because they share a category                                                                      | Squashes are justified by build coupling, not category. Don't merge related-feature commits unless one literally cannot build without the other.                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | Deferring code with no restore plan                                                                                      | Every deferral must name the commit that will restore it. Track restoration in the report.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
@@ -1022,11 +993,11 @@ Path to `hunks.tsv` and `overlaps.tsv`. List of pre-detected pairs with their ed
 | Category-removed test     | `git cat-file -e $REFERENCE:<path>` per path                                                                                                      |
 | Inspect REFERENCE region  | `git show $REFERENCE:<path>` (inspection only)                                                                                                    |
 | Search REFERENCE          | `git grep -n '<symbol>' $REFERENCE -- '<dir>/'`                                                                                                   |
-| Throwaway trial pick          | `git cherry-pick --no-commit <sha>; git diff --name-only --diff-filter=U; git cherry-pick --abort`                                                                                                                                |
+| Current pass rows             | `tail -n +2 "$WAITING_FILE" | awk -F'\t' -v p="$current_next_pass" '$2==p'`                                                                                                                               |
 | Waiting file row count check  | `expected=$(( $(git rev-list --count $INPUT_RANGE) - $(git rev-list --count $OUTPUT_BASE..$OUTPUT_NAME) )); test "$(tail -n +2 "$WAITING_FILE" | wc -l)" -eq "$expected"`                                                          |
 | Waiting file sort check       | `awk -F'\t' 'NR>1 {k=$2"."sprintf("%06d",$3); if (k<p) {print "OOO "NR; exit 1} p=k}' "$WAITING_FILE"`                                                                                                                            |
 | Pass snapshot                 | `cp "$WAITING_FILE" "$WAITING_FILE.pass${PASS_NUM}"` at start of every pass                                                                                                                                                       |
-| Drift detector                | `git log --reverse --format=%H $OUTPUT_BASE..$OUTPUT_NAME` — landed SHAs should match the union of `orig_sha` columns across `$WAITING_FILE.pass*` snapshots, in pass-then-landing-pass order                                      |
+| Drift detector                | `git log --reverse --format=%H $OUTPUT_BASE..$OUTPUT_NAME` — landed SHAs should match the union of `orig_sha` columns across `$WAITING_FILE.pass*` snapshots, in pass-then-next-pass order                                         |
 | Next commit to pick this pass | `tail -n +2 "$WAITING_FILE" | awk -v n=<next_land_pos> -F'\t' '$1==n'`                                                                                                                                                            |
 | Final null-diff check         | `git diff $OUTPUT_NAME $REFERENCE`                                                                                                                                                                                                |
 

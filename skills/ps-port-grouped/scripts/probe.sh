@@ -35,7 +35,7 @@ if [ "$(git rev-parse HEAD)" != "$PRE" ]; then
   cd "$BUILD_DIR"
   build_out=$(make -j$(( $(nproc) * 3 / 4 )) 2>&1)
   build_rc=$?
-  n_build_error=$(printf "%s\n" "$build_out" | "$SCRIPT_DIR/count_build_errors.sh")
+  n_build_error=$(printf "%s\n" "$build_out" | "$SCRIPT_DIR/count_build_errors.sh" --build-rc "$build_rc")
   cd - >/dev/null
   git reset --hard "$PRE" >/dev/null 2>&1
 fi

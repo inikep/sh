@@ -3,6 +3,18 @@ use strict;
 use warnings;
 use Encode qw(decode FB_PERLQQ);
 
+my $build_rc;
+if (@ARGV == 2 && $ARGV[0] eq '--build-rc') {
+    $build_rc = $ARGV[1];
+} elsif (@ARGV) {
+    die "Usage: $0 [--build-rc RC] < build.log\n";
+}
+
+if (defined $build_rc && $build_rc == 0) {
+    print "0\n";
+    exit 0;
+}
+
 binmode(STDIN, ':raw');
 
 my %seen;
@@ -16,6 +28,12 @@ while (my $line = <STDIN>) {
         $line =~ s/^\s+|\s+$//g;
         $seen{"cmake:missing-source:$line"} = 1;
         $pending_cmake_source = 0;
+        next;
+    }
+
+    # Non-fatal CMake download retries can contain "error:" while the build
+    # still succeeds. They are not root-cause compile/link errors.
+    if ($line =~ /^-- Download failed, error:/) {
         next;
     }
 

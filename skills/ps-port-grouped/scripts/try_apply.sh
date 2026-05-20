@@ -50,7 +50,7 @@ fi
 cd "$BUILD_DIR"
 build_out=$(make -j$(( $(nproc) * 3 / 4 )) 2>&1)
 build_rc=$?
-n_build_error=$(printf "%s\n" "$build_out" | "$SCRIPT_DIR/count_build_errors.sh")
+n_build_error=$(printf "%s\n" "$build_out" | "$SCRIPT_DIR/count_build_errors.sh" --build-rc "$build_rc")
 cd - >/dev/null
 
 if [ $build_rc -eq 0 ]; then

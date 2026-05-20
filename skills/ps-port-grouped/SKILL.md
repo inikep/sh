@@ -261,6 +261,103 @@ If the largest component has size `>~50`, the pending set is structurally indivi
 
 A minimal SCC computation in Python (Tarjan or simple union-find over `overlaps.tsv`) takes seconds for 500 commits.
 
+### 2.6 Build the Patch-ID Coverage Map
+
+`git patch-id --stable` produces an identifier for a commit's diff that is independent of context line numbers, surrounding offsets, and small reformattings. Two commits whose tree changes are equivalent (the same patch applied in two places — e.g. an upstream cherry-pick already merged into `$OUTPUT_BASE`, an `Import foo.patch` re-import, or content folded into Base-BDF that originally lived in a later input-range commit) share the same patch-id even when their commit SHAs differ.
+
+Build the coverage map **once** at this point in the workflow, then maintain it incrementally in §4 as commits land. Pre-computing empties is strictly cheaper than discovering them via the §3 trial sweep cherry-pick or the §4 `cherry-pick --skip` path. Crucially, it also removes those commits from the lock-sweep tier accounting so they do not consume Tier 1/2 budget for work that will be skipped — and it surfaces, before pass 1 starts, the count of commits whose content is already covered.
+
+**Two patch-id sets, computed up front:**
+
+```sh
+mkdir -p .ps-port-grouped
+
+# Input-range patch-ids (immutable after §2.6).
+: > .ps-port-grouped/input-patch-ids.tsv
+git rev-list --reverse "$INPUT_RANGE" | while read sha; do
+    pid=$(git show "$sha" | git patch-id --stable | awk '{print $1}')
+    [ -n "$pid" ] && printf '%s\t%s\n' "$pid" "$sha" >> .ps-port-grouped/input-patch-ids.tsv
+done
+
+# HEAD coverage patch-ids: commits already on $OUTPUT_NAME at or above $OUTPUT_BASE,
+# PLUS a generous window of $OUTPUT_BASE's recent ancestry (catches already-merged
+# equivalents when porting onto a base that absorbed earlier upstream cherry-picks).
+: > .ps-port-grouped/head-patch-ids.tsv
+{
+    git rev-list "$OUTPUT_BASE..$OUTPUT_NAME"
+    git log --format=%H -n 5000 "$OUTPUT_BASE"
+} | sort -u | while read sha; do
+    pid=$(git show "$sha" | git patch-id --stable | awk '{print $1}')
+    [ -n "$pid" ] && printf '%s\t%s\n' "$pid" "$sha" >> .ps-port-grouped/head-patch-ids.tsv
+done
+```
+
+Use `git patch-id --stable` (not the default `unstable` mode) — it produces a deterministic id across git versions and is independent of small context formatting.
+
+**Intersect to predict empties:**
+
+```sh
+# Source commits whose patch-id is already present in HEAD coverage:
+join -t$'\t' -1 1 -2 1 \
+    <(sort -u .ps-port-grouped/input-patch-ids.tsv) \
+    <(sort -u .ps-port-grouped/head-patch-ids.tsv) \
+    | awk -F'\t' '{print $2"\t"$1"\t"$3}' \
+    > .ps-port-grouped/predicted-empty.tsv
+# Columns: source_sha, patch_id, head_sha
+```
+
+Every row in `predicted-empty.tsv` is an input-range commit whose tree-change is already in HEAD. The intent of the input commit is already satisfied; cherry-picking it would produce no diff and the §4 landing loop would `cherry-pick --skip` it anyway.
+
+**§3 trial-sweep integration.** Before invoking `git cherry-pick --no-commit` for any commit, look it up in `predicted-empty.tsv`. If present:
+
+- **Do not run the trial cherry-pick.** The commit is excluded from this pass's `$WAITING_FILE`.
+- **Log once** in `$REPORT_FILE` under a "Predicted-empty (patch-id coverage)" section: `source_sha`, subject, the `head_sha` that already carries the same patch-id, and the pass at which the prediction fired.
+- **No tier is assigned.** Predicted-empty commits never enter `$WAITING_FILE` and never count against pass landing budgets.
+
+This trims the waiting set before §3's lock sweep runs. For runs onto a destination base that already absorbed many upstream cherry-picks (common in PS port runs), this can remove 10–30 % of the nominal input range up front, with zero cost beyond the patch-id computation.
+
+**§4 landing-loop integration.** After every successful landing on `$OUTPUT_NAME`, append the new commit's patch-id to `head-patch-ids.tsv`:
+
+```sh
+# Run immediately after `git cherry-pick --continue` (or after the build PASS for the row).
+new_sha=$(git rev-parse HEAD)
+new_pid=$(git show "$new_sha" | git patch-id --stable | awk '{print $1}')
+[ -n "$new_pid" ] && printf '%s\t%s\n' "$new_pid" "$new_sha" >> .ps-port-grouped/head-patch-ids.tsv
+```
+
+Then, when the next pass's §3 trial sweep runs, **re-intersect** input-patch-ids with the extended head-patch-ids before grading the new waiting set. This catches commits whose net diff collapsed to empty because some of their hunks landed via fold operations into an earlier commit during this pass — the dependent commit's patch-id may now match one of HEAD's commits. Without re-intersection, those commits would consume a full trial-sweep slot (and possibly a Tier 1/2 landing slot) only to skip-empty in §4 step 3.
+
+**Bounds and caveats.**
+
+- **Renames.** `git patch-id` is computed on the diff text. File renames change the diff header (`a/old`, `b/new`) and produce a different patch-id even when the content change is identical. If your input range contains renames whose content also lands in `$OUTPUT_BASE` (under either old or new name), the intersection will miss them and they'll discover-empty at cherry-pick time. Do not invent a rename-tolerant patch-id without engineer approval — the standard `--stable` form is the contract.
+
+- **Whitespace and trivial reformat.** `--stable` is robust to most context drift but not to deliberate whitespace-only changes interleaved with content. A commit that reformats and then re-adds the same content has a different patch-id from the reformat-free original. Treat patch-id misses as "could not predict" — never "definitely not present".
+
+- **Tree-identical without patch-id match.** A commit that resolves to a no-op for other reasons (e.g. its hunks were folded into Base-BDF as different-but-equivalent edits, or REFERENCE-based reconciliation removed the target lines) will not be caught by patch-id intersection. The §4 landing loop's existing `git diff --cached --quiet && git diff --quiet` check still runs as the final guard; patch-id prediction is an upstream optimization, not a replacement for the runtime empty check.
+
+- **`$REFERENCE` patch-id set is optional.** Computing patch-ids for `$REFERENCE`'s ancestry lets you spot input commits whose content lives in REFERENCE under a different SHA — useful Rule-D context (a HEAD-empty conflict region whose REFERENCE counterpart exists under a different commit). Build the REFERENCE set only if the run hits Rule-D ambiguity at scale; otherwise it costs without paying for itself.
+
+- **HP-1 / Rule-A compliance.** The patch-id coverage map is read-only computation. It does not perform any worktree write, conflict resolution, or whole-file replacement. Predicting an empty cherry-pick is information, not action — the §4 landing loop still applies its skip-empty rule when a predicted-empty source SHA is encountered (or when post-cherry-pick checks confirm an unpredicted empty).
+
+**Where the coverage map lives.** Under a `.ps-port-grouped/` directory in the worktree root. Files:
+
+- `input-patch-ids.tsv` — `patch_id<TAB>source_sha` (immutable after §2.6, sorted unique by patch_id for the `join`).
+- `head-patch-ids.tsv` — `patch_id<TAB>head_sha` (append-only during §4; re-sort before each pass's re-intersection).
+- `predicted-empty.tsv` — `source_sha<TAB>patch_id<TAB>head_sha` (recomputed each pass via the `join` above).
+
+**Performance.** For 500 commits, computing patch-ids is ~30–60 s (single-pass `git show | git patch-id`). The `join`-based intersection is sub-second. Per-pass append-and-reintersect is sub-second after the first pass. This is dwarfed by the per-pass trial-build cost — the coverage map is essentially free relative to §3's trial sweep.
+
+**§3.5 gate addition.** Add these checks to the workflow gate:
+
+- `.ps-port-grouped/input-patch-ids.tsv` exists and has row count equal to `git rev-list --count $INPUT_RANGE` (modulo commits that produced no patch-id — record any such in the report).
+- `.ps-port-grouped/head-patch-ids.tsv` exists and includes at minimum every SHA in `$OUTPUT_BASE..$OUTPUT_NAME`.
+- `.ps-port-grouped/predicted-empty.tsv` was recomputed for this pass.
+- `$WAITING_FILE` row count equals `(input count − predicted-empty count − already-landed count)`, not `(input count − already-landed count)`. The predicted-empty subset is excluded from the waiting set.
+
+A missing coverage map is a §3.5 gate stop in its own right: continue and you'll re-discover the empties one cherry-pick at a time, inflating pass cost.
+
+**Why this matters at the rubric level.** Without the coverage map, an input commit whose content is already in HEAD goes through the trial cherry-pick (returns clean/empty, n_conflicts=0), gets graded Tier 1 or Tier 2, lands at its `land_pos`, runs the empty-skip path, contributes one row to the audit trail and produces no tree change. With the coverage map, the same commit is identified before any trial cherry-pick runs; it is logged once in `predicted-empty.tsv` and the report, and is excluded from `$WAITING_FILE` entirely. For large input ranges with significant input/HEAD overlap (common when the destination base already absorbed upstream cherry-picks, or when the input range re-imports patches the base already contains), this removes dozens to hundreds of empty-skip cycles per run with no risk to correctness — the §4 runtime empty check is preserved as the final guard for the un-predicted cases.
+
 ### 3. Plan First Pass
 
 The skill iterates **passes** in §4. Each pass strictly reduces the waiting set. §3 builds the data for pass 1: a trial sweep of every commit in `$INPUT_RANGE` against `$OUTPUT_BASE` (or post-Base-BDF tip), tier-classified, written to `$WAITING_FILE`. §4 will rewrite `$WAITING_FILE` for every subsequent pass using the same procedure against the then-current `$OUTPUT_NAME` tip.
@@ -303,7 +400,8 @@ The dual threshold separates these.
 
 **Planning a pass is a two-sweep process.** You cannot fully grade conflict size by reading the commit; you have to try against the live tip. So at the start of every pass (including pass 1, which §3 plans):
 
-1. **Trial sweep** — for every commit in the current waiting set, run a quick `git cherry-pick --no-commit` trial **on a throwaway worktree** (or in-place with `--abort` on every result), plus the BC=1 trial build above. Compute `(n_conflicts, build_conflicts)` against the live tip.
+0. **Patch-ID empty filter (§2.6).** Before the trial sweep, re-intersect `input-patch-ids.tsv` with the current `head-patch-ids.tsv` (regenerated by appending each landed commit's patch-id during §4) and rewrite `predicted-empty.tsv`. Exclude every commit whose source SHA appears in `predicted-empty.tsv` from this pass's waiting set — they do not get trialed, graded, or written to `$WAITING_FILE`. Log them in the "Predicted-empty" section of `$REPORT_FILE` with the head SHA that already carries their patch-id. The lock sweep operates on the post-filter set.
+1. **Trial sweep** — for every commit in the current (post-filter) waiting set, run a quick `git cherry-pick --no-commit` trial **on a throwaway worktree** (or in-place with `--abort` on every result), plus the BC=1 trial build above. Compute `(n_conflicts, build_conflicts)` against the live tip.
 2. **Lock sweep** — assign each waiting commit a tier from the rubric above and write `$WAITING_FILE` for this pass. Demotion within this pass (e.g. Tier 1 → Tier 4) is allowed when reality refutes the trial; never promote within a pass without re-running the trial sweep. The **next** pass's trial sweep is where re-grading happens cleanly — by construction it produces fresh tier values against the new tip.
 
 **Batch the trial sweep — required, not optional.** A full sweep of every waiting commit is expensive (500+ throwaway picks is a real cost in pass 1; smaller in later passes). Trial in **~50-commit chunks**, grade each chunk, then trial the next chunk. The trial sweep must cover the **entire** waiting set before any cherry-pick lands in this pass. The only permitted shortcut: skip the trial-pick for low-risk categories (docs-only, test-only, packaging-only) and grade those by category + BUILD_CHANGING alone after the first ~3 chunks have established the conflict pattern. Source-bucket, build, reconciliation, and any BUILD_CHANGING commit always get the trial.
@@ -408,7 +506,8 @@ Before executing the first real cherry-pick of pass 1 (§4), confirm **all** of 
 
 - `$OUTPUT_BASE` (or the Base-BDF SHA from §1.5) built clean (§1/§1.5) and the PASS is recorded in `$REPORT_FILE`.
 - `**$WAITING_FILE` exists** (`test -f "$WAITING_FILE"`).
-- `**$WAITING_FILE` row count equals the unlanded commit count** — for pass 1 this is `git rev-list --count $INPUT_RANGE`. (Pass 2+ checks against `(input count − landed count)`.) A partial waiting set is not a waiting set.
+- `**$WAITING_FILE` row count equals the unlanded-and-not-predicted-empty commit count** — for pass 1 this is `git rev-list --count $INPUT_RANGE` minus the row count of `.ps-port-grouped/predicted-empty.tsv`. (Pass 2+: `(input count − landed count − predicted-empty count)`.) A partial waiting set is not a waiting set.
+- `**Patch-ID coverage map exists** (`test -s .ps-port-grouped/input-patch-ids.tsv` and `test -s .ps-port-grouped/head-patch-ids.tsv`) **and was re-intersected for this pass** (`predicted-empty.tsv` mtime is newer than the most recent landing on `$OUTPUT_NAME`). A missing or stale coverage map means §3.0 was skipped — return to §2.6 and §3 step 0 before proceeding.
 - `**$WAITING_FILE` rows are sorted by (tier, intra_tier_order).** Verify: `awk -F'\t' 'NR>1 {key=$2"."sprintf("%06d",$3); if (key<prev) {print "OUT OF ORDER at line "NR; exit 1} prev=key}' "$WAITING_FILE"`.
 - A `$WAITING_FILE.pass1` snapshot exists.
 - Every commit in `$INPUT_RANGE` has a row in the §3 scan table with Category, BUILD_CHANGING, and a pass-1 Tier (1–5).
@@ -499,6 +598,15 @@ The intra-pass landing loop, in shell-style:
 tail -n +2 "$WAITING_FILE" | while IFS=$'\t' read -r land_pos tier intra_order orig_sha rev_list_pos category build_changing cmake_only n_conflicts build_conflicts pass_col subject; do
     echo "=== pass=$pass_col land_pos=$land_pos tier=$tier orig_sha=$orig_sha (rev_list_pos=$rev_list_pos) ==="
 
+    # 0. Patch-ID guard (§2.6). The §3.0 filter already excluded predicted-empty
+    #    commits from $WAITING_FILE, so this row should not be predicted-empty.
+    #    Re-check defensively in case the coverage map was extended mid-pass:
+    if grep -q "^${orig_sha}\b" .ps-port-grouped/predicted-empty.tsv; then
+        echo "predicted-empty mid-pass — skipping without cherry-pick"
+        # Record the late discovery in $REPORT_FILE; do not run any git command.
+        continue
+    fi
+
     # 1. Cherry-pick (use -m 1 if merge commit).
     if [ "$(git cat-file -p "$orig_sha" | grep -c '^parent ')" -gt 1 ]; then
         git cherry-pick -m 1 "$orig_sha" || true
@@ -508,9 +616,19 @@ tail -n +2 "$WAITING_FILE" | while IFS=$'\t' read -r land_pos tier intra_order o
 
     # 2. Resolve conflicts per Rules A–D (manual step; the loop pauses here).
     # 3. If empty after resolution: git cherry-pick --skip; remove the row from $WAITING_FILE; continue.
+    #    (This catches the un-predicted-empty cases — renames, whitespace, fold-equivalents
+    #    that the §2.6 patch-id map could not match. It is the final guard, not the primary
+    #    detection path.)
     # 4. Otherwise: git cherry-pick --continue.
     # 5. Build. If fail: apply Bounded Rule 1; if that's blown, git reset --hard HEAD~ and leave the row in $WAITING_FILE for the next pass.
-    # 6. On success: remove the row from $WAITING_FILE; record outcome in $REPORT_FILE.
+    # 6. On success:
+    #    - remove the row from $WAITING_FILE;
+    #    - append the new commit's patch-id to .ps-port-grouped/head-patch-ids.tsv:
+    #        new_sha=$(git rev-parse HEAD)
+    #        new_pid=$(git show "$new_sha" | git patch-id --stable | awk '{print $1}')
+    #        [ -n "$new_pid" ] && printf '%s\t%s\n' "$new_pid" "$new_sha" \
+    #            >> .ps-port-grouped/head-patch-ids.tsv
+    #    - record outcome in $REPORT_FILE.
 done
 ```
 
@@ -854,6 +972,14 @@ Every Rule-3 squash: SHAs squashed together, resulting SHA, justification.
 ### Dep graph & pair detection
 
 Path to `hunks.tsv` and `overlaps.tsv`. List of pre-detected pairs with their edge-type signals (subject / author+timestamp / tag / hunk-overlap).
+
+### Patch-ID coverage (§2.6)
+
+- Paths: `.ps-port-grouped/input-patch-ids.tsv`, `.ps-port-grouped/head-patch-ids.tsv`, `.ps-port-grouped/predicted-empty.tsv`.
+- Pass-1 input-range row count vs predicted-empty row count → percentage of input range removed up front by patch-id intersection.
+- For each predicted-empty source SHA: subject, the head SHA already carrying the same patch-id, and the pass at which the prediction first fired (pass 1 from `$OUTPUT_BASE` ancestry; later passes when a sibling landing extended HEAD).
+- Re-intersection counts per pass: number of additional source SHAs that became predicted-empty after pass `N` landings extended `head-patch-ids.tsv`.
+- Any unpredicted empties discovered at §4 runtime: source SHA, pass, the post-resolution diff state that revealed the empty (typically rename, whitespace-only reformat, or fold-equivalent — listed as the patch-id intersection's known blind spots in §2.6).
 
 ### Final convergence
 

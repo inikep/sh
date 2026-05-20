@@ -171,6 +171,24 @@ If, after legitimate hunk-level conflict resolution, a Source-bucket commit ends
 
 **Why:** Subject-based classification (HP-7) is one route from "commit X is Source-bucket" to "commit X is no-build"; post-resolution path-stripping is another. Both substitute a coarser-grained decision for hunk-level resolution and both cause per-commit builds to be silently skipped. HP-7 closes the first route; HP-8 closes the second. There is no path that converts a Source-bucket commit into a no-build commit without engineer approval, named by SHA, in the current conversation.
 
+### HP-9. Build-Driven Fixes must not undo work that already equals REFERENCE.
+
+When a Build-Driven Fix (BDF) is needed because an API has two forms in flight — an older form and a newer form that matches `$REFERENCE_BRANCH` — the BDF must update the **lagging** side to match REFERENCE, never the side that already matches REFERENCE.
+
+Concretely, the following are forbidden as BDF resolutions:
+
+- Reverting call sites that already pass the REFERENCE-matching argument count/types to match an older macro or declaration that is still in-tree from an earlier squash.
+- Reverting a function definition's signature back to an older form to match older callers, when the definition already matches REFERENCE.
+- Editing any region whose current content is byte-identical to the corresponding region in `$REFERENCE_BRANCH`, when the goal is to "reconcile with" a lagging counterpart elsewhere. The lagging counterpart is what must be edited.
+
+Before applying any BDF edit, compare both sides of the mismatch (caller and declaration/definition) against `$REFERENCE_BRANCH` for that region. The side that already matches REFERENCE is locked; the other side is the BDF target.
+
+This rule does **not** authorize whole-file REFERENCE-fold (HP-1 still applies). It authorizes only targeted, hunk-level forward-fold of the **lagging** side from REFERENCE to bring it level with the side that already matches.
+
+**Why:** Cluster-squash workflows accumulate mixed-vintage API signatures because "take incoming" pulls newer code into earlier cluster positions. The natural BDF instinct is to "make the build pass at this commit by reverting the new callers." That instinct is wrong: every reverted caller is work that must be re-done at a later cluster, and the cumulative effect is divergence from REFERENCE at the tip. HP-9 closes this regression vector.
+
+**How to apply:** When two sides of an API disagree, run `git show $REFERENCE_BRANCH:<path>` for both regions, pick the side already at REFERENCE as locked, and edit only the other side. If neither side matches REFERENCE, that is a Stop Condition — halt and ask the engineer.
+
 ---
 
 ## Pre-flight Contract
@@ -187,6 +205,7 @@ HP-5: I will not invoke helper-script modes that perform whole-file or whole-tre
 HP-6: I will not invoke percona_gca_sync_tdd or percona_conflict_resolution_tdd.
 HP-7: I will not branch behavior on a source commit's subject line. No is_porter_fix / is_reconciliation / "[reconciliation]" / "Percona Server 5.7 port" classification, no bulk source-file resets keyed off subject, no auto-skips by subject. The only subject-based check is the marker preservation rule (subject's first non-whitespace characters are one or more `=` characters followed by ` MARKER:`).
 HP-8: Bucketing locks at the source commit's `git diff-tree` paths and does not change based on what the applied commit's tree looks like after resolution. I will not strip source/plugin/build-system hunks from a Source-bucket commit to land it in a no-build bucket, run any "align source paths to REFERENCE after cherry-pick" pass, or treat the applied commit's reduced path set as evidence that no per-commit build is required. Naming a "PROTECTED set" / "exclusion list" / "everything except path X" does not legitimize the alignment pass; the operation itself is forbidden regardless of how short the exclusion list is. Before continuing every post-G8 Source-bucket or Plugin-only-bucket cherry-pick I will diff staged paths against the source commit's diff-tree paths and stop if any source/plugin/build-system path is silently absent.
+HP-9: Build-Driven Fixes will not undo work that already equals REFERENCE. When two sides of an API disagree, I will check both sides against `$REFERENCE_BRANCH` and edit only the lagging side; the side already at REFERENCE is locked. I will not revert REFERENCE-matching callers to fit an older macro, nor revert a REFERENCE-matching definition to fit older callers. If neither side matches REFERENCE, I will stop and ask.
 STOP-DON'T-JUDGE: Where this skill says "if X is even arguably possible, stop and ask," I will stop and ask rather than apply judgment in my own favor.
 ASYMMETRIC ERRORS: Stopping unnecessarily is recoverable; the engineer will tell me to continue. Violating any HP rule invalidates the run regardless of the resulting tree state.
 === END PRE-FLIGHT READBACK ===
@@ -215,6 +234,7 @@ A run is **invalid** (must be discarded and restarted, not repaired) if any of t
 - A Defer-commit decision violated any of the §6 bounds: missing or non-specific landing position; transitively deferred other commits; intervening commits broke for lack of the deferred content with the decision not reversed; bucket/build requirements not preserved at the landing position; the same source commit was Defer-committed more than once; ledger entry missing or never reconciled by Final Parity.
 - A Forward-fold decision violated any of the §6 Fold bounds: more than one later source named in a single fold; non-minimal absorption of unrelated content; missing ledger entry; many-to-one bulk pattern in any form (G8 mass-fold or otherwise).
 - A Squash decision violated any of the §6 Squash bounds: more than one later commit absorbed; missing quantitative justification; combined message did not preserve both original SHAs; bucket downgraded below the union of the two component buckets; second Squash applied to the combined commit; ledger entry missing.
+- A Build-Driven Fix reverted a region that already matched `$REFERENCE_BRANCH` in order to fit a lagging counterpart, instead of forward-folding the lagging counterpart to REFERENCE (HP-9). Editing the REFERENCE-matching side is the violation regardless of whether the build subsequently passed.
 - A Squash-cluster decision violated any of the §6 Squash-cluster bounds: cluster not in Phase B manifest; missing or vague engineer approval; partial cluster squash (members left non-squashed); combined commit at wrong position; bucket downgraded below the union of all member buckets; HP-8 cross-check skipped across the combined member-path union; nested cluster squash; ledger entry missing; engineer-approval quote missing.
 - The attempt-budget cap was exceeded for a commit without an explicit engineer waiver recorded in the engineer-waivers ledger section. Silent iteration past the cap is a violation even if the build eventually passes.
 - A still-deferred set was rebuilt via `git patch-id` without subtracting `applied-equivalents`, `squashed-commits.absorbed_sha`, and `squashed-clusters.member_sha`, causing already-resolved commits to be re-attempted with potentially divergent hunk-resolutions.

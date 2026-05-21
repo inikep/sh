@@ -51,6 +51,17 @@ CPP_EXT = ('.h', '.c', '.cc', '.cxx', '.cpp', '.hh', '.hpp', '.hxx')
 INS_RE = re.compile(r'(\d+) insertion')
 DEL_RE = re.compile(r'(\d+) deletion')
 
+# Marker commits are empty placeholders whose subject identifies a section in
+# the linearized history, e.g.
+#   ==================== MARKER: GROUP 3 — CI configs ====================
+# They must survive all three phases even though their stripped tree is
+# identical to their parent's.
+MARKER_RE = re.compile(r'(^=+\s|MARKER:|=+$)')
+
+
+def is_marker_subject(subj: str) -> bool:
+    return bool(MARKER_RE.search(subj or ''))
+
 
 def run(*cmd, check=True, capture=True, env=None, stdin=None):
     r = subprocess.run(
@@ -145,7 +156,7 @@ def phase_a(base, src, output, log_dir, transient):
                 ['git', 'write-tree'], capture_output=True, text=True, env=env
             ).stdout.strip()
 
-            if new_tree == parent_tree:
+            if new_tree == parent_tree and not is_marker_subject(subj):
                 sha_map.append(f'{sha}\t-\tempty-after-strip')
                 skipped.append(f'[{i}/{total}] SKIP: {sha} {subj}')
                 continue
@@ -360,7 +371,9 @@ def squash_apply(base, src, output, log_dir, chrono, squash, *, phase, work_suff
             members = [sha] + absorb_into[sha]
             msgs = []
             for m in members:
-                r = run('git', 'cherry-pick', '--no-commit', m, check=False)
+                r = run('git', 'cherry-pick', '--allow-empty',
+                        '--keep-redundant-commits', '--no-commit', m,
+                        check=False)
                 if r.returncode != 0:
                     log_lines.append(
                         f"[{i}] CONFLICT cherry-pick {m[:11]} under root {sha[:11]}"
@@ -415,7 +428,8 @@ def squash_apply(base, src, output, log_dir, chrono, squash, *, phase, work_suff
                 f"[{i}] MERGE {sha[:11]} + {len(absorb_into[sha])} absorbed -> {subj}"
             )
         else:
-            r = run('git', 'cherry-pick', sha, check=False)
+            r = run('git', 'cherry-pick', '--allow-empty',
+                    '--keep-redundant-commits', sha, check=False)
             if r.returncode:
                 log_lines.append(f"[{i}] CONFLICT singleton {sha[:11]} {subj}")
                 sys.stderr.write(r.stdout or '')
@@ -471,7 +485,8 @@ def phase_c_apply(base, src, output, log_dir, plan):
             continue
 
         # Cherry-pick this commit (root or untouched non-deletion commit).
-        r = run('git', 'cherry-pick', sha, check=False)
+        r = run('git', 'cherry-pick', '--allow-empty',
+                '--keep-redundant-commits', sha, check=False)
         if r.returncode:
             log_lines.append(f"[{i}] CONFLICT cherry-pick {sha[:11]} {subj}")
             sys.stderr.write(r.stdout or '')

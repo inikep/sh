@@ -29,7 +29,8 @@ The task is complete only when **all** of the following hold simultaneously:
 - `$OUTPUT_BRANCH`: branch to create from `$DESTINATION_BASE_BRANCH`.
 - `$LLM_MODEL`: identifier including model and reasoning level (e.g. `opus-4.7-high`).
 - `$REPORT_FILE`: markdown report to produce. Default: `/data/sh/utils/reports/${LLM_MODEL}_${OUTPUT_BRANCH}.md`.
-- `$BUILD_DIR`: out-of-tree build directory under `/tmp` (e.g. `/tmp/ps-replay-${OUTPUT_BRANCH}`).
+- `$RUN_DIR`: run state directory under `/tmp` (e.g. `/tmp/ps-replay-${OUTPUT_BRANCH}`).
+- `$BUILD_DIR`: out-of-tree build directory under `$RUN_DIR` (e.g. `/tmp/ps-replay-${OUTPUT_BRANCH}/build`).
 
 ---
 
@@ -293,7 +294,7 @@ The Hard Prohibitions above are the highest-priority rules. The rules below are 
 
 ## Build Configuration
 
-Use an out-of-tree build directory under `/tmp`, and configure with these options unless the task explicitly overrides them:
+Use an out-of-tree build directory at `$BUILD_DIR` under the dedicated `/tmp` run directory (`$RUN_DIR`), and configure with these options unless the task explicitly overrides them:
 
 ```sh
 CC=gcc-9 CXX=g++-9 cmake .. \
@@ -326,7 +327,7 @@ Use `ccache` through CMake compiler launchers, not by replacing `CC` or `CXX`; t
 2. **Output the Pre-flight Contract readback verbatim** (see [Pre-flight Contract](#pre-flight-contract)). If the readback is missing, paraphrased, or interleaved, abort the run.
 3. Confirm the working tree is clean before starting.
 4. If `$REPORT_FILE` is not specified, set it to `/data/sh/utils/reports/${LLM_MODEL}_${OUTPUT_BRANCH}.md`.
-5. Set `$BUILD_DIR` to a directory under `/tmp` if not specified.
+5. Set `$RUN_DIR` to a dedicated subdirectory under `/tmp` if not specified, e.g. `/tmp/ps-replay-${OUTPUT_BRANCH}`. Set `$BUILD_DIR` to `$RUN_DIR/build` if not specified. Store all transient run files, generated source lists, ledgers, Phase B artifacts, HP-8 scratch files, and build logs under `$RUN_DIR`.
 6. Generate the ordered source list:
 
    ```sh
@@ -346,7 +347,7 @@ Use `ccache` through CMake compiler launchers, not by replacing `CC` or `CXX`; t
 
    All sections must converge before Final Parity: every ledger entry must record the SHA(s) on `$OUTPUT_BRANCH` where the moved/folded/squashed content actually lives, with a PASS build log at that SHA where applicable. Final Parity (§10) verifies the ledger is closed — every entry has a recorded landing/target/combined SHA and (for build-required entries) a PASS log.
 
-   **Ledger storage**: write ledger to `.ps-replay/ledger.tsv` (or another path under the worktree). Do NOT use `/tmp` for the ledger — it gets cleared by reboot, tmp-cleanup, or accidental `rm -rf`. Loss of the ledger mid-run causes false-positive re-attempts of `applied-equivalents` commits and forces re-derivation of the still-deferred set.
+   **Ledger storage**: write ledger to `$RUN_DIR/ledger.tsv`. Do not write replay state under the worktree (for example `.ps-replay/`). Keep run state in the dedicated `/tmp` subdirectory so the source tree only contains replayed code changes. Because `/tmp` can be cleared by reboot or cleanup, reproduce the ledger summary in `$REPORT_FILE` after every material state transition; loss of `$RUN_DIR` mid-run is a Stop Condition unless the ledger can be reconstructed exactly from `$REPORT_FILE` and Git history.
 
 10. **Phase B: Pre-flight cluster analysis.** Before any cherry-pick, build a symbol→commit index and a cluster manifest. This converts what would otherwise be ~10+ continuation sessions of trial-and-error into one planning pass.
 
@@ -354,7 +355,7 @@ Use `ccache` through CMake compiler launchers, not by replacing `CC` or `CXX`; t
     - Extract the symbols `c` *adds* (new function declarations, new struct members, new enum values, new `#define`s, new file creations) via `git diff` + identifier grep against the parent state.
     - Extract the symbols `c` *uses* (function calls, struct-member references, enum values, macros).
 
-    Build `symbol-index.tsv` under `.ps-replay/`:
+    Build `symbol-index.tsv` under `$RUN_DIR`:
 
     ```
     symbol<TAB>defining_idx<TAB>defining_sha<TAB>kind (decl/member/enum/macro/file)
@@ -455,12 +456,12 @@ If it conflicts:
 7. **HP-8 staged-paths cross-check (mandatory for every post-Group-8 Source-bucket and Plugin-only-bucket cherry-pick, whether the cherry-pick conflicted or applied cleanly).** Before continuing, compare the staged tree's touched paths to the source commit's touched paths:
 
    ```sh
-   git diff-tree --no-commit-id --name-only -r <source-sha> | sort -u > /tmp/src-paths.txt
-   { git diff --cached --name-only; git diff --name-only; } | sort -u > /tmp/staged-paths.txt
-   comm -23 /tmp/src-paths.txt /tmp/staged-paths.txt
+   git diff-tree --no-commit-id --name-only -r <source-sha> | sort -u > "$RUN_DIR/hp8-src-paths.txt"
+   { git diff --cached --name-only; git diff --name-only; } | sort -u > "$RUN_DIR/hp8-staged-paths.txt"
+   comm -23 "$RUN_DIR/hp8-src-paths.txt" "$RUN_DIR/hp8-staged-paths.txt"
    ```
 
-   For every source/plugin/build-system path that appears in `src-paths.txt` but not in `staged-paths.txt`, the source commit's modification of that path is silently absent. Two cases are acceptable:
+   For every source/plugin/build-system path that appears in `hp8-src-paths.txt` but not in `hp8-staged-paths.txt`, the source commit's modification of that path is silently absent. Two cases are acceptable:
 
    1. The full cherry-pick is empty (no diff on any path, staged or unstaged). Apply rule 14 and `git cherry-pick --skip`. No build is owed.
    2. The omission is bounded deferral recorded in the deferred-hunks ledger with a specific named later target commit (rule 5 / §5 bounds).
@@ -531,7 +532,7 @@ For each post-Group-8 build failure:
 
 1. Identify the first real error, not just the final `Error 2`. Use `ps_replay_errors.py` if the log is truncated.
 2. Map the error to the smallest inconsistent surface: declaration/type mismatch, enum/table mismatch, missing member, missing source file, incoherent CMake entry, unresolved symbol, or ABI check mismatch.
-3. **Classify the error using the Phase B symbol index (`.ps-replay/symbol-index.tsv`)** before choosing any action. For each undefined identifier in the error, look up its defining commit:
+3. **Classify the error using the Phase B symbol index (`$RUN_DIR/symbol-index.tsv`)** before choosing any action. For each undefined identifier in the error, look up its defining commit:
 
     - `STALE-CACHE` — the defining commit is already on `$OUTPUT_BRANCH` (applied or applied-equivalent). The build cache is stale; reconfigure or rebuild clean before treating this as a real failure.
     - `FUTURE-FOLD-CANDIDATE` — the defining commit is later in the source list AND is the *only* such forward dependency for this commit AND its hunk is small. Standard §6 Fold (forward-fold) applies.
@@ -604,7 +605,7 @@ For each post-Group-8 build failure:
 
      Bounds (every bound must hold; if any is uncertain, choose Stop):
 
-     a. **Pre-existing cluster manifest entry.** The cluster must be in `.ps-replay/clusters.tsv` from Phase B (Prepare step 10). Squash-cluster cannot be invoked for an ad-hoc grouping discovered during replay — that path is Defer-commit (one commit) or Squash (two adjacent commits) instead.
+     a. **Pre-existing cluster manifest entry.** The cluster must be in `$RUN_DIR/clusters.tsv` from Phase B (Prepare step 10). Squash-cluster cannot be invoked for an ad-hoc grouping discovered during replay — that path is Defer-commit (one commit) or Squash (two adjacent commits) instead.
      b. **Engineer approval in current conversation.** The engineer must have approved this specific cluster (named by `cluster_name` and the full member idx list) in the current conversation, either at Prepare time (preferred — when the cluster manifest was first presented) or at the moment the classifier first reports `CLUSTER-BLOCKED` for one of its members. Pre-approval of every cluster in a single engineer message at Prepare time is the most efficient path. Approval phrasing like "approved" or "squash that cluster" against the explicit member list is required; vague "go ahead with squashes as needed" is not approval.
      c. **All members or none.** The squash combines all listed cluster members. Partial cluster squashes are forbidden: a residual non-squashed cluster member would still hit `CLUSTER-BLOCKED` on its own.
      d. **Landing position.** The combined commit lands at the cluster's earliest-member source-list position (i.e. the position the first cluster member would have occupied). All other members are removed from the source-list cursor.
@@ -712,16 +713,16 @@ Example diagnosis:
 
 ```sh
 SKILL_SCRIPT_DIR=/home/przemek/.agents/skills/ps-replay+make-buildable/scripts
-python3 "$SKILL_SCRIPT_DIR/ps_replay_errors.py" /tmp/ps-replay-${OUTPUT_BRANCH}-logs/build-58-812714fe16da-ccache.log
-python3 "$SKILL_SCRIPT_DIR/ps_replay_build.py" --worktree "$WORKTREE" --build-dir "$BUILD_DIR" --log /tmp/rebuild.log --incremental
+python3 "$SKILL_SCRIPT_DIR/ps_replay_errors.py" "$RUN_DIR/logs/build-58-812714fe16da-ccache.log"
+python3 "$SKILL_SCRIPT_DIR/ps_replay_build.py" --worktree "$WORKTREE" --build-dir "$BUILD_DIR" --log "$RUN_DIR/logs/rebuild.log" --incremental
 ```
 
 Example post-Group-8 driver loop:
 
 ```sh
 SKILL_SCRIPT_DIR=/home/przemek/.agents/skills/ps-replay+make-buildable/scripts
-export PS_REPLAY_SRC_LIST="$LOG_DIR/source-list.txt"
-export PS_REPLAY_LOG_DIR="$LOG_DIR"
+export PS_REPLAY_SRC_LIST="$RUN_DIR/source-list.txt"
+export PS_REPLAY_LOG_DIR="$RUN_DIR/logs"
 export PS_REPLAY_BUILD_DIR="$BUILD_DIR"
 export PS_REPLAY_WORKTREE="$WORKTREE"
 export PS_REPLAY_REFERENCE="$REFERENCE_BRANCH"
@@ -804,7 +805,7 @@ Write `$REPORT_FILE` in markdown. It must include:
 ### Header
 
 - The input branches and report path.
-- `$LLM_MODEL`, `$BUILD_DIR`, and the build command used.
+- `$LLM_MODEL`, `$RUN_DIR`, `$BUILD_DIR`, and the build command used.
 - The pre-flight readback, reproduced verbatim, with the timestamp at which it was produced.
 - A "Violations encountered" section that explicitly states either `none` or lists every violation with HP-rule, location in the run, and remediation status. The "none" attestation is **mandatory** even when no violations occurred; an absent attestation is itself a reporting violation.
 
@@ -816,7 +817,7 @@ Write `$REPORT_FILE` in markdown. It must include:
 
 ### Phase B cluster manifest (Prepare step 10)
 
-- The full `clusters.tsv` content, or pointer to it under `.ps-replay/`.
+- The full `clusters.tsv` content, or pointer to it under `$RUN_DIR`.
 - For each cluster: cluster_name, idx_range, member_count, shared_symbols, suggested_action, and engineer pre-approval status (approved / declined / deferred-to-classifier-time).
 - The symbol-index summary: total symbols, count of forward-dep edges, distribution of edge length (target_idx − source_idx).
 

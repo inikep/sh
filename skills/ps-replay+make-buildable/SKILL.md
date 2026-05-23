@@ -236,7 +236,7 @@ A run is **invalid** (must be discarded and restarted, not repaired) if any of t
 - A Forward-fold decision violated any of the §6 Fold bounds: more than one later source named in a single fold; non-minimal absorption of unrelated content; missing ledger entry; many-to-one bulk pattern in any form (G8 mass-fold or otherwise).
 - A Squash decision violated any of the §6 Squash bounds: more than one later commit absorbed; missing quantitative justification; combined message did not preserve both original SHAs; bucket downgraded below the union of the two component buckets; second Squash applied to the combined commit; ledger entry missing.
 - A Build-Driven Fix reverted a region that already matched `$REFERENCE_BRANCH` in order to fit a lagging counterpart, instead of forward-folding the lagging counterpart to REFERENCE (HP-9). Editing the REFERENCE-matching side is the violation regardless of whether the build subsequently passed.
-- A Squash-cluster decision violated any of the §6 Squash-cluster bounds: cluster not in Phase B manifest; missing or vague engineer approval; partial cluster squash (members left non-squashed); combined commit at wrong position; bucket downgraded below the union of all member buckets; HP-8 cross-check skipped across the combined member-path union; nested cluster squash; ledger entry missing; engineer-approval quote missing.
+- A Squash-cluster decision violated any of the §6 Squash-cluster bounds: missing or vague engineer approval naming the full member list; partial cluster squash (members left non-squashed); combined commit at wrong position; bucket downgraded below the union of all member buckets; HP-8 cross-check skipped across the combined member-path union; nested cluster squash; ledger entry missing; engineer-approval quote missing.
 - The attempt-budget cap was exceeded for a commit without an explicit engineer waiver recorded in the engineer-waivers ledger section. Silent iteration past the cap is a violation even if the build eventually passes.
 - A still-deferred set was rebuilt via `git patch-id` without subtracting `applied-equivalents`, `squashed-commits.absorbed_sha`, and `squashed-clusters.member_sha`, causing already-resolved commits to be re-attempted with potentially divergent hunk-resolutions.
 - Final Parity proceeded while the deferred-hunks/commits/forward-folds/squashes/clusters/applied-equivalents ledger still contained an unclosed entry.
@@ -265,10 +265,10 @@ The Hard Prohibitions above are the highest-priority rules. The rules below are 
    - **Conflict-motivated reorder** (§2 Choose Commit Order): chronological order produces a conflict and a specific reordered position demonstrably reduces that conflict to a smaller, hunk-level resolvable form.
    - **Build-motivated whole-commit deferral** (§6 Defer-commit): a commit is mostly premature at its current build position and a specific later landing position lets it build cleanly, under the strict bounds in §6 — a single, specific, named landing commit; no transitively-deferred other commits; intervening commits stay buildable; bucket/build requirements preserved; at most one Defer-commit per source commit; ledger entry required; convergence verified at Final Parity.
    - **Build-motivated whole-commit absorption** (§6 Squash): most of an adjacent later commit's content is required to make the current commit buildable, so the two source commits are combined into a single commit on `$OUTPUT_BRANCH`, under the strict bounds in §6 — exactly two adjacent source commits, specific quantitative justification, single combined build, ledger entry required.
-   - **Build-motivated cluster absorption** (§6 Squash-cluster, **ENGINEER-APPROVED**): a tightly-coupled feature implementation cluster identified by Phase B (Prepare step 10) cannot land per-commit because each member depends on multiple other cluster members. All cluster members are combined into one commit, under the strict bounds in §6 Squash-cluster — pre-existing Phase B manifest entry, current-conversation engineer approval naming each member, all-or-none, single combined build, ledger entry required.
+   - **Build-motivated cluster absorption** (§6 Squash-cluster, **ENGINEER-APPROVED**): a tightly-coupled feature implementation cluster cannot land per-commit because concrete build failures show that each member depends on multiple other cluster members. All cluster members are combined into one commit, under the strict bounds in §6 Squash-cluster — current-conversation engineer approval naming each member, all-or-none, single combined build, ledger entry required.
    - **Build-motivated hunk movement** (§6 Fold forward-fold, §5 deferred-hunks): individual hunks are folded from a later source-list commit into an earlier one's build-fix (forward-fold), or removed from an earlier commit and applied later with their dependent commit (deferred-hunks). The source-list cursor itself does not move; the hunks move within it. Each movement is a one-to-one ledger entry.
 
-   Record every reordered, deferred, forward-folded, squashed, or cluster-squashed change with original index/SHA, new position/target, and the specific conflict or build failure that motivated the change in `$REPORT_FILE`. If restructuring is being considered for any other reason — convenience, throughput, "it just works better," "let me move several commits to a more convenient cluster" — do not do it. Multi-commit reorders, bulk forward-folds (many-to-one), Squash chains, and ad-hoc multi-commit groupings that do not fit within a single bounded action (including Squash-cluster's Phase-B-manifest-and-approval requirement) are a Stop Condition.
+   Record every reordered, deferred, forward-folded, squashed, or cluster-squashed change with original index/SHA, new position/target, and the specific conflict or build failure that motivated the change in `$REPORT_FILE`. If restructuring is being considered for any other reason — convenience, throughput, "it just works better," "let me move several commits to a more convenient cluster" — do not do it. Multi-commit reorders, bulk forward-folds (many-to-one), Squash chains, and ad-hoc multi-commit groupings that do not fit within a single bounded action (including Squash-cluster's current-conversation approval requirement) are a Stop Condition.
 3. Root `$OUTPUT_BRANCH` at `$DESTINATION_BASE_BRANCH`, not at `$BASE_BRANCH`. The source range may be mysql-5.6.x-based while the output branch is mysql-5.7.x-based.
 4. Resolve conflicts using `$REFERENCE_BRANCH` as hunk-level or logic-level guidance. `git show $REFERENCE_BRANCH:<path>` is allowed for inspection only (see HP-1). If `rerere` produces a resolution, do not stage it until you have:
    - Confirmed there are no `<<<<<<<`, `=======`, or `>>>>>>>` markers in the file with `git grep -nE '^(<<<<<<<|=======|>>>>>>>)' -- <path>`.
@@ -327,7 +327,7 @@ Use `ccache` through CMake compiler launchers, not by replacing `CC` or `CXX`; t
 2. **Output the Pre-flight Contract readback verbatim** (see [Pre-flight Contract](#pre-flight-contract)). If the readback is missing, paraphrased, or interleaved, abort the run.
 3. Confirm the working tree is clean before starting.
 4. If `$REPORT_FILE` is not specified, set it to `/data/sh/utils/reports/${LLM_MODEL}_${OUTPUT_BRANCH}.md`.
-5. Set `$RUN_DIR` to a dedicated subdirectory under `/tmp` if not specified, e.g. `/tmp/ps-replay-${OUTPUT_BRANCH}`. Set `$BUILD_DIR` to `$RUN_DIR/build` if not specified. Store all transient run files, generated source lists, ledgers, Phase B artifacts, HP-8 scratch files, and build logs under `$RUN_DIR`.
+5. Set `$RUN_DIR` to a dedicated subdirectory under `/tmp` if not specified, e.g. `/tmp/ps-replay-${OUTPUT_BRANCH}`. Set `$BUILD_DIR` to `$RUN_DIR/build` if not specified. Store all transient run files, generated source lists, ledgers, HP-8 scratch files, and build logs under `$RUN_DIR`.
 6. Generate the ordered source list:
 
    ```sh
@@ -342,49 +342,23 @@ Use `ccache` through CMake compiler launchers, not by replacing `CC` or `CXX`; t
    - **Deferred commits** (backward defer, whole-commit-level — §6 Defer-commit): whole commits postponed forward, each with original index/SHA, original subject, landing index/SHA, motivating build failure, the dependency the landing commit provides, and (once applied) the new `$OUTPUT_BRANCH` SHA and build log path.
    - **Forward-folded hunks** (forward fold, hunk-level — §6 Fold preferred source): hunks pulled from a later source-list commit into an earlier commit's build-fix, each with later-source idx/SHA, target earlier idx/SHA on `$OUTPUT_BRANCH`, the folded paths/hunks, motivating build failure, and the build log path at the target SHA. When the later-source commit is reached in the replay, the entry accounts for its now-absent paths in the HP-8 staged-paths cross-check.
    - **Squashed commits** (forward fold, whole-commit-level — §6 Squash): pairs of adjacent source-list commits combined into one commit on `$OUTPUT_BRANCH`, each with both original SHAs/subjects, the combined SHA, the build log path at the combined SHA, motivating build failure, and the quantitative justification for "most of N+1 was needed for N."
-   - **Squashed clusters** (forward fold, multi-commit, ENGINEER-APPROVED — §6 Squash-cluster): groups of N non-adjacent source-list commits combined into one commit on `$OUTPUT_BRANCH`, each with: cluster name, list of (idx, sha, subject) members, combined SHA, build log path at combined SHA, motivating cluster-blocked classifier output, and explicit engineer-approval text quoting the current-conversation message.
+   - **Squashed clusters** (forward fold, multi-commit, ENGINEER-APPROVED — §6 Squash-cluster): groups of N non-adjacent source-list commits combined into one commit on `$OUTPUT_BRANCH`, each with: cluster name, list of (idx, sha, subject) members, dependency evidence, combined SHA, build log path at combined SHA, motivating `MULTI-COMMIT-CLUSTER` classifier output, and explicit engineer-approval text quoting the current-conversation message.
    - **Applied-equivalents** (no-op false-positive shielding): source-list commits whose content was applied to `$OUTPUT_BRANCH` with modifications (e.g. via forward-fold, Align, or hunk-defer at the original position), making the post-hoc `git patch-id` of the source commit not match anything on `$OUTPUT_BRANCH`. Without this section, a still-deferred-list rebuilt by `patch-id` after the fact will list these commits as deferred, and the driver will waste cycles re-attempting them. Each entry: source idx/SHA, new SHA on `$OUTPUT_BRANCH`, reason (`forward-folded` / `align-only` / `partial-hunk` / `squash-component`), and pointer to the ledger entry that records the actual landing.
 
    All sections must converge before Final Parity: every ledger entry must record the SHA(s) on `$OUTPUT_BRANCH` where the moved/folded/squashed content actually lives, with a PASS build log at that SHA where applicable. Final Parity (§10) verifies the ledger is closed — every entry has a recorded landing/target/combined SHA and (for build-required entries) a PASS log.
 
    **Ledger storage**: write ledger to `$RUN_DIR/ledger.tsv`. Do not write replay state under the worktree (for example `.ps-replay/`). Keep run state in the dedicated `/tmp` subdirectory so the source tree only contains replayed code changes. Because `/tmp` can be cleared by reboot or cleanup, reproduce the ledger summary in `$REPORT_FILE` after every material state transition; loss of `$RUN_DIR` mid-run is a Stop Condition unless the ledger can be reconstructed exactly from `$REPORT_FILE` and Git history.
 
-10. **Phase B: Pre-flight cluster analysis.** Before any cherry-pick, build a symbol→commit index and a cluster manifest. This converts what would otherwise be ~10+ continuation sessions of trial-and-error into one planning pass.
+10. **Default effort budget.** Do not ask the engineer for an effort-budget envelope during Prepare. Start the run under the skill default: **per-commit-only, hard 3-attempt cap**. Record this default in `$REPORT_FILE` under a `Run envelope` section.
 
-    For each source-list commit `c`:
-    - Extract the symbols `c` *adds* (new function declarations, new struct members, new enum values, new `#define`s, new file creations) via `git diff` + identifier grep against the parent state.
-    - Extract the symbols `c` *uses* (function calls, struct-member references, enum values, macros).
+    Ask for a different envelope only when a concrete commit reaches the hard 3-attempt cap during replay, or when §6 identifies a named `MULTI-COMMIT-CLUSTER` that requires Squash-cluster approval. At that point, present the specific commit/cluster, the attempts already made, and these options:
 
-    Build `symbol-index.tsv` under `$RUN_DIR`:
+    - **Stop at the hard cap**: keep the default and stop at the current last buildable commit.
+    - **Per-commit tunable cap**: engineer specifies a higher attempt budget for this commit, this cluster, or the rest of the run. Record as an engineer waiver in the ledger (see HP-2/§6).
+    - **Per-commit + cluster-squash**: for a named `MULTI-COMMIT-CLUSTER`, engineer approves §6 Squash-cluster by naming or directly acknowledging every member.
+    - **Full convergence**: engineer explicitly approves continuing until either every source-list commit has landed or the engineer terminates the run.
 
-    ```
-    symbol<TAB>defining_idx<TAB>defining_sha<TAB>kind (decl/member/enum/macro/file)
-    ```
-
-    Build a per-commit dependency edge list: for each commit `c`, list the symbols `c` uses that are defined at idx > c's idx (forward dependencies). Each such edge marks `c` as dependent on the defining commit.
-
-    Group commits into **clusters**: a cluster is a strongly-connected component of the dependency graph (mutual or near-mutual dependencies), or a chain of unidirectional dependencies whose head is not within reach of single-hunk forward-fold. The clustering output `clusters.tsv` records:
-
-    ```
-    cluster_name<TAB>idx_range<TAB>member_count<TAB>shared_symbols<TAB>suggested_action
-    ```
-
-    `cluster_name` is derived from the longest shared subject prefix or the dominant feature keyword in the cluster's symbols (e.g. `threadpool`, `log_archiving`, `fake_changes`, `super_read_only`, `log_slow_filter`). `suggested_action` is one of:
-
-    - `per-commit` — fewer than 3 forward dependencies per member; expected to land via standard §6 actions
-    - `defer-cluster-to-tail` — all members can be deferred to land after `idx M` where the cluster's last entry-point dependency lands
-    - `squash-cluster` — members form a mutual-dependency knot where each blocks the others; requires §6 Squash-cluster action (engineer approval)
-
-    Present the cluster manifest to the engineer **before** beginning the replay. The engineer may pre-approve `squash-cluster` actions for named clusters at this point, which is then recorded in the squashed-clusters ledger section. Pre-approval here is far cheaper than discovering the same cluster N times across N continuation sessions.
-
-11. **Effort budget envelope.** Ask the engineer for the run's effort budget, with these explicit options:
-
-    - **Per-commit-only, hard 3-attempt cap (skill default)**: stop at the first plateau; deliver whatever per-commit-buildable subset is achieved.
-    - **Per-commit-only, tunable cap**: engineer specifies a higher attempt budget (5? 10? unlimited?) per commit. Recorded as an engineer waiver in the ledger (see HP-2/§6).
-    - **Per-commit + cluster-squash**: per-commit budget for non-clustered commits; for commits classified as `cluster-blocked`, apply §6 Squash-cluster (engineer-pre-approved per cluster).
-    - **Full convergence**: keep going until either every source-list commit has landed (with whatever combination of per-commit, Squash, Squash-cluster, deferral, and final reconciliation is needed) or the engineer terminates the run.
-
-    Record the chosen envelope in `$REPORT_FILE` under a `Run envelope` section. The envelope shapes which §6 actions are available without further consultation (e.g. Squash-cluster is *only* available with envelope-3-or-4 plus per-cluster pre-approval).
+    Record any change from the default envelope in `$REPORT_FILE` under `Run envelope` and in the engineer-waivers ledger. Squash-cluster always requires a separate current-conversation approval naming every member before it is used.
 
 ### 2. Choose Commit Order
 
@@ -532,15 +506,15 @@ For each post-Group-8 build failure:
 
 1. Identify the first real error, not just the final `Error 2`. Use `ps_replay_errors.py` if the log is truncated.
 2. Map the error to the smallest inconsistent surface: declaration/type mismatch, enum/table mismatch, missing member, missing source file, incoherent CMake entry, unresolved symbol, or ABI check mismatch.
-3. **Classify the error using the Phase B symbol index (`$RUN_DIR/symbol-index.tsv`)** before choosing any action. For each undefined identifier in the error, look up its defining commit:
+3. **Classify the error from the build log and Git history** before choosing any action. For each undefined identifier in the error, search the current source list and `$REFERENCE_BRANCH` by targeted `git log -S`, `git grep`, `git show`, and `git diff` inspection. Do not use out-of-session notes or prior reports.
 
     - `STALE-CACHE` — the defining commit is already on `$OUTPUT_BRANCH` (applied or applied-equivalent). The build cache is stale; reconfigure or rebuild clean before treating this as a real failure.
     - `FUTURE-FOLD-CANDIDATE` — the defining commit is later in the source list AND is the *only* such forward dependency for this commit AND its hunk is small. Standard §6 Fold (forward-fold) applies.
-    - `CLUSTER-BLOCKED` — the defining commit is in a cluster (from the Phase B cluster manifest) AND the cluster's `suggested_action` is `defer-cluster-to-tail` or `squash-cluster`. Do NOT attempt single-symbol forward-folds; either defer this commit to the cluster's landing position or invoke Squash-cluster.
+    - `MULTI-COMMIT-CLUSTER` — concrete build errors show the current commit depends on multiple named later source-list commits, and those commits also depend on each other or on the current commit such that Fold, Defer-hunk, Defer-commit, and one pairwise Squash cannot isolate the failure. Do not attempt a bulk forward-fold. Stop and ask the engineer whether to approve §6 Squash-cluster for the full named member list.
     - `INVARIANT-BREAK` — the error is a `compile_time_assert(...)` failure, a signature mismatch (`too few arguments`), a linker error, an array-size assertion, or any other error that indicates adding a single declaration would silently violate an invariant elsewhere (the canonical example: adding `SQLCOM_SHOW_SLAVE_NOLOCK_STAT` to the enum without also extending `com_status_vars` breaks `sizeof(com_status_vars)/sizeof(...) == SQLCOM_END`). Single-symbol forward-fold is dangerous here — verify the surrounding invariants before folding, or escalate to Squash/Squash-cluster.
     - `UNRESOLVED` — no defining commit found in the source list, or the missing symbol is not produced by any later commit. Likely a toolchain mismatch (see rule 18 / G8 `[compilation]` fix), a hand-aligned typo, or a baseline incompatibility.
 
-    The classifier output determines which §6 actions are viable below. Skip the manual symbol-search step — the index is authoritative.
+    The classifier output determines which §6 actions are viable below. Record the exact Git commands or source-list commits used to identify the dependency.
 
 4. Compare the current commit, `HEAD^`, the source commit, and `$REFERENCE_BRANCH` for the affected files using `git diff` and `git show <ref-sha>:<path>` (inspection only — see HP-1).
 5. Choose **exactly one** of these actions:
@@ -601,19 +575,19 @@ For each post-Group-8 build failure:
 
      Squash is the right action when forward-fold would leave a clearly-non-empty but uselessly-small remainder; it is not a generic "let me merge two commits for tidiness." If the later commit's residual after forward-fold would still be a meaningful independent change, prefer forward-fold and keep the later commit.
 
-   - **Squash-cluster** (combine N non-adjacent commits into one, **ENGINEER APPROVAL REQUIRED**): when the §6 step 3 classifier reports `CLUSTER-BLOCKED` for a commit whose cluster (from Phase B Prepare step 10) is marked `suggested_action=squash-cluster`, combine all N members of that cluster into a single squash commit at the cluster's earliest member position. This is the canonical action for tightly-coupled feature implementations (threadpool internals, log archiving, fake_changes, super_read_only families, etc.) where each member depends on multiple other cluster members and no single forward-fold or pairwise Squash can break the knot.
+   - **Squash-cluster** (combine N non-adjacent commits into one, **ENGINEER APPROVAL REQUIRED**): when §6 step 3 reports `MULTI-COMMIT-CLUSTER` and the engineer approves the exact named member list in the current conversation, combine all approved members into a single squash commit at the cluster's earliest member position. This action is reserved for tightly-coupled feature implementations where concrete build errors show each member depends on multiple other cluster members and no single forward-fold, Defer-commit, or pairwise Squash can break the knot.
 
      Bounds (every bound must hold; if any is uncertain, choose Stop):
 
-     a. **Pre-existing cluster manifest entry.** The cluster must be in `$RUN_DIR/clusters.tsv` from Phase B (Prepare step 10). Squash-cluster cannot be invoked for an ad-hoc grouping discovered during replay — that path is Defer-commit (one commit) or Squash (two adjacent commits) instead.
-     b. **Engineer approval in current conversation.** The engineer must have approved this specific cluster (named by `cluster_name` and the full member idx list) in the current conversation, either at Prepare time (preferred — when the cluster manifest was first presented) or at the moment the classifier first reports `CLUSTER-BLOCKED` for one of its members. Pre-approval of every cluster in a single engineer message at Prepare time is the most efficient path. Approval phrasing like "approved" or "squash that cluster" against the explicit member list is required; vague "go ahead with squashes as needed" is not approval.
-     c. **All members or none.** The squash combines all listed cluster members. Partial cluster squashes are forbidden: a residual non-squashed cluster member would still hit `CLUSTER-BLOCKED` on its own.
+     a. **Concrete dependency evidence.** The cluster must be identified from current-run build failures and Git-history inspection, with every member named by source index/SHA and the dependency each member provides. Squash-cluster cannot be invoked for a speculative grouping, convenience grouping, or subject-pattern grouping.
+     b. **Engineer approval in current conversation.** The engineer must have approved this specific cluster, naming or directly acknowledging the full member idx/SHA list, in the current conversation after the dependency evidence is presented. Approval phrasing like "approved" or "squash that cluster" against the explicit member list is required; vague "go ahead with squashes as needed" is not approval.
+     c. **All members or none.** The squash combines all listed cluster members. Partial cluster squashes are forbidden: a residual non-squashed cluster member would still hit `MULTI-COMMIT-CLUSTER` on its own.
      d. **Landing position.** The combined commit lands at the cluster's earliest-member source-list position (i.e. the position the first cluster member would have occupied). All other members are removed from the source-list cursor.
      e. **Mechanics.** Cherry-pick the first cluster member onto `$OUTPUT_BRANCH`; for each subsequent member, run `git cherry-pick --no-commit <member-sha>`, resolve any hunk-level conflicts per §3, and `git commit --amend` at the end. The combined commit message must record `Squashed cluster: <cluster_name>` in the subject and list every member's `idx, sha, original subject` in the body.
      f. **One build, at the combined SHA.** The cluster's bucket is the union of all members' buckets — if any member is Source bucket, the combined commit is Source bucket and gets its own per-commit build at the combined SHA. This single build is the build-of-record for all members' content. Consistent with HP-2: builds happen where content lives.
      g. **HP-8 cross-check across all members.** The combined staged tree must include the union of all members' `git diff-tree` paths (or each absence accounted for by a deferred-hunks/forward-folded-hunks ledger entry that names a specific other commit on `$OUTPUT_BRANCH` as the carrier). Naked path absences are an HP-8 violation.
-     h. **No Squash-cluster of clusters.** A cluster cannot itself be a member of a larger cluster squash. If two clusters appear to require joint squashing, present that to the engineer as a re-clustering decision in Phase B, not as a nested operation.
-     i. **Ledger entry required.** Record in the squashed-clusters section of the ledger: cluster name, member list, combined SHA, build log path with PASS result, the classifier output that motivated the squash, and the exact engineer-approval text quoted from the current conversation.
+     h. **No Squash-cluster of clusters.** A cluster cannot itself be a member of a larger cluster squash. If two clusters appear to require joint squashing, stop and present the expanded member list and dependency evidence to the engineer as a new approval request, not as a nested operation.
+     i. **Ledger entry required.** Record in the squashed-clusters section of the ledger: cluster name, member list, dependency evidence, combined SHA, build log path with PASS result, the classifier output that motivated the squash, and the exact engineer-approval text quoted from the current conversation.
 
      Squash-cluster is the **last** of the §6 forward actions to consider: prefer Fold, Defer-hunk, Defer-commit, and pairwise Squash first. Squash-cluster has the broadest scope (and the least precision per-commit-buildability-wise), so it is reserved for cases where the per-commit ceiling has been established and the engineer has approved the trade-off.
 
@@ -621,18 +595,13 @@ For each post-Group-8 build failure:
    - **Remove**: delete source-only files or CMake entries that are not present in the reference branch and cannot build coherently in this intermediate commit.
    - **Stop**: ask the engineer.
 
-   **If the failure does not clearly map to one of Fold (forward or REFERENCE) / Defer / Defer-commit / Squash / Squash-cluster / Align / Remove, choose Stop.** Do not invent another action. Do not classify a whole-file replacement as "Fold" or "Align hunks." Do not classify a bulk pre-stage of many later commits into one earlier fix as "Fold" — that is the G8 mass-fold pattern forbidden by HP-2. Do not classify a multi-commit reorder as "Defer-commit" (Defer-commit moves exactly one commit; it does not cascade — see bound (b)). Do not classify a chain of squashes as "Squash" (Squash absorbs exactly one later commit — see Squash bound (a)). Do not classify an ad-hoc group of commits as "Squash-cluster" — Squash-cluster only operates on Phase-B-derived, engineer-approved clusters (see Squash-cluster bound (a)).
+   **If the failure does not clearly map to one of Fold (forward or REFERENCE) / Defer / Defer-commit / Squash / Squash-cluster / Align / Remove, choose Stop.** Do not invent another action. Do not classify a whole-file replacement as "Fold" or "Align hunks." Do not classify a bulk pre-stage of many later commits into one earlier fix as "Fold" — that is the G8 mass-fold pattern forbidden by HP-2. Do not classify a multi-commit reorder as "Defer-commit" (Defer-commit moves exactly one commit; it does not cascade — see bound (b)). Do not classify a chain of squashes as "Squash" (Squash absorbs exactly one later commit — see Squash bound (a)). Do not classify an ad-hoc group of commits as "Squash-cluster" — Squash-cluster only operates on concrete dependency evidence and current-conversation engineer approval naming every member (see Squash-cluster bounds (a)–(b)).
 
-6. **Attempt budget per commit.** The default budget is **three** Fold/Defer/Defer-commit/Squash/Squash-cluster/Align/Remove attempts on the same source commit (counted across **all** positions it has been tried at, including the original position before a Defer-commit and the landing position after, including the pre-squash and post-squash states for a Squash, and including each commit's position within a Squash-cluster attempt). If the build is still failing after the budget is exhausted, choose Stop.
+6. **Attempt budget per commit.** The default budget is **three** Fold/Defer/Defer-commit/Squash/Squash-cluster/Align/Remove attempts on the same source commit (counted across **all** positions it has been tried at, including the original position before a Defer-commit and the landing position after, including the pre-squash and post-squash states for a Squash, and including each commit's position within a Squash-cluster attempt). If the build is still failing after the third attempt, stop and ask the engineer whether to raise the cap or stop at the current last buildable commit.
 
-   **Per-commit-type budget tuning.** The default may be tuned by source-commit pattern, per the Run envelope (Prepare step 11):
+   **No upfront tuning.** Do not tune attempt budgets by commit type during Prepare. All build-required commits start with the same hard 3-attempt cap. If the cap is reached on a concrete commit, the engineer may then grant a scoped waiver for that commit, a named cluster, or the rest of the run.
 
-   - `Import X.patch` style commits: default budget = 1. Almost always need cluster-level treatment, not per-commit iteration.
-   - Single-file `Fix bug N` style commits: default budget = 5. Often resolve with 1–2 forward-folds.
-   - Already-failed commit retried after a dependency lands: default budget = 3.
-   - MTR-test-only no-build commits: default budget = 0 (cherry-pick clean or skip).
-
-   **Engineer-tunable cap.** The engineer may increase or lift the cap explicitly in the current conversation, scoped to either (a) all subsequent attempts in the run, (b) a specific named cluster, or (c) a specific named commit. Record each engineer waiver in the ledger's **engineer-waivers** section with timestamp, scope, and verbatim quote. If a commit is about to exceed its budget and the run envelope allows it, the model **must** ask the engineer for a budget increase before continuing — do not silently iterate past the cap. The iteration cap exists to prevent unbounded reasoning toward forbidden actions and to prevent commits from being bounced forward indefinitely; lifting it must be explicit.
+   **Engineer-tunable cap.** The engineer may increase or lift the cap explicitly in the current conversation only after the cap is reached on a concrete commit or after a named cluster requires approval. The waiver may be scoped to either (a) all subsequent attempts in the run, (b) a specific named cluster, or (c) a specific named commit. Record each engineer waiver in the ledger's **engineer-waivers** section with timestamp, scope, and verbatim quote. When a commit reaches its hard 3-attempt cap without a passing build, the model **must** stop and ask the engineer whether to raise the cap or stop at the current last buildable commit — do not silently iterate past the cap. The iteration cap exists to prevent unbounded reasoning toward forbidden actions and to prevent commits from being bounced forward indefinitely; lifting it must be explicit.
 
 7. Rewrite only the current replayed commit after the fix. **Exception**: for the first Group 8 marker checkpoint build, compilation fixes must be committed as new `[compilation]` commit(s) immediately before preserving the `==================== MARKER: GROUP 8 — Upstream bug fixes ====================` marker itself. Do not alter already build-verified earlier commits.
 8. Rebuild and verify the commit passes before applying the next build-required commit.
@@ -809,17 +778,11 @@ Write `$REPORT_FILE` in markdown. It must include:
 - The pre-flight readback, reproduced verbatim, with the timestamp at which it was produced.
 - A "Violations encountered" section that explicitly states either `none` or lists every violation with HP-rule, location in the run, and remediation status. The "none" attestation is **mandatory** even when no violations occurred; an absent attestation is itself a reporting violation.
 
-### Run envelope (Prepare step 11)
+### Run envelope
 
-- The effort-budget envelope selected by the engineer (per-commit-only with hard cap / per-commit-only tunable / per-commit + cluster-squash / full convergence).
-- Default attempt-budget caps by commit-type (or the engineer's override).
+- The starting effort-budget envelope: `per-commit-only, hard 3-attempt cap` unless an engineer waiver has already been granted after a concrete cap-reached stop.
+- The default hard 3-attempt cap, and any later engineer override granted after a concrete cap-reached stop.
 - Any engineer waivers granted during the run, with timestamp and verbatim quote (referenced from the engineer-waivers ledger section).
-
-### Phase B cluster manifest (Prepare step 10)
-
-- The full `clusters.tsv` content, or pointer to it under `$RUN_DIR`.
-- For each cluster: cluster_name, idx_range, member_count, shared_symbols, suggested_action, and engineer pre-approval status (approved / declined / deferred-to-classifier-time).
-- The symbol-index summary: total symbols, count of forward-dep edges, distribution of edge length (target_idx − source_idx).
 
 ### Per-applied-commit
 
@@ -855,10 +818,9 @@ Write `$REPORT_FILE` in markdown. It must include:
 - **Deferred-commits ledger**: every whole commit postponed under §6 Defer-commit, with original index/SHA, original subject, landing index/SHA, the motivating build failure, the dependency the landing commit provides, the new `$OUTPUT_BRANCH` SHA assigned at the landing position, the per-commit build log path at that SHA, and the build PASS result. Explicit attestation that bounds (a)–(g) in §6 were honored: specific named landing position, no transitive deferral, intervening commits remained buildable, bucket/build requirements preserved, at most one Defer-commit per source commit, ledger entry recorded, and convergence verified at Final Parity (i.e., the ledger is empty by Final Parity time). If any Defer-commit decision was reversed because an intervening commit failed to build for lack of the deferred content, record the reversal SHA, the intervening commit's index/SHA, and the alternative action chosen.
 - **Forward-folded-hunks ledger**: every hunk forward-folded from a later source-list commit into an earlier commit's build-fix under §6 Fold's forward-fold bounds. Per entry: later-source idx/SHA, target earlier idx/SHA on `$OUTPUT_BRANCH`, folded file paths/hunks, the build failure that motivated the fold, the build log path at the target SHA with PASS result, and (when the later-source commit is reached in the replay) whether it was skipped per rule 14 (fully empty after subtraction) or cherry-picked normally with its own build. Explicit attestation that bounds (a)–(e) were honored: one named later source per fold, minimal hunks, ledger entry recorded, no bulk many-to-one pattern, no build-of-record laundering across multiple later commits. Also record, for the run as a whole, whether forward-fold was chosen over REFERENCE-fold (and why) on each Fold-action commit; the preference order in §6 Fold makes REFERENCE-fold the fallback.
 - **Squashed-commits ledger**: every Squash applied under §6 Squash, with both original SHAs/subjects, the combined SHA on `$OUTPUT_BRANCH`, the build log path at the combined SHA with PASS result, the motivating build failure, and the quantitative justification for "most of N+1 was needed for N." Explicit attestation that bounds (a)–(h) were honored: exactly two adjacent source commits, specific quantitative justification, mechanics performed without HP-1-forbidden commands, single build at the combined SHA, no skipped builds for the absorbed commit, at most one Squash per source commit, ledger entry recorded, N+1's source-list cursor position skipped.
-- **Squashed-clusters ledger**: every Squash-cluster applied under §6 Squash-cluster, with cluster name, full member list (idx, sha, subject), combined SHA on `$OUTPUT_BRANCH`, build log path with PASS result, motivating classifier output (`CLUSTER-BLOCKED` for which symbols), and verbatim engineer-approval quote from the current conversation. Explicit attestation that bounds (a)–(i) were honored: Phase B manifest entry exists, engineer approval is current-conversation and names members, all-or-none, landing at earliest member position, single build at combined SHA, HP-8 cross-check across union of paths, no nested cluster squash, ledger entry recorded, engineer-approval quote captured.
+- **Squashed-clusters ledger**: every Squash-cluster applied under §6 Squash-cluster, with cluster name, full member list (idx, sha, subject), dependency evidence, combined SHA on `$OUTPUT_BRANCH`, build log path with PASS result, motivating classifier output (`MULTI-COMMIT-CLUSTER` for which symbols/errors), and verbatim engineer-approval quote from the current conversation. Explicit attestation that bounds (a)–(i) were honored: concrete dependency evidence recorded, engineer approval is current-conversation and names or directly acknowledges the full member list, all-or-none, landing at earliest member position, single build at combined SHA, HP-8 cross-check across union of paths, no nested cluster squash, ledger entry recorded, engineer-approval quote captured.
 - **Applied-equivalents ledger**: every source-list commit whose content landed on `$OUTPUT_BRANCH` with modifications (forward-fold, Align, partial-hunk, squash component). Per entry: source idx/SHA, new SHA on `$OUTPUT_BRANCH`, modification kind, and pointer to the ledger row recording the actual landing. This shields these commits from false-positive re-attempt by patch-id-based still-deferred derivation across continuation sessions.
-- **Engineer-waivers ledger**: every engineer waiver granted during the run. Per entry: timestamp, scope (run-wide / cluster-named / commit-named), rule relaxed (e.g. attempt-cap raised from 3 to N, transitive deferral allowed, cluster pre-approved), and verbatim quote from the engineer's current-conversation message.
-- **Phase B cluster manifest**: the `clusters.tsv` content with per-cluster status (manifest-only / approved / declined / used). For each `used` entry, cross-reference the squashed-clusters ledger row.
+- **Engineer-waivers ledger**: every engineer waiver granted during the run. Per entry: timestamp, scope (run-wide / cluster-named / commit-named), rule relaxed (e.g. attempt-cap raised from 3 to N, transitive deferral allowed, cluster squash approved), and verbatim quote from the engineer's current-conversation message.
 - **Build-driven fixes**: every folded declaration/member/enum, reference-aligned hunk set, removed source-only file or CMake entry, and the build error it fixed.
 - **Reordering**: any reordering relative to chronological order, with the specific conflict that motivated it.
 - **Bucket classification**: bucket per commit, batching decisions, and any mis-bucket corrections.
@@ -882,19 +844,19 @@ Stop and ask the engineer whenever any of the following is **even arguably** the
 - A dependency cascade cannot be isolated into targeted hunks within the current commit's own changed paths plus a small set of direct-dependency headers.
 - A conflict, cascade, or build failure appears to require whole-file or whole-tree reference replacement. Prior reports, memory, rerere, helper-script presence, and model recollection do not constitute approval; stop unless the engineer has explicitly approved the exact file path and reason in the **current conversation**, after this skill was loaded.
 - A commit cannot be made buildable within the configured attempt budget (default three) of Fold / Defer / Defer-commit / Squash / Squash-cluster / Align / Remove attempts, counted across all positions it has been tried at, and the engineer has not approved an explicit cap increase in the current conversation (see §6 step 6 Attempt budget).
-- A commit remains non-buildable after minimal forward-fold and/or REFERENCE-fold, bounded hunk deferral, a single Defer-commit to a specific named landing position, a single Squash with a specifically named adjacent later commit, and (if the cluster qualifies and is engineer-approved) Squash-cluster.
+- A commit remains non-buildable after minimal forward-fold and/or REFERENCE-fold, bounded hunk deferral, a single Defer-commit to a specific named landing position, a single Squash with a specifically named adjacent later commit, and (if concrete dependency evidence supports it and the engineer approves the full member list) Squash-cluster.
 - The §6 step 3 classifier reports `INVARIANT-BREAK` and the proposed action is a single-symbol forward-fold — verify the surrounding invariant first or escalate to Squash/Squash-cluster.
-- The classifier reports `CLUSTER-BLOCKED` and either (a) the cluster has not been engineer-approved for Squash-cluster, (b) the run envelope (Prepare step 11) excludes Squash-cluster, or (c) the cluster has no Phase B manifest entry.
+- The classifier reports `MULTI-COMMIT-CLUSTER` and the engineer has not approved Squash-cluster for the full named member list in the current conversation.
 - A Defer-commit would require transitively deferring any other commit, would lack a specific named landing position, or has already been Defer-committed once before (the second-defer ban in §6 bound (e)).
 - A previously deferred commit's intervening commits fail to build because of missing deferred content — the original Defer-commit decision was wrong.
 - A Forward-fold would require absorbing hunks from multiple later source-list commits into a single earlier fix (HP-2 bulk forward-fold ban). The legitimate alternatives are: multiple separate one-to-one forward-folds (each ledger-bookkept), a Squash (for the case where most of one adjacent commit is needed), a Defer-commit (move the current commit forward), or Stop.
 - A Squash would absorb more than one later commit, would not satisfy the "most of N+1 needed for N to build" quantitative justification, or would chain with another Squash on the same source commit.
-- A Squash-cluster is being considered but the cluster is not in the Phase B manifest, the engineer has not approved this specific cluster in the current conversation, or the cluster members are not all squash-eligible (e.g. one is itself a previously-squashed combined commit).
+- A Squash-cluster is being considered but concrete dependency evidence has not been recorded, the engineer has not approved this specific cluster in the current conversation, or the cluster members are not all squash-eligible (e.g. one is itself a previously-squashed combined commit).
 - Final Parity is reached while the deferred-hunks/commits/forward-folds/squashes/clusters/applied-equivalents ledger still contains an unclosed entry.
 - The required toolchain or build dependencies are unavailable.
 - The Group 8 marker is missing from the source list.
 - A required post-Group-8 build was skipped and any later commit was applied.
-- A build-driven fix does not clearly map to Fold (forward-fold or REFERENCE-fold), Defer (hunk), Defer-commit (whole-commit), Squash (absorb one adjacent later commit), Squash-cluster (Phase-B-manifest, engineer-approved), Align, or Remove.
+- A build-driven fix does not clearly map to Fold (forward-fold or REFERENCE-fold), Defer (hunk), Defer-commit (whole-commit), Squash (absorb one adjacent later commit), Squash-cluster (concrete dependency evidence, engineer-approved), Align, or Remove.
 - The final null-diff tree fails the required build.
 - You catch yourself reasoning toward any HP-rule violation.
 - You catch yourself reasoning toward "this commit's subject indicates X, so I'll handle it differently" — the only subject-based check is the marker preservation rule (one-or-more `=` followed by ` MARKER:`) (HP-7).
@@ -913,17 +875,17 @@ Do not propose options that would require an HP-rule violation. Do not present "
 
 ### Asking the engineer to raise or lift the attempt cap
 
-When a commit's per-commit fixes are converging but the default 3-attempt cap is about to be exhausted, the model **must** ask the engineer for an explicit cap increase before continuing. The ask is short and structured — do not silently iterate past the cap.
+When a commit reaches the hard 3-attempt cap without a passing build, the model **must** ask the engineer for an explicit cap increase before continuing. Do not ask at the beginning of the run, and do not ask preemptively at `cap - 1`. The ask is short and structured — do not silently iterate past the cap.
 
 When to ask:
 
-- The current commit has used `cap - 1` attempts (one remaining).
-- The current attempt's build failed with a new error layer (not a repeat of a prior layer), AND
-- The new layer's classifier output (§6 step 3) is `FUTURE-FOLD-CANDIDATE` for a single named later commit, OR `CLUSTER-BLOCKED` for a cluster the engineer pre-approved at Phase B.
+- The current commit has used `cap` attempts and still does not build.
+- The most recent attempt's build failed with either a new error layer or a concrete plateau that needs an engineer decision, AND
+- The classifier output (§6 step 3) identifies a viable next action such as `FUTURE-FOLD-CANDIDATE`, `MULTI-COMMIT-CLUSTER`, Align, Defer, or Squash that would require more attempts than the current cap allows.
 
 The ask format:
 
-> Commit idx N (`<short subject>`) is at attempt `cap-1`. The remaining error is `<symbol-or-error>`, classified `<FUTURE-FOLD-CANDIDATE / CLUSTER-BLOCKED>`, expected to need `<K>` more fold-or-align operations. Raise the cap to `cap+K`, or stop at the current attempt?
+> Commit idx N (`<short subject>`) reached the hard cap of `cap` attempts. The remaining error is `<symbol-or-error>`, classified `<next-action>`, expected to need `<K>` more attempt(s). Raise the cap to `cap+K`, approve a named cluster action, or stop at the current last buildable commit?
 
 The engineer's response goes into the engineer-waivers ledger with timestamp and verbatim quote. If the engineer declines, choose Stop at the cap. Do not ask again for the same commit unless a new symbol/cluster context emerges.
 

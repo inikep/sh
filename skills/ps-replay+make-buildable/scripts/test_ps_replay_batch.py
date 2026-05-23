@@ -9,15 +9,18 @@ import ps_replay_batch
 
 
 class ArgumentParsingTests(unittest.TestCase):
-    def test_group7_marker_is_default_boundary(self):
+    def test_group8_marker_is_default_boundary(self):
         argv = ["ps_replay_batch.py", "--source-list", "list.txt", "--start", "1", "--end", "1"]
         with patch("sys.argv", argv):
             args = ps_replay_batch.parse_args()
 
-        self.assertEqual(args.group7_marker, "=== MARKER: GROUP 7 — Remaining ===")
-        self.assertFalse(args.allow_missing_group7_marker)
+        self.assertEqual(
+            args.group8_marker,
+            "==================== MARKER: GROUP 8 — Upstream bug fixes ====================",
+        )
+        self.assertFalse(args.allow_missing_group8_marker)
 
-    def test_legacy_group6_options_remain_aliases(self):
+    def test_legacy_group7_options_remain_aliases(self):
         argv = [
             "ps_replay_batch.py",
             "--source-list",
@@ -26,15 +29,15 @@ class ArgumentParsingTests(unittest.TestCase):
             "1",
             "--end",
             "1",
-            "--group6-marker",
+            "--group7-marker",
             "legacy marker",
-            "--allow-missing-group6-marker",
+            "--allow-missing-group7-marker",
         ]
         with patch("sys.argv", argv):
             args = ps_replay_batch.parse_args()
 
-        self.assertEqual(args.group7_marker, "legacy marker")
-        self.assertTrue(args.allow_missing_group7_marker)
+        self.assertEqual(args.group8_marker, "legacy marker")
+        self.assertTrue(args.allow_missing_group8_marker)
 
 
 class SubjectLoadingTests(unittest.TestCase):
@@ -44,7 +47,7 @@ class SubjectLoadingTests(unittest.TestCase):
             sha: f"subject {idx}"
             for idx, sha in enumerate(commits, start=1)
         }
-        subjects_by_sha["sha-45"] = "=== MARKER: GROUP 7 — Remaining ==="
+        subjects_by_sha["sha-45"] = "==================== MARKER: GROUP 8 — Upstream bug fixes ===================="
         calls = []
 
         def lookup(_worktree: Path, sha: str) -> str:
@@ -52,7 +55,12 @@ class SubjectLoadingTests(unittest.TestCase):
             return subjects_by_sha[sha]
 
         subjects, marker_index = ps_replay_batch.load_subjects(
-            Path("."), commits, 1, 70, "=== MARKER: GROUP 7 — Remaining ===", lookup
+            Path("."),
+            commits,
+            1,
+            70,
+            "==================== MARKER: GROUP 8 — Upstream bug fixes ====================",
+            lookup,
         )
 
         self.assertEqual(marker_index, 45)
@@ -65,7 +73,7 @@ class SubjectLoadingTests(unittest.TestCase):
             sha: f"subject {idx}"
             for idx, sha in enumerate(commits, start=1)
         }
-        subjects_by_sha["sha-45"] = "=== MARKER: GROUP 7 — Remaining ==="
+        subjects_by_sha["sha-45"] = "==================== MARKER: GROUP 8 — Upstream bug fixes ===================="
         calls = []
 
         def lookup(_worktree: Path, sha: str) -> str:
@@ -73,7 +81,12 @@ class SubjectLoadingTests(unittest.TestCase):
             return subjects_by_sha[sha]
 
         subjects, marker_index = ps_replay_batch.load_subjects(
-            Path("."), commits, 150, 155, "=== MARKER: GROUP 7 — Remaining ===", lookup
+            Path("."),
+            commits,
+            150,
+            155,
+            "==================== MARKER: GROUP 8 — Upstream bug fixes ====================",
+            lookup,
         )
 
         self.assertEqual(marker_index, 45)
@@ -86,7 +99,7 @@ class SubjectLoadingTests(unittest.TestCase):
             sha: f"subject {idx}"
             for idx, sha in enumerate(commits, start=1)
         }
-        subjects_by_sha["sha-45"] = "=== MARKER: GROUP 7 — Remaining ==="
+        subjects_by_sha["sha-45"] = "==================== MARKER: GROUP 8 — Upstream bug fixes ===================="
         calls = []
 
         def lookup(_worktree: Path, sha: str) -> str:
@@ -94,7 +107,12 @@ class SubjectLoadingTests(unittest.TestCase):
             return subjects_by_sha[sha]
 
         subjects, marker_index = ps_replay_batch.load_subjects(
-            Path("."), commits, 1, 40, "=== MARKER: GROUP 7 — Remaining ===", lookup
+            Path("."),
+            commits,
+            1,
+            40,
+            "==================== MARKER: GROUP 8 — Upstream bug fixes ====================",
+            lookup,
         )
 
         self.assertEqual(marker_index, 45)
@@ -103,7 +121,7 @@ class SubjectLoadingTests(unittest.TestCase):
 
 
 class BuildPolicyTests(unittest.TestCase):
-    def test_forced_pre_group7_no_build_never_builds_at_fence(self):
+    def test_forced_pre_group8_no_build_never_builds_at_fence(self):
         class Args:
             build_policy = "bucketed"
             nobuild_fence_size = 5
@@ -117,7 +135,7 @@ class BuildPolicyTests(unittest.TestCase):
         )
 
         self.assertFalse(build_now)
-        self.assertEqual(reason, "pre-group7-no-build-exempt")
+        self.assertEqual(reason, "pre-group8-no-build-exempt")
 
     def test_bucketed_source_commit_builds_immediately(self):
         class Args:
@@ -156,6 +174,15 @@ class ClassifyPathsTests(unittest.TestCase):
     def test_marker_subject_is_empty_marker(self):
         self.assertEqual(
             ps_replay_batch.classify_paths(["sql/sql_acl.cc"], "=== MARKER: GROUP 7 — foo"),
+            "empty-marker",
+        )
+
+    def test_wide_marker_subject_is_empty_marker(self):
+        self.assertEqual(
+            ps_replay_batch.classify_paths(
+                ["sql/sql_acl.cc"],
+                "==================== MARKER: GROUP 8 — Upstream bug fixes ====================",
+            ),
             "empty-marker",
         )
 

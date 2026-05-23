@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""Cherry-pick a bounded source range and build without snap-to-reference.
+"""Cherry-pick a bounded source range under ps-replay+make-buildable rules.
 
-Every non-marker source-range commit before the Group 7 marker is forced into
-the no-build bucket. Empty marker commits are preserved without a build because
-they change no tree content. After the Group 7 marker, each non-marker commit
-is verified immediately; source/plugin/build-system commits must never be
-deferred to a later catch-up or reconciliation build.
+Every non-marker source-range commit before the Group 8 marker is forced into
+the no-build bucket. The Group 8 marker is a checkpoint: build before
+preserving it as an empty marker commit. After Group 8, source/plugin commits
+are staged with --no-commit, HP-8 checked, committed, and built immediately.
+Post-Group-8 no-build batches are build-checked at batch boundaries.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -24,12 +25,14 @@ DEFAULT_CMAKE_FLAGS = [
     "-DDOWNLOAD_BOOST=1",
     "-DWITH_BOOST=/tmp/boost",
     "-DWITHOUT_TOKUDB=1",
+    "-DWITH_ROCKSDB=OFF",
     "-DENABLE_DOWNLOADS=1",
     "-DWITH_READLINE=system",
     "-DCMAKE_C_COMPILER_LAUNCHER=ccache",
     "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache",
 ]
-GROUP7_MARKER_SUBJECT = "=== MARKER: GROUP 7 — Remaining ==="
+GROUP8_MARKER_SUBJECT = "==================== MARKER: GROUP 8 — Upstream bug fixes ===================="
+MARKER_RE = re.compile(r"^\s*=+\sMARKER:")
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,46 +48,47 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-dir", type=Path)
     parser.add_argument("--report-file", type=Path)
     parser.add_argument(
+        "--group8-marker",
+        dest="group8_marker",
+        default=GROUP8_MARKER_SUBJECT,
+        help="Exact Group 8 marker subject that starts post-boundary build verification.",
+    )
+    parser.add_argument(
         "--group7-marker",
-        dest="group7_marker",
-        default=GROUP7_MARKER_SUBJECT,
-        help="Exact Group 7 marker subject that starts post-boundary build verification.",
+        dest="group8_marker",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--group6-marker",
-        dest="group7_marker",
+        dest="group8_marker",
         help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--allow-missing-group8-marker",
+        dest="allow_missing_group8_marker",
+        action="store_true",
+        help="Diagnostic escape hatch: do not fail if the Group 8 marker is absent from the source list.",
     )
     parser.add_argument(
         "--allow-missing-group7-marker",
-        dest="allow_missing_group7_marker",
-        action="store_true",
-        help="Diagnostic escape hatch: do not fail if the Group 7 marker is absent from the source list.",
-    )
-    parser.add_argument(
-        "--allow-missing-group6-marker",
-        dest="allow_missing_group7_marker",
+        dest="allow_missing_group8_marker",
         action="store_true",
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
-        "--build-server-command",
-        help=(
-            "Shell command used after the Group 7 marker for each non-marker commit. "
-            "Receives the following environment variables: "
-            "PS_REPLAY_WORKTREE, PS_REPLAY_BUILD_DIR, PS_REPLAY_LOG_DIR, "
-            "PS_REPLAY_SOURCE_INDEX, PS_REPLAY_SOURCE_SHA, PS_REPLAY_OUTPUT_SHA, "
-            "PS_REPLAY_SUBJECT. Use ${VAR} syntax (with braces) when interpolating "
-            "into log paths to avoid shell-parsing surprises."
-        ),
+        "--allow-missing-group6-marker",
+        dest="allow_missing_group8_marker",
+        action="store_true",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--build-policy",
         choices=("always", "bucketed"),
-        default="always",
+        default="bucketed",
         help=(
-            "Pre-Group-7 commits are always forced into the no-build bucket. "
-            "After Group 7, every non-marker commit is verified immediately."
+            "Pre-Group-8 commits are always forced into the no-build bucket. "
+            "After Group 8, source/plugin commits build immediately; no-build "
+            "batches build at fences."
         ),
     )
     parser.add_argument(
@@ -98,8 +102,8 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Print TSV commit bucket classification for the selected range and exit "
-            "without modifying the worktree. The forced_pre_group7 column is yes "
-            "when the no-build bucket came from the Group 7 boundary override."
+            "without modifying the worktree. The forced_pre_group8 column is yes "
+            "when the no-build bucket came from the Group 8 boundary override."
         ),
     )
     parser.add_argument(
@@ -144,13 +148,13 @@ SOURCE_EXTENSIONS = (
     ".cmake",
 )
 NOBUILD_PREFIXES = (
-    "Docs/",
     "build-ps/",
-    "doc/",
+    "docs/",
     "man/",
     "mysql-test/",
+    "debian/",
+    "rpm/",
     "packaging/",
-    "policy/",
 )
 NOBUILD_EXACT = {
     ".bzrignore",
@@ -226,7 +230,7 @@ def changed_paths(worktree: Path, sha: str) -> list[str]:
 
 
 def is_marker_subject(subject: str) -> bool:
-    return subject.upper().startswith("=== MARKER:")
+    return bool(MARKER_RE.match(subject))
 
 
 def has_source_extension(path: str) -> bool:
@@ -265,7 +269,9 @@ def is_no_build_path(path: str) -> bool:
         path in NOBUILD_EXACT
         or path.startswith(NOBUILD_PREFIXES)
         or "/mysql-test/" in path
-        or path.endswith((".md", ".rst", ".1", ".8"))
+        or path.endswith((".md", ".rst", ".1", ".8", ".result", ".spec"))
+        or ".spec." in path
+        or (path.startswith("scripts/") and not path.lower().endswith(".cmake"))
     )
 
 
@@ -341,40 +347,6 @@ def run_build(args: argparse.Namespace, idx: int, sha: str) -> tuple[int, Path]:
         return make.returncode, log
 
 
-def run_build_server(args: argparse.Namespace, idx: int, source_sha: str, output_sha: str, subject: str) -> tuple[int, Path]:
-    if args.build_server_command is None or args.log_dir is None:
-        raise RuntimeError("build-server-command and log-dir are required after the Group 7 marker")
-
-    args.log_dir.mkdir(parents=True, exist_ok=True)
-    log = args.log_dir / f"build-server-{idx}-{output_sha[:12]}.log"
-    env = {
-        **os.environ,
-        "PS_REPLAY_WORKTREE": str(args.worktree.resolve()),
-        "PS_REPLAY_BUILD_DIR": str(args.build_dir.resolve()) if args.build_dir else "",
-        "PS_REPLAY_LOG_DIR": str(args.log_dir.resolve()),
-        "PS_REPLAY_SOURCE_INDEX": str(idx),
-        "PS_REPLAY_SOURCE_SHA": source_sha,
-        "PS_REPLAY_OUTPUT_SHA": output_sha,
-        "PS_REPLAY_SUBJECT": subject,
-    }
-    with log.open("w") as fh:
-        fh.write(f"source_index={idx}\n")
-        fh.write(f"source_sha={source_sha}\n")
-        fh.write(f"output_sha={output_sha}\n")
-        fh.write(f"subject={subject}\n")
-        fh.write("$ " + args.build_server_command + "\n\n")
-        proc = subprocess.run(
-            args.build_server_command,
-            cwd=args.worktree,
-            shell=True,
-            text=True,
-            stdout=fh,
-            stderr=subprocess.STDOUT,
-            env=env,
-        )
-    return proc.returncode, log
-
-
 def should_build(
     args: argparse.Namespace,
     bucket: str,
@@ -387,7 +359,7 @@ def should_build(
     if bucket == "empty":
         return False, "empty-no-tree-change"
     if forced_nobuild:
-        return False, "pre-group7-no-build-exempt"
+        return False, "pre-group8-no-build-exempt"
     if args.build_policy == "always":
         return True, "policy-always"
     if bucket in {"source", "plugin"}:
@@ -399,6 +371,37 @@ def should_build(
     return False, f"defer-{bucket}"
 
 
+def source_or_plugin_path(path: str) -> bool:
+    return (
+        has_source_extension(path)
+        or path in SOURCE_EXACT
+        or path.startswith(SOURCE_PREFIXES)
+        or path.startswith("plugin/")
+    )
+
+
+def hp8_check_staged_paths(
+    worktree: Path,
+    source_paths: list[str],
+    idx: int,
+    sha: str,
+    report_file: Path | None,
+) -> bool:
+    expected = sorted(path for path in source_paths if source_or_plugin_path(path))
+    staged = set(out(worktree, ["diff", "--cached", "--name-only"]).splitlines())
+    missing = [path for path in expected if path not in staged]
+    if missing:
+        message = (
+            f"- Commit {idx}: `{sha}` HP-8 staged-paths check failed; "
+            f"missing source/plugin paths from staged tree: `{', '.join(missing)}`."
+        )
+        append(report_file, message)
+        print(message, flush=True)
+        return False
+    append(report_file, f"- Commit {idx}: HP-8 staged-paths check PASS.")
+    return True
+
+
 def main() -> int:
     args = parse_args()
     args.worktree = args.worktree.resolve()
@@ -406,34 +409,34 @@ def main() -> int:
     if args.start < 1 or args.end > len(commits) or args.start > args.end:
         raise SystemExit(f"invalid range {args.start}-{args.end} for {len(commits)} commits")
 
-    subjects, group7_index = load_subjects(
+    subjects, group8_index = load_subjects(
         args.worktree,
         commits,
         args.start,
         args.end,
-        args.group7_marker,
+        args.group8_marker,
     )
-    if group7_index is None and not args.allow_missing_group7_marker:
+    if group8_index is None and not args.allow_missing_group8_marker:
         raise SystemExit(
-            f"required marker not found in source list: {args.group7_marker}\n"
+            f"required marker not found in source list: {args.group8_marker}\n"
             "Ask the engineer whether to continue without the boundary, use a different marker, "
             "or change the build policy."
         )
 
     classified: dict[int, tuple[str, list[str]]] = {}
-    forced_pre_group7: set[int] = set()
+    forced_pre_group8: set[int] = set()
     for idx in range(args.start, args.end + 1):
         sha = commits[idx - 1]
         subject = subjects[idx]
         paths = changed_paths(args.worktree, sha)
-        if group7_index is not None and idx < group7_index and not is_marker_subject(subject):
+        if group8_index is not None and idx < group8_index and not is_marker_subject(subject):
             bucket = "no-build"
-            forced_pre_group7.add(idx)
+            forced_pre_group8.add(idx)
         else:
             bucket = classify_paths(paths, subject)
         classified[idx] = (bucket, paths)
         if args.classify_only:
-            forced = "yes" if idx in forced_pre_group7 else "no"
+            forced = "yes" if idx in forced_pre_group8 else "no"
             print(f"{idx}\t{sha}\t{bucket}\t{forced}\t{subject}\t{','.join(paths)}")
 
     if args.classify_only:
@@ -448,12 +451,6 @@ def main() -> int:
         )
         if value is None
     ]
-    post_group7_in_range = (
-        group7_index is not None
-        and any(idx > group7_index and not is_marker_subject(subjects[idx]) for idx in range(args.start, args.end + 1))
-    )
-    if post_group7_in_range and not args.build_server_command:
-        missing.append("--build-server-command")
     if missing:
         raise SystemExit(f"replay requires: {', '.join(missing)}")
 
@@ -462,23 +459,36 @@ def main() -> int:
         raise SystemExit(f"refusing to start with dirty worktree:\n{status}")
 
     append(args.report_file, f"\n## Replay batch {args.start}-{args.end}")
-    if group7_index is not None:
-        append(args.report_file, f"- Group 7 marker found at source index {group7_index}: `{args.group7_marker}`.")
-        append(args.report_file, "- All non-marker commits before Group 7 are forced into the no-build bucket.")
+    if group8_index is not None:
+        append(args.report_file, f"- Group 8 marker found at source index {group8_index}: `{args.group8_marker}`.")
+        append(args.report_file, "- All non-marker commits before Group 8 are forced into the no-build bucket.")
     else:
-        append(args.report_file, f"- Group 7 marker not found; missing marker allowed for this diagnostic run.")
+        append(args.report_file, "- Group 8 marker not found; missing marker allowed for this diagnostic run.")
 
     consecutive_nobuild = 0
     for idx in range(args.start, args.end + 1):
         sha = commits[idx - 1]
         subject = subjects[idx]
-        bucket, _paths = classified[idx]
-        post_group7 = group7_index is not None and idx > group7_index and not is_marker_subject(subject)
+        bucket, source_paths = classified[idx]
+        at_group8 = group8_index is not None and idx == group8_index and subject == args.group8_marker
+        post_group8 = group8_index is not None and idx > group8_index and not is_marker_subject(subject)
         print(f"[{idx}/{len(commits)}] cherry-pick {sha[:12]} [{bucket}] {subject}", flush=True)
+
+        if at_group8:
+            print(f"[{idx}/{len(commits)}] Group 8 checkpoint build before marker", flush=True)
+            rc, log = run_build(args, idx, sha)
+            if rc != 0:
+                append(args.report_file, f"- Group 8 checkpoint build result: FAIL (exit {rc}); log `{log}`.")
+                print(f"[{idx}/{len(commits)}] checkpoint build failed, log {log}", flush=True)
+                return 4
+            append(args.report_file, f"- Group 8 checkpoint build result: PASS; log `{log}`.")
+            print(f"[{idx}/{len(commits)}] checkpoint build passed", flush=True)
 
         pick_args = ["cherry-pick"]
         if bucket == "empty-marker":
             pick_args.append("--allow-empty")
+        elif post_group8 and bucket in {"source", "plugin"}:
+            pick_args.append("--no-commit")
         pick_args.append(sha)
         pick = git(args.worktree, pick_args, check=False)
         apply_status = "clean"
@@ -518,25 +528,28 @@ def main() -> int:
         if bucket == "empty-marker" and apply_status == "clean":
             apply_status = "preserved-empty-marker"
 
+        if post_group8 and bucket in {"source", "plugin"}:
+            if git(args.worktree, ["diff", "--cached", "--quiet"], check=False).returncode == 0:
+                append(args.report_file, f"- Commit {idx}: `{sha}` skipped as empty after staging (`{subject}`).")
+                print(f"[{idx}/{len(commits)}] skipped empty after staging", flush=True)
+                git(args.worktree, ["reset", "--hard", "HEAD"], check=False)
+                continue
+            if not hp8_check_staged_paths(args.worktree, source_paths, idx, sha, args.report_file):
+                return 5
+            commit = git(args.worktree, ["commit", "-C", sha], check=False)
+            if commit.returncode != 0:
+                print(commit.stdout, end="")
+                append(args.report_file, f"- Commit {idx}: `{sha}` failed to commit after HP-8 check (`{subject}`).")
+                return 6
+            apply_status = "staged-hp8-checked"
+
         new_full_sha = out(args.worktree, ["rev-parse", "HEAD"])
         new_sha = new_full_sha[:12]
-        forced_note = "; forced pre-Group-7 no-build: yes" if idx in forced_pre_group7 else ""
+        forced_note = "; forced pre-Group-8 no-build: yes" if idx in forced_pre_group8 else ""
         append(
             args.report_file,
             f"- Commit {idx}: `{sha}` -> `{new_sha}` `{subject}`; bucket: {bucket}{forced_note}; apply status: {apply_status}.",
         )
-
-        if post_group7:
-            print(f"[{idx}/{len(commits)}] build-server start {new_sha}", flush=True)
-            rc, log = run_build_server(args, idx, sha, new_full_sha, subject)
-            if rc != 0:
-                append(args.report_file, f"- Commit {idx} build-server result: FAIL (exit {rc}); log `{log}`.")
-                print(f"[{idx}/{len(commits)}] build-server failed, log {log}", flush=True)
-                return 4
-            append(args.report_file, f"- Commit {idx} build-server result: PASS; log `{log}`.")
-            print(f"[{idx}/{len(commits)}] build-server passed", flush=True)
-            consecutive_nobuild = 0
-            continue
 
         if bucket == "no-build":
             consecutive_nobuild += 1
@@ -548,7 +561,7 @@ def main() -> int:
             bucket,
             consecutive_nobuild,
             idx == args.end or classified[idx + 1][0] != "no-build",
-            idx in forced_pre_group7,
+            idx in forced_pre_group8,
         )
         if not build_now:
             append(args.report_file, f"- Commit {idx} build result: deferred by bucket policy ({build_reason}).")

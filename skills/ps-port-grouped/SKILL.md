@@ -29,24 +29,24 @@ description: Use when porting a Percona Server commit range onto an output branc
 - Before accepting broad surrounding context in a conflict or pulling BDF symbols from `$REFERENCE`, inspect the current source commit's own diff for the affected file (`git show --stat --name-only --no-ext-diff "$SHA"` and targeted `git show --unified=<N> "$SHA" -- <file>`). If the candidate context contains feature blocks, schema tables, parser tokens, status variables, typedefs, globals, or init/free hooks that are not introduced by the current source commit and are owned by a later `remaining_commits` entry, do not pull them forward. Remove or defer those blocks and record them in `deferred_changes` for the owning later commit.
 - In shared registry files (`sql/sql_yacc.yy`, `sql/sql_cmd.h`, `sql/sql_show.cc`, `sql/mysqld.cc`, `sql/handler.h`, and similar enum/table/list files), treat each token, enum value, status row, field array, schema table row, sysvar row, typedef, global, and init/free hook as a separate symbol. Pull only the entries required by the current commit. Same-file proximity is not evidence of relatedness.
 
-## Prohibitions
+## Hard Prohibitions
 
-- **P1** Do not replay the range chronologically by default.
-- **P2** Do not cherry-pick from memory or from raw `git rev-list` order once the waiting set exists.
-- **P3** Do not keep pushing through a commit that exceeds the current pass budget.
-- **P4** Do not finish a commit attempt without printing `n_conflicts`, `n_build_error`, `n_symbol_pull`, and whether the commit landed or stayed in `remaining_commits`.
-- **P5** Do not leave a known-bad build on `$OUTPUT_NAME`.
-- **P6** Do not use whole-file snaps from `$REFERENCE` unless explicitly authorized.
-- **P7** Do not use bulk ours/theirs strategies.
-- **P8** Do not use auto-take-incoming sweepers.
-- **P9** Do not silently choose empty HEAD when `$REFERENCE` still contains the incoming content.
-- **P10** Do not pull unrelated future changes during BDF.
-- **P11** Do not cherry-pick the introducing commit as a BDF shortcut; cherry-picking drags unrelated additions that cascade. Pull only the specific symbols/macros/declarations needed, or defer the feature flag that gates the broken sites.
-- **P12** Do not expand BDF indefinitely when the fix exceeds the symbol budget, cascades into more missing dependencies, or reveals an internal patch bug.
-- **P13** Do not accept unrelated later feature scaffolding just because it appears near the current conflict, in `$REFERENCE`, or in a shared registry file. If a block is not in the current source commit's own diff, it must either be required by a concrete current build error or deferred to its owning later commit.
-- **P14** Do not silently slide from pass execution into final convergence with an unexplained deferred set.
-- **P15** Do not accept a null-diff branch that builds only at the tip.
-- **P16** Do not end a pass without a `remaining_commits` report generated from `COUNTER_STATE_TSV`; a prose summary or partial list is not sufficient.
+- **HP1** Do not replay the range chronologically by default.
+- **HP2** Do not cherry-pick from memory or from raw `git rev-list` order once the waiting set exists.
+- **HP3** Do not keep pushing through a commit that exceeds the current pass budget.
+- **HP4** Do not finish a commit attempt without printing `n_conflicts`, `n_build_error`, `n_symbol_pull`, and whether the commit landed or stayed in `remaining_commits`.
+- **HP5** Do not leave a known-bad build on `$OUTPUT_NAME`.
+- **HP6** Do not use whole-file snaps from `$REFERENCE` unless explicitly authorized.
+- **HP7** Do not use bulk ours/theirs strategies.
+- **HP8** Do not use auto-take-incoming sweepers.
+- **HP9** Do not silently choose empty HEAD when `$REFERENCE` still contains the incoming content.
+- **HP10** Do not pull unrelated future changes during BDF.
+- **HP11** Do not cherry-pick the introducing commit as a BDF shortcut; cherry-picking drags unrelated additions that cascade. Pull only the specific symbols/macros/declarations needed, or defer the feature flag that gates the broken sites.
+- **HP12** Do not expand BDF indefinitely when the fix exceeds the symbol budget, cascades into more missing dependencies, or reveals an internal patch bug.
+- **HP13** Do not accept unrelated later feature scaffolding just because it appears near the current conflict, in `$REFERENCE`, or in a shared registry file. If a block is not in the current source commit's own diff, it must either be required by a concrete current build error or deferred to its owning later commit.
+- **HP14** Do not silently slide from pass execution into final convergence with an unexplained deferred set.
+- **HP15** Do not accept a null-diff branch that builds only at the tip.
+- **HP16** Do not end a pass without a `remaining_commits` report generated from `COUNTER_STATE_TSV`; a prose summary or partial list is not sufficient.
 
 ## Initial Pass
 

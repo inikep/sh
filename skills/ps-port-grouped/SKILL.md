@@ -17,7 +17,7 @@ description: Use when porting a Percona Server commit range onto an output branc
 - `n_symbol_pull` — per-commit field: number of forward symbols BDF must pull to make the current commit build in the latest attempt. This is latest-attempt scope, not cumulative across abandoned attempts.
 - `remaining_commits` — working set of `build_changing=1` commits that still need to be ported. Each entry stores the commit id, deferral history, assigned `deferred_changes`, and the latest `n_conflicts`, `n_build_error`, and `n_symbol_pull` values measured for that commit.
 - `deferred_changes` — active list of code intentionally deferred during BDF. For each entry, record the skipped hunk or symbol, why it was deferred, and the commit in `remaining_commits` that must reintroduce it. When processing that assigned commit, apply its `deferred_changes` entries before deciding whether the commit landed successfully.
-- `CDF` / `Conflict-Driven Fix` — hunk-by-hunk conflict resolution using later commits or `$REFERENCE`. Do not use whole-file snaps from `$REFERENCE` unless explicitly authorized.
+- `CDF` / `Conflict-Driven Fix` — hunk-by-hunk conflict resolution using later commits or `$REFERENCE`. `$REFERENCE` may be inspected for specific regions, but it must not be used for whole-file or whole-subtree replacement.
 - `COUNTER_STATE_TSV` — durable attempt ledger for `remaining_commits`. Store it outside the source tree, usually `/tmp/$JOB_NAME.counter-state.tsv`. Each real attempt must upsert one row with `sha`, `n_conflicts`, `n_build_error`, `n_symbol_pull`, `status`, and `subject`.
 
 ## BDF Methods
@@ -31,30 +31,34 @@ description: Use when porting a Percona Server commit range onto an output branc
 
 ## Hard Prohibitions
 
+This section is the canonical list of forbidden actions. These prohibitions are absolute for this skill; a null diff or buildable tip produced by violating them is an invalid run.
+
 - **HP1** Do not replay the range chronologically by default.
 - **HP2** Do not cherry-pick from memory or from raw `git rev-list` order once the waiting set exists.
-- **HP3** Do not keep pushing through a commit that exceeds the current pass budget.
-- **HP4** Do not finish a commit attempt without printing `n_conflicts`, `n_build_error`, `n_symbol_pull`, and whether the commit landed or stayed in `remaining_commits`.
-- **HP5** Do not leave a known-bad build on `$OUTPUT_NAME`.
-- **HP6** Do not use whole-file snaps from `$REFERENCE` unless explicitly authorized.
-- **HP7** Do not use bulk ours/theirs strategies.
-- **HP8** Do not use auto-take-incoming sweepers.
-- **HP9** Do not silently choose empty HEAD when `$REFERENCE` still contains the incoming content.
-- **HP10** Do not pull unrelated future changes during BDF.
-- **HP11** Do not cherry-pick the introducing commit as a BDF shortcut; cherry-picking drags unrelated additions that cascade. Pull only the specific symbols/macros/declarations needed, or defer the feature flag that gates the broken sites.
-- **HP12** Do not expand BDF indefinitely when the fix exceeds the symbol budget, cascades into more missing dependencies, or reveals an internal patch bug.
-- **HP13** Do not accept unrelated later feature scaffolding just because it appears near the current conflict, in `$REFERENCE`, or in a shared registry file. If a block is not in the current source commit's own diff, it must either be required by a concrete current build error or deferred to its owning later commit.
-- **HP14** Do not silently slide from pass execution into final convergence with an unexplained deferred set.
-- **HP15** Do not accept a null-diff branch that builds only at the tip.
-- **HP16** Do not end a pass without a `remaining_commits` report generated from `COUNTER_STATE_TSV`; a prose summary or partial list is not sufficient.
+- **HP3** Do not consult out-of-session prior reports, past conversations, memory entries, agent transcripts, previous run notes, or model recollection of prior decisions. Treat each run as cold. Allowed sources are the current conversation, the repository's Git history, helper scripts in this skill directory, this run's build logs, and `$REFERENCE` inspection subject to HP8.
+- **HP4** Do not classify, match, skip, remove, or mark commits as landed by subject line. Commit classification and tracking must be based on source SHAs, path-derived metadata, explicit ledgers, and real attempted cherry-pick/build outcomes.
+- **HP5** Do not keep pushing through a commit that exceeds the current pass budget.
+- **HP6** Do not finish a commit attempt without printing `n_conflicts`, `n_build_error`, `n_symbol_pull`, and whether the commit landed or stayed in `remaining_commits`.
+- **HP7** Do not leave a known-bad build on `$OUTPUT_NAME`.
+- **HP8** Do not use `$REFERENCE` as a source for whole-file, whole-subtree, or worktree-write replacement. Forbidden forms include `git checkout $REFERENCE -- <path>`, `git restore --source=$REFERENCE <path>`, `git show $REFERENCE:<path> > <path>`, `git show $REFERENCE:<path> >> <path>`, piping `git show $REFERENCE:<path>` to a worktree-write command, `git read-tree` against `$REFERENCE`, `cp`/`cat`/`tee`/`dd`/`rsync`/`install` from a `$REFERENCE` blob into the worktree, or any helper script that performs the same replacement. `git show $REFERENCE:<path>` is allowed only for human inspection or manual copying of a specific conflict-region hunk.
+- **HP9** Do not use bulk ours/theirs resolution. Forbidden forms include `git cherry-pick -X ours`, `git cherry-pick -Xours`, `git cherry-pick --strategy-option=ours`, `git cherry-pick -X theirs`, `git cherry-pick -Xtheirs`, `git cherry-pick --strategy-option=theirs`, equivalent `merge`/`rebase`/`revert`/`am` strategy options, and `git checkout --ours <path>` or `git checkout --theirs <path>` to bulk-accept a conflicted side. Cherry-picks must be plain `git cherry-pick <sha>` except for already-documented empty-commit handling.
+- **HP10** Do not use auto-take-incoming sweepers.
+- **HP11** Do not silently choose empty HEAD when `$REFERENCE` still contains the incoming content.
+- **HP12** Do not pull unrelated future changes during BDF.
+- **HP13** Do not cherry-pick the introducing commit as a BDF shortcut; cherry-picking drags unrelated additions that cascade. Pull only the specific symbols/macros/declarations needed, or defer the feature flag that gates the broken sites.
+- **HP14** Do not expand BDF indefinitely when the fix exceeds the symbol budget, cascades into more missing dependencies, or reveals an internal patch bug.
+- **HP15** Do not accept unrelated later feature scaffolding just because it appears near the current conflict, in `$REFERENCE`, or in a shared registry file. If a block is not in the current source commit's own diff, it must either be required by a concrete current build error or deferred to its owning later commit.
+- **HP16** Do not silently slide from pass execution into final convergence with an unexplained deferred set.
+- **HP17** Do not accept a null-diff branch that builds only at the tip.
+- **HP18** Do not end a pass without a `remaining_commits` report generated from `COUNTER_STATE_TSV`; a prose summary or partial list is not sufficient.
 
 ## Initial Pass
 
 - Parse commits in `$INPUT_RANGE` and compute `build_changing` for each commit.
 - Apply all `build_changing=0` commits to `$OUTPUT_NAME` first.
 - Initialize `remaining_commits` with the `build_changing=1` commits that still need to be ported. For each entry, initialize `n_conflicts=0`, `n_build_error=0`, `n_symbol_pull=0`, and an empty deferral history.
-- Initialize `COUNTER_STATE_TSV` before the first main pass. Use `scripts/record_attempt.sh` for every real commit attempt so pass-end reports do not depend on memory or chat history.
-- If the boundary build fails after the Initial Pass, use BDF to make `$OUTPUT_NAME` buildable before starting the main passes. Before editing any source, **triage errors by enclosing `#ifdef`/feature flag**: if >=3 errors share one flag, the first BDF move is to remove the `#define FLAG` line from its defining header (typically a one-line edit). Do not add source comments for the deferral. Record the deferral in the run notes/output as `deferred_changes: feature-flag FLAG - re-enabled by <introducing-commit>` (or, when no input-range commit re-enables it, by the final REFERENCE snap). Then build; only fall back to per-site surgical BDF for errors that remain.
+- Initialize `COUNTER_STATE_TSV` before the first main pass. Use `scripts/record_attempt.sh` for every real commit attempt so pass-end reports do not depend on memory, chat history, prior reports, or subject matching.
+- If the boundary build fails after the Initial Pass, use BDF to make `$OUTPUT_NAME` buildable before starting the main passes. Before editing any source, **triage errors by enclosing `#ifdef`/feature flag**: if >=3 errors share one flag, the first BDF move is to remove the `#define FLAG` line from its defining header (typically a one-line edit). Do not add source comments for the deferral. Record the deferral in the run notes/output as `deferred_changes: feature-flag FLAG - re-enabled by <introducing-commit>` (or, when no input-range commit re-enables it, by final hunk/path reconciliation). Then build; only fall back to per-site surgical BDF for errors that remain.
 
 ## Main Passes
 
@@ -67,9 +71,8 @@ description: Use when porting a Percona Server commit range onto an output branc
 - **Pass 3** — repeat the Pass 2 procedure for commits still in `remaining_commits`, but use wider limits: `n_conflicts <= 16`, `n_build_error <= 16`, and `n_symbol_pull <= 4`.
 - **Pass 4** — repeat the Pass 3 procedure for commits still in `remaining_commits`, but allow at most one Pass 3 limit to be exceeded: `n_conflicts > 16`, `n_build_error > 16`, or `n_symbol_pull > 4`. The attempt must still remain BDF-eligible. Keep a history of why each unlanded commit stayed in `remaining_commits`.
 - **Pass 5** — handle the commits that remain after Pass 4 with no conflict, build-error, or symbol-pull limits. Continue resolving conflicts with CDF and build failures with BDF until each attempted commit either lands with a passing build or is explicitly deferred for a concrete blocker. Show the user the conflicts for each commit still in `remaining_commits` and include the deferral history from earlier passes before applying resolutions.
-- After `remaining_commits` is empty, run `scripts/final_snap_report.sh "$REFERENCE" HEAD` before creating the final snap. If the report shows unexpected `whitespace_only_files` or many `diff_check_whitespace_issues`, decide whether those residuals should have been ported earlier before staging the snap.
-- Create the final whole-tree snap with `scripts/apply_reference_snap.sh "$REFERENCE"` instead of raw `git diff "$REFERENCE" | git apply`; the wrapper prints the residual-diff report, stages the reference tree, and verifies the staged tree has a null diff to `$REFERENCE`.
-- After the final snap commit, verify both `git diff HEAD "$REFERENCE"` is empty and a committed-tree build exits with code 0.
+- After `remaining_commits` is empty, run `scripts/final_snap_report.sh "$REFERENCE" HEAD` only as an inspection report for the residual diff. If the report shows residual content, reconcile it with explicit path/hunk-level edits or commits; do not perform a whole-tree, whole-file, or helper-script reference snap.
+- After the final reconciliation commit, verify both `git diff HEAD "$REFERENCE"` is empty and a committed-tree build exits with code 0.
 - The run is complete only when every output commit builds, the final diff is null, and the final committed-tree build passes.
 
 
@@ -78,10 +81,9 @@ description: Use when porting a Percona Server commit range onto an output branc
 The `scripts/` directory holds small shell helpers that codify recurring mechanics. Use them; don't reinvent.
 
 - `scripts/classify_build_changing.sh <BASE> <TIP>` — emits a TSV (`sha\tbc\tn_files\tsubject`) for every commit in the range, with `bc=1` iff any changed path is build-relevant per the `build_changing` definition. Run once at Initial Pass to drive the bucketing.
-- `scripts/build_remaining.sh <OUTPUT_BASE> <INPUT_BASE> <INPUT_TIP> [BC_TSV]` — emits the subject-matched, not-yet-landed SHAs (one per line). Use to refresh `remaining_commits` after each landing; subject match handles cherry-pick SHA changes while keeping the input range and output branch base separate.
+- `scripts/build_remaining.sh <OUTPUT_BASE> <INPUT_BASE> <INPUT_TIP> [BC_TSV]` — emits the not-yet-landed source SHAs (one per line) from explicit SHA/path-derived state. Do not use subject-line matching to decide which commits remain.
 - `scripts/refresh_remaining.sh <OUTPUT_BASE> <INPUT_BASE> <INPUT_TIP> <OUT_FILE> [BC_TSV] [REMOVED_SHAS_FILE]` — safely writes the current remaining SHA file, optionally removing manually excluded SHAs, and exits 0 even when the resulting list is empty. Prefer this over hand-written `build_remaining.sh | grep ...` pipelines.
-- `scripts/final_snap_report.sh <REFERENCE> [BASE_COMMIT]` — reports final snap size, whitespace-only files, semantic files, and diff-check whitespace issues before the reference convergence snap.
-- `scripts/apply_reference_snap.sh <REFERENCE>` — requires a clean worktree, runs `final_snap_report.sh`, stages the final reference snap with whitespace warnings suppressed at apply time, and verifies the staged tree is null-diff to `$REFERENCE`.
+- `scripts/final_snap_report.sh <REFERENCE> [BASE_COMMIT]` — inspection-only report for residual diff size, whitespace-only files, semantic files, and diff-check whitespace issues before final hunk/path reconciliation.
 - `scripts/probe.sh <SHA>` — tentative cherry-pick + build that **always rolls back**. Prints TSV `sha\tn_conflicts\tn_build_error\tsubject`. Use to fingerprint each commit in `remaining_commits` before deciding pass order; never use it to make progress.
 - `scripts/try_apply.sh <SHA> [BUILD_DIR]` — the real per-commit attempt. Cherry-picks with `--allow-empty --keep-redundant-commits`; on conflict, **leaves the cherry-pick in progress** so the caller can do hunk-level CDF; on build failure rolls back. Exit code: `0`=LANDED, `1`=CONFLICT (CDF needed), `2`=BUILD-FAIL (BDF or defer). Always prints the three counters plus status.
 - `scripts/count_build_errors.sh [--build-rc RC]` — normalizes build output into grouped root-cause errors. Use its count for `n_build_error`; do not substitute raw `grep -c` diagnostic counts. Pass the real build exit code with `--build-rc "$rc"` so successful builds always count as 0 even when logs contain non-fatal diagnostics.

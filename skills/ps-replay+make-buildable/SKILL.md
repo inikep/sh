@@ -335,9 +335,33 @@ Use `ccache` through CMake compiler launchers, not by replacing `CC` or `CXX`; t
    git rev-list --reverse $BASE_BRANCH..$TIP_BRANCH
    ```
 
-7. Inspect the ordered source list subjects and verify the exact marker `==================== MARKER: GROUP 8 — Upstream bug fixes ====================` exists. Record its 1-based source index as the Group 8 boundary. **If it is missing, stop and ask the engineer.** Do not infer a fallback boundary; do not select a "nearby" marker; do not proceed without one.
-8. Create `$OUTPUT_BRANCH` from `$DESTINATION_BASE_BRANCH`.
-9. Start a **deferred-hunks/commits/forward-folds/squashes/clusters/applied-equivalents ledger** for content whose position in the output history differs from its position in the source list. The ledger has six sections:
+7. **Upfront reference-shape audit.** Before creating `$OUTPUT_BRANCH` or replaying any commit, audit how `$REFERENCE_BRANCH` relates to `$DESTINATION_BASE_BRANCH` and the source list. Record all outputs in `$REPORT_FILE` under `Reference-shape audit` and store scratch files under `$RUN_DIR`.
+
+   Required checks:
+
+   ```sh
+   git merge-base $DESTINATION_BASE_BRANCH $REFERENCE_BRANCH
+   git rev-list --count --first-parent $DESTINATION_BASE_BRANCH..$REFERENCE_BRANCH
+   git log --first-parent --oneline --reverse $DESTINATION_BASE_BRANCH..$REFERENCE_BRANCH
+   git log --first-parent --merges --oneline $DESTINATION_BASE_BRANCH..$REFERENCE_BRANCH
+   git cherry -v $TIP_BRANCH $REFERENCE_BRANCH
+   git diff --name-status $DESTINATION_BASE_BRANCH $REFERENCE_BRANCH
+   git diff --shortstat $DESTINATION_BASE_BRANCH $REFERENCE_BRANCH
+   ```
+
+   Also run `ps_replay_scan_range.py` when available, using the same filtered source list options as the run, so reference-only commits cannot be silently missed.
+
+   The audit must answer:
+
+   - Does `$REFERENCE_BRANCH` contain first-parent commits, merge commits, or merge-resolution content not represented by the filtered `$BASE_BRANCH..$TIP_BRANCH` source list?
+   - Does `$REFERENCE_BRANCH` include a later merge-up to `$DESTINATION_BASE_BRANCH` or another destination-base-shaped resolution that will need final reconciliation?
+   - Which broad path buckets are likely to remain after replay (`delete-only`, `rename-only`, `missing reference files`, `mysql-test`/MTR fixtures, support/build/client/plugin, `sql`, `storage`)?
+
+   This audit is diagnostic only. It does **not** authorize snapping, whole-file replacement, directory alignment, subject-based skipping, rebucketing, or pre-dropping source hunks. If the audit predicts reference-only merge-resolution residuals, record a final-reconciliation forecast and continue with normal hunk-level replay; final parity still proceeds only through explicit reviewed reconciliation commits under §10.
+
+8. Inspect the ordered source list subjects and verify the exact marker `==================== MARKER: GROUP 8 — Upstream bug fixes ====================` exists. Record its 1-based source index as the Group 8 boundary. **If it is missing, stop and ask the engineer.** Do not infer a fallback boundary; do not select a "nearby" marker; do not proceed without one.
+9. Create `$OUTPUT_BRANCH` from `$DESTINATION_BASE_BRANCH`.
+10. Start a **deferred-hunks/commits/forward-folds/squashes/clusters/applied-equivalents ledger** for content whose position in the output history differs from its position in the source list. The ledger has six sections:
 
    - **Deferred hunks** (backward defer, hunk-level — §5): hunks removed from an earlier commit, each with source commit, file, short reason, and target later commit that will re-apply the hunk.
    - **Deferred commits** (backward defer, whole-commit-level — §6 Defer-commit): whole commits postponed forward, each with original index/SHA, original subject, landing index/SHA, motivating build failure, the dependency the landing commit provides, and (once applied) the new `$OUTPUT_BRANCH` SHA and build log path.
@@ -350,7 +374,7 @@ Use `ccache` through CMake compiler launchers, not by replacing `CC` or `CXX`; t
 
    **Ledger storage**: write ledger to `$RUN_DIR/ledger.tsv`. Do not write replay state under the worktree (for example `.ps-replay/`). Keep run state in the dedicated `/tmp` subdirectory so the source tree only contains replayed code changes. Because `/tmp` can be cleared by reboot or cleanup, reproduce the ledger summary in `$REPORT_FILE` after every material state transition; loss of `$RUN_DIR` mid-run is a Stop Condition unless the ledger can be reconstructed exactly from `$REPORT_FILE` and Git history.
 
-10. **Default effort budget.** Do not ask the engineer for an effort-budget envelope during Prepare. Start the run under the skill default: **per-commit-only, hard 3-attempt cap**. Record this default in `$REPORT_FILE` under a `Run envelope` section.
+11. **Default effort budget.** Do not ask the engineer for an effort-budget envelope during Prepare. Start the run under the skill default: **per-commit-only, hard 3-attempt cap**. Record this default in `$REPORT_FILE` under a `Run envelope` section.
 
     Ask for a different envelope only when a concrete commit reaches the hard 3-attempt cap during replay, or when §6 identifies a named `MULTI-COMMIT-CLUSTER` that requires Squash-cluster approval. At that point, present the specific commit/cluster, the attempts already made, and these options:
 
@@ -414,7 +438,7 @@ The cherry-pick command must be exactly this — plain `git cherry-pick <sha>`, 
 
 If it applies cleanly, **first check tree-equality** before proceeding to the build step:
 
-- If `git diff HEAD~1 HEAD --quiet` (the new commit's tree equals the previous tip's tree) AND the commit message body is not a marker, the cherry-pick produced an empty commit — git reports `nothing to commit, working tree clean` and may not have advanced HEAD at all. Apply rule 14: drop the cherry-pick state (`git cherry-pick --skip` or `git reset --hard HEAD`) and record the source SHA in the **applied-equivalents** ledger section (Prepare step 9) as kind `empty-skip-equivalent`. Do NOT re-defer this commit — the still-deferred list rebuilt by post-hoc `patch-id` will list it as deferred, but it is in fact resolved (its content is already on `$OUTPUT_BRANCH` via an earlier landing).
+- If `git diff HEAD~1 HEAD --quiet` (the new commit's tree equals the previous tip's tree) AND the commit message body is not a marker, the cherry-pick produced an empty commit — git reports `nothing to commit, working tree clean` and may not have advanced HEAD at all. Apply rule 14: drop the cherry-pick state (`git cherry-pick --skip` or `git reset --hard HEAD`) and record the source SHA in the **applied-equivalents** ledger section (Prepare step 10) as kind `empty-skip-equivalent`. Do NOT re-defer this commit — the still-deferred list rebuilt by post-hoc `patch-id` will list it as deferred, but it is in fact resolved (its content is already on `$OUTPUT_BRANCH` via an earlier landing).
 
 This short-circuit prevents the canonical false-positive: a commit that was empty-skipped during an earlier pass gets re-attempted in a later session because `git patch-id <empty>` produces no entry to match against `$OUTPUT_BRANCH`'s patch-id index. The applied-equivalents ledger entry shields it from future re-attempts.
 
@@ -787,6 +811,15 @@ Write `$REPORT_FILE` in markdown. It must include:
 - The starting effort-budget envelope: `per-commit-only, hard 3-attempt cap` unless an engineer waiver has already been granted after a concrete cap-reached stop.
 - The default hard 3-attempt cap, and any later engineer override granted after a concrete cap-reached stop.
 - Any engineer waivers granted during the run, with timestamp and verbatim quote (referenced from the engineer-waivers ledger section).
+
+### Reference-shape audit
+
+- The merge-base of `$DESTINATION_BASE_BRANCH` and `$REFERENCE_BRANCH`.
+- First-parent commit count and first-parent subject list for `$DESTINATION_BASE_BRANCH..$REFERENCE_BRANCH`.
+- Merge commits on `$REFERENCE_BRANCH` after `$DESTINATION_BASE_BRANCH`, especially destination-base merge-up commits.
+- Reference-only commits reported by `git cherry -v $TIP_BRANCH $REFERENCE_BRANCH` and/or `ps_replay_scan_range.py`.
+- `git diff --name-status` and `git diff --shortstat` summary for `$DESTINATION_BASE_BRANCH..$REFERENCE_BRANCH`.
+- A final-reconciliation forecast listing any expected residual buckets (`delete-only`, `rename-only`, `missing reference files`, MTR fixtures, support/build/client/plugin, `sql`, `storage`) and explicitly stating that the forecast is diagnostic only and does not authorize snapping or pre-dropping source hunks.
 
 ### Per-applied-commit
 

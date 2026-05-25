@@ -7,7 +7,7 @@ description: Use when a Percona Server replay or prune branch contains a commit 
 
 ## Goal
 
-Remove `$ABSORB_COMMIT` by folding its hunks into the commits that own them, then publish `$OUTPUT_BRANCH` with a null diff to `$REFERENCE` unless the user explicitly allows an exact residual class.
+Remove `$ABSORB_COMMIT` by folding its hunks into the commits that own them, then publish `$OUTPUT_BRANCH` with a null diff to `$REFERENCE`.
 
 ## Inputs
 
@@ -21,14 +21,14 @@ Remove `$ABSORB_COMMIT` by folding its hunks into the commits that own them, the
 ## Hard Rules
 
 - **HR-1** Verify ancestry before rewriting. `git merge-base --is-ancestor "$ABSORB_BASE" "$WORK_BRANCH"` and `git merge-base --is-ancestor "$ABSORB_COMMIT" "$WORK_BRANCH"` must succeed. If either fails, stop and find the correct anchor or commit; do not rebase onto a convenient but unrelated base.
-- **HR-2** Record starting counts before changing anything: `git rev-list --count "$BASE_BRANCH..$WORK_BRANCH"` and `git rev-list --count "$ABSORB_BASE..$WORK_BRANCH"`. The absorbed result should usually have exactly one fewer commit than the input branch, unless an explicitly marked `[residual] ...` commit is preserved for unclassified leftovers.
+- **HR-2** Record starting counts before changing anything: `git rev-list --count "$BASE_BRANCH..$WORK_BRANCH"` and `git rev-list --count "$ABSORB_BASE..$WORK_BRANCH"`. The absorbed result should usually have exactly one fewer commit than the input branch, unless an explicitly marked `[residual] ...` or `[snap] ...` commit is preserved.
 - **HR-3** Do not keep `$ABSORB_COMMIT`, an unmarked replacement absorb/snap commit, or any residual `fixup!` commits.
 - **HR-4** `git absorb` is only the first pass. It may leave staged hunks and may target repeated-context hunks too early. Each leftover hunk must be handled by one of three explicit outcomes: fold it into a concrete in-range owner commit, direct-edit that owner during rebase, or preserve it as a `[residual] ...` commit. Never hide leftovers in an arbitrary nearby feature commit. Use `[residual] ...` when the owner is outside the editable range, the hunk is baseline/reference alignment, the owner cannot be identified safely, or a full manual split cannot be completed in the same pass. Residual commits must preserve `$ABSORB_COMMIT`'s original metadata and message body, prefix the subject with `[residual] `, and be reported as residual work.
 - **HR-5** Preserve the branch's existing ancestry and commit grouping. Do not repair count regressions by changing `$ABSORB_BASE` or rebasing onto another base; if a different anchor is truly needed, first verify it is an ancestor of `$WORK_BRANCH` and treat it as the new `$ABSORB_BASE`.
-- **HR-6** Never accept a non-null diff to `$REFERENCE` unless the user explicitly allows that exact class of residual. Whitespace residuals are still residuals unless explicitly allowed.
+- **HR-6** Never publish a non-null diff to `$REFERENCE`. If owner retargeting is complete but `HEAD` still differs from `$REFERENCE`, create one additional `[snap] ...` commit that makes the tree match `$REFERENCE`.
 - **HR-7** All rebase/autosquash conflicts must be solved with **CDF: Conflict-Driven Fix**. Inspect each conflicted hunk, identify the owning later commit or final local shape, then edit only that hunk.
-- **HR-7a** `$REFERENCE` may be inspected for a specific region, but must never be used for whole-file, whole-directory, or subtree replacement. This applies even when the conflicted commit is the final target commit and the final tree must match `$REFERENCE`.
-- **HR-7b** Forbidden conflict shortcuts: `git checkout "$REFERENCE" -- <file>`, `git restore --source "$REFERENCE" <file>`, `git show "$REFERENCE:<file>" > <file>`, `cp` from another worktree, `rsync`, patching a whole file from `$REFERENCE`, or any equivalent full-file/full-tree replacement.
+- **HR-7a** `$REFERENCE` may be inspected for a specific region, but must never be used for whole-file, whole-directory, or subtree replacement during conflict resolution. This applies even when the conflicted commit is the final target commit and the final tree must match `$REFERENCE`.
+- **HR-7b** Forbidden conflict shortcuts: `git checkout "$REFERENCE" -- <file>`, `git restore --source "$REFERENCE" <file>`, `git show "$REFERENCE:<file>" > <file>`, `cp` from another worktree, `rsync`, patching a whole file from `$REFERENCE`, or any equivalent full-file/full-tree replacement. The only exception is the final `[snap] ...` step in section 5, after all rebases and retargeting are complete.
 - **HR-8** If a rule violation happens, the run is invalid from that point. Stop and report it; do not repair it by later null diff.
 
 ## Required Checks
@@ -142,9 +142,23 @@ git diff --stat HEAD "$REFERENCE"
 git diff --unified=30 HEAD "$REFERENCE" -- <file>
 ```
 
-For each residual hunk, identify the later commit that overwrote the intended change and fold the hunk there with a fixup or direct edit. Do not recreate a final snap.
+For each residual hunk, identify the later commit that overwrote the intended change and fold the hunk there with a fixup or direct edit. After retargeting is complete, any remaining diff must become one explicit `[snap] ...` commit.
 
-### 5. Publish
+### 5. Snap and Publish
+
+If the final candidate still differs from `$REFERENCE`, create one marked snap commit to reach a null diff:
+
+```sh
+if ! git diff --quiet HEAD "$REFERENCE"; then
+  snap_patch=$(mktemp)
+  git diff --binary HEAD "$REFERENCE" > "$snap_patch"
+  git apply --index "$snap_patch"
+  git commit -m "[snap] Match reference after absorbing $ABSORB_COMMIT"
+  rm -f "$snap_patch"
+fi
+```
+
+Use the snap only after rebases, conflict resolution, and owner retargeting are complete. Do not use it to cover a skipped owner decision, unresolved conflict shortcut, or any earlier rule violation.
 
 The result is valid only when all checks pass:
 
@@ -152,9 +166,16 @@ The result is valid only when all checks pass:
 git status --short --branch
 git diff --stat HEAD "$REFERENCE"
 git log --oneline --grep='^fixup!' "$ABSORB_BASE..HEAD" | wc -l
+git log --oneline --grep='^\[snap\]' "$ABSORB_BASE..HEAD"
 git merge-base --is-ancestor "$ABSORB_COMMIT" HEAD; echo $?
 git rev-list --count "$BASE_BRANCH..HEAD"
 ```
 
-Expected: clean tree, null diff unless the user explicitly allowed an exact residual class under HR-6, zero fixups, `$ABSORB_COMMIT` not an ancestor, and a count that matches the intended squash outcome.
-If a `[residual] ...` commit remains, the count may match the input branch instead; report the residual commit explicitly.
+Expected: clean tree, null diff, zero fixups, `$ABSORB_COMMIT` not an ancestor, and a count that matches the intended squash outcome.
+If a `[residual] ...` or `[snap] ...` commit remains, the count may differ from the usual one-fewer result; report the marked commit explicitly.
+
+Then publish:
+
+```sh
+git branch -f "$OUTPUT_BRANCH" HEAD
+```

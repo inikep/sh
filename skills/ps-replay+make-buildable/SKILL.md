@@ -130,10 +130,18 @@ After Group 8:
 For each source commit:
 
 1. Record source index, SHA, subject, path list, and locked bucket.
-2. If marker: `git commit --allow-empty` with the original marker subject; no build unless it is the Group 8 checkpoint position.
-3. Otherwise run plain `git cherry-pick <sha>`.
-4. Resolve conflicts hunk by hunk. Use `$REFERENCE_BRANCH` only for local inspection and semantic guidance. Prefer the destination/reference-shaped 5.7 API when the 5.6 hunk is obsolete, moved, split, or reference-absent; ledger the mapping.
-5. Before `git cherry-pick --continue` for every post-Group-8 source/plugin/build-system commit, compare source paths to staged paths:
+2. Before cherry-picking a non-marker commit, run a reference feature-presence gate:
+
+   - Extract concrete feature identifiers from the source diff and subject: new sysvars/status variables, command names, SQL tokens, C/C++ symbols, plugin names, test names, and newly added files.
+   - Search `$REFERENCE_BRANCH` for those identifiers and files with `git grep` and `git ls-tree`/`git cat-file` as needed. Inspect the nearby reference code only for semantic confirmation.
+   - If the feature is present, moved, renamed, split, or implemented by a reference-equivalent mechanism, continue to the plain cherry-pick and ledger the mapping when it affects hunks or paths.
+   - If the feature itself is absent from `$REFERENCE_BRANCH`, do not cherry-pick the commit. Ledger `reference-feature-absent-skip` with the identifiers searched, reference evidence, source index/SHA/subject, and the no-output exception. No build is owed for this skipped non-marker commit, even if its locked bucket is source/build-system.
+   - Do not classify a feature as absent merely because a file moved or an API shape changed; absence means the reference lacks the feature behavior, user-visible variable/command/plugin, or equivalent implementation.
+
+3. If marker: `git commit --allow-empty` with the original marker subject; no build unless it is the Group 8 checkpoint position.
+4. Otherwise run plain `git cherry-pick <sha>`.
+5. Resolve conflicts hunk by hunk. Use `$REFERENCE_BRANCH` only for local inspection and semantic guidance. Prefer the destination/reference-shaped 5.7 API when the 5.6 hunk is obsolete, moved, split, or reference-absent; ledger the mapping.
+6. Before `git cherry-pick --continue` for every post-Group-8 source/plugin/build-system commit, compare source paths to staged paths:
 
    ```sh
    git diff-tree --no-commit-id --name-only -r <source-sha>
@@ -142,12 +150,12 @@ For each source commit:
 
    Any absent source/plugin/build-system path must have a ledger row: deferred-hunk, forward-fold, squash, reference-absent nonsemantic, or destination/reference-equivalent semantic.
 
-6. If the cherry-pick becomes empty:
+7. If the cherry-pick becomes empty:
    - preserve only marker commits;
    - skip non-markers and ledger `empty-skip-equivalent`;
    - no build is owed for an empty skip.
-7. Commit or continue, record the output SHA. For build-required commits, this output commit remains the container for any later build fixes for the same source commit.
-8. If build-required, build immediately. Do not apply the next build-required commit until the current one passes.
+8. Commit or continue, record the output SHA. For build-required commits, this output commit remains the container for any later build fixes for the same source commit.
+9. If build-required, build immediately. Do not apply the next build-required commit until the current one passes.
 
 ## Build Failures
 
@@ -181,6 +189,7 @@ Use only when needed for conflict or buildability, and ledger every row:
 - `squash`: combine exactly two adjacent source commits when most of the later commit is needed now.
 - `squash-cluster`: only with current-conversation engineer approval naming the members.
 - `applied-equivalent`: old source hunk is already present, moved/split/renamed, obsolete, or intentionally absent in the 5.7 reference.
+- `reference-feature-absent-skip`: skip a non-marker before cherry-pick when the pre-cherry-pick gate proves the feature behavior itself is absent from the reference.
 
 Never use these mechanisms for convenience, batching, or hiding missing builds.
 

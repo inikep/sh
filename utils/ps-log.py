@@ -70,7 +70,9 @@ class Style:
     def default(self, t): return self._wrap("39", t)
     def bold_default(self, t): return self._wrap("1;39", t)
     def orange(self, t): return self._wrap("38;5;208", t)
+    def light_red(self, t): return self._wrap("91", t)
     def bold_red(self, t): return self._wrap("1;31", t)
+    def bold_light_red(self, t): return self._wrap("1;91", t)
     def bold_magenta(self, t): return self._wrap("1;35", t)
 
 
@@ -104,7 +106,7 @@ FILES_RE = re.compile(r"(\d+) files? changed")
 INS_RE = re.compile(r"(\d+) insertion")
 DEL_RE = re.compile(r"(\d+) deletion")
 DEPTH_VALUE_RE = re.compile(r"-?\d+")
-UPSTREAM_MYSQL_SUBJECT_PREFIX_RE = re.compile(r"^(\(mysql-\d+\.\d+\.\d+\))(\s+)?")
+SUBJECT_MARKER_PREFIX_RE = re.compile(r"^((?:\[[^\]\s]+\]|\([^\)\s]+\)))(\s+)?")
 COMMIT_STATS_LINE_RE = re.compile(
     r"^(\s*)(.{5})(.{5})(\s)(.{5})(\s)([0-9a-f-]{12})(\s?)(.*)$"
 )
@@ -350,15 +352,25 @@ def format_shortstat(files: int, ins: int, dele: int) -> str:
     return ", ".join(parts)
 
 
-def subject_style(text: str, bold: bool, red: bool) -> str:
-    prefix = UPSTREAM_MYSQL_SUBJECT_PREFIX_RE.match(text)
-    if prefix:
+def subject_style(text: str, bold: bool, red: bool,
+                  light_red: bool = False) -> str:
+    prefix = SUBJECT_MARKER_PREFIX_RE.match(text)
+    if prefix and not (red or light_red):
         rest = text[prefix.end():]
-        return STYLE.blue(prefix.group(1)) + (prefix.group(2) or "") + subject_style(rest, bold, red)
+        marker = prefix.group(1)
+        return (subject_style(marker[0], bold, red, light_red) +
+                STYLE.blue(marker[1:-1]) +
+                subject_style(marker[-1], bold, red, light_red) +
+                (prefix.group(2) or "") +
+                subject_style(rest, bold, red, light_red))
     if red and bold:
         return STYLE.bold_red(text)
     if red:
         return STYLE.red(text)
+    if light_red and bold:
+        return STYLE.bold_light_red(text)
+    if light_red:
+        return STYLE.light_red(text)
     return STYLE.bold_default(text) if bold else STYLE.default(text)
 
 
@@ -388,7 +400,8 @@ def count_field_style(text: str, color: str, large_as_orange: bool) -> str:
 
 
 def colorize_stats_line(line: str, bold_subject: bool,
-                        red_subject: bool) -> str:
+                        red_subject: bool,
+                        light_red_subject: bool = False) -> str:
     if not STYLE.enabled:
         return line
     m = COMMIT_STATS_LINE_RE.match(line)
@@ -399,7 +412,8 @@ def colorize_stats_line(line: str, bold_subject: bool,
             m.group(4) +
             count_field_style(m.group(5), "red", large_as_orange=True) +
             m.group(6) + STYLE.yellow(m.group(7)) + m.group(8) +
-            subject_style(m.group(9), bold_subject, red_subject))
+            subject_style(m.group(9), bold_subject, red_subject,
+                          light_red_subject))
 
     m = TOTAL_STATS_LINE_RE.match(line)
     if not m:
@@ -409,7 +423,8 @@ def colorize_stats_line(line: str, bold_subject: bool,
         count_field_style(m.group(3), "green", large_as_orange=False) +
         m.group(4) +
         count_field_style(m.group(5), "red", large_as_orange=False) +
-        m.group(6) + subject_style(m.group(7), bold_subject, red_subject))
+        m.group(6) + subject_style(m.group(7), bold_subject, red_subject,
+                                   light_red_subject))
 
 
 def normalize_depth_arg(argv: list[str]) -> list[str]:
@@ -509,9 +524,11 @@ def render_section(label: str | None, log_args: list[str],
     total_files = total_ins = total_dele = 0
     for ch, subject, files, ins, dele, depth in rows:
         line = format_stats_line(files, ins, dele, ch, subject, depth)
-        bold = (ins + dele) <= 8
-        red = dele > ins and (ins + dele) >= 100
-        print(colorize_stats_line(line, bold, red), flush=True)
+        changed = ins + dele
+        bold = changed <= 8
+        red = dele > ins and changed >= 100
+        light_red = dele > ins and 10 <= changed < 100
+        print(colorize_stats_line(line, bold, red, light_red), flush=True)
         total_files += files
         total_ins += ins
         total_dele += dele

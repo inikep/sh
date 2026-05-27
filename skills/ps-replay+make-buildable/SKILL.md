@@ -83,6 +83,7 @@ The source list may include task-specified filters, for example `--first-parent`
 
 5. Create `$OUTPUT_BRANCH` from `$DESTINATION_BASE_BRANCH`.
 6. Start `$RUN_DIR/ledger.tsv` with rows for applied-equivalents, deferred hunks, forward-folds, squashes, waivers, replayed commits, build fixes, reconciliation commits, final parity, and final build.
+7. Create `$RUN_DIR/feature-evidence/`. Every non-marker commit must get one JSON evidence file there before any apply/skip decision.
 
 ## Build Setup
 
@@ -133,6 +134,17 @@ For each source commit:
 2. Before cherry-picking a non-marker commit, run a reference feature-presence gate:
 
    - Extract concrete feature identifiers from the source diff and subject: new sysvars/status variables, command names, SQL tokens, C/C++ symbols, plugin names, test names, and newly added files.
+   - Capture the extraction and reference search evidence with the helper before deciding:
+
+     ```sh
+     scripts/ps_replay_feature_gate.py \
+       --worktree . \
+       --commit <source-sha> \
+       --reference $REFERENCE_BRANCH \
+       --output $RUN_DIR/feature-evidence/<idx>-<sha12>.json
+     ```
+
+     The JSON file is required run evidence. Cite it in the ledger row for apply/skip decisions.
    - Search `$REFERENCE_BRANCH` for those identifiers and files with `git grep` and `git ls-tree`/`git cat-file` as needed. Inspect the nearby reference code only for semantic confirmation.
    - If the feature is present, moved, renamed, split, or implemented by a reference-equivalent mechanism, continue to the plain cherry-pick and ledger the mapping when it affects hunks or paths.
    - If the feature itself is absent from `$REFERENCE_BRANCH`, do not cherry-pick the commit. Ledger `reference-feature-absent-skip` with the identifiers searched, reference evidence, source index/SHA/subject, and the no-output exception. No build is owed for this skipped non-marker commit, even if its locked bucket is source/build-system.
@@ -141,6 +153,13 @@ For each source commit:
 3. If marker: `git commit --allow-empty` with the original marker subject; no build unless it is the Group 8 checkpoint position.
 4. Otherwise run plain `git cherry-pick <sha>`.
 5. Resolve conflicts hunk by hunk. Use `$REFERENCE_BRANCH` only for local inspection and semantic guidance. Prefer the destination/reference-shaped 5.7 API when the 5.6 hunk is obsolete, moved, split, or reference-absent; ledger the mapping.
+   If cherry-pick pseudo-files are lost while the index/worktree still contain the interrupted pick, recover them with:
+
+   ```sh
+   scripts/ps_replay_recover_cherry_pick.py --worktree . --commit <source-sha>
+   ```
+
+   Do not hand-create a replacement commit until this recovery helper has failed or proven inapplicable. The helper restores `CHERRY_PICK_HEAD` and `MERGE_MSG` only; it does not resolve files.
 6. Before `git cherry-pick --continue` for every post-Group-8 source/plugin/build-system commit, compare source paths to staged paths:
 
    ```sh
@@ -178,6 +197,20 @@ For each failure:
 - Ledger build-fix paths, reason, failed log, amended/final output SHA, and PASS log.
 
 If a commit cannot be made buildable within the cap, reset to the last known buildable SHA, report the blocker, and ask.
+
+## Residual Diff Audit
+
+After the source list is exhausted and before any reconciliation or snap decision, run the residual audit helper:
+
+```sh
+scripts/ps_replay_residual_audit.py \
+  --worktree . \
+  --output HEAD \
+  --reference $REFERENCE_BRANCH \
+  --trivial-lines 1 > $RUN_DIR/residual-audit.txt
+```
+
+The helper is binary-safe and decodes non-UTF-8 diff bytes with replacement characters. Record the shortstat, residual audit summary, and any reference-only first-parent commits in `$REPORT_FILE`. If the residual includes substantive diffs or reference-only merge commits, stop and choose an explicit reconciliation policy; do not silently snap unless the user requests or the run inputs allow it.
 
 ## Allowed Content Movement
 

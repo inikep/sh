@@ -98,10 +98,9 @@ def run_diff(output: str, reference: str, cwd: Path) -> str:
         ["git", "diff", "--no-color", output, reference],
         cwd=cwd,
         capture_output=True,
-        text=True,
         check=False,
     )
-    return result.stdout
+    return result.stdout.decode("utf-8", errors="replace")
 
 
 def parse_hunks(diff_text: str) -> List[Hunk]:

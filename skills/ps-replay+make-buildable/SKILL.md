@@ -82,8 +82,8 @@ The source list may include task-specified filters, for example `--first-parent`
    Record its 1-based source index. Stop if absent.
 
 5. Create `$OUTPUT_BRANCH` from `$DESTINATION_BASE_BRANCH`.
-6. Start `$RUN_DIR/ledger.tsv` with rows for applied-equivalents, deferred hunks, forward-folds, squashes, waivers, replayed commits, build fixes, reconciliation commits, final parity, and final build.
-7. Create `$RUN_DIR/feature-evidence/`. Every non-marker commit must get one JSON evidence file there before any apply/skip decision.
+6. Start `$RUN_DIR/ledger.tsv`. Record only non-routine events: conflict resolutions, empty skips, deferred hunks, forward-folds, squashes, build fixes, waivers, reconciliation commits, final parity, and final build. Routine clean cherry-picks need not be ledgered.
+7. Pre-Group-8: skip the per-commit feature-evidence step entirely. Cherry-pick and resolve conflicts only. Run the optional `scripts/ps_replay_feature_gate.py` only when a specific commit looks suspicious (e.g. introduces a top-level feature absent from `$REFERENCE_BRANCH`) and you need evidence to justify a `reference-feature-absent-skip` ledger row.
 
 ## Build Setup
 
@@ -128,7 +128,21 @@ After Group 8:
 
 ## Replay Loop
 
-For each source commit:
+### Pre-Group-8 (fast path)
+
+Before the Group 8 checkpoint, no build is owed for any commit. Use the minimum loop:
+
+1. If marker: `git commit --allow-empty -m "$subject"`. Continue.
+2. Otherwise `git cherry-pick <sha>`.
+3. If the cherry-pick is empty: `git cherry-pick --skip`. Ledger one `empty-skip-equivalent` row. Continue.
+4. If there are conflicts: resolve hunk by hunk using the rules below, `git add`, `git cherry-pick --continue --no-edit`. Ledger one row per resolved file (or one summary row per commit). Continue.
+5. If the cherry-pick succeeded cleanly with no conflicts: no ledger row needed.
+
+Do not run `ps_replay_feature_gate.py` per commit, and do not write a ledger row for every clean apply. Only escalate to the full per-commit gate when a specific commit looks like it adds a feature absent from `$REFERENCE_BRANCH` and you intend to record a `reference-feature-absent-skip`.
+
+### Post-Group-8 (full path)
+
+For each source commit after the Group 8 marker:
 
 1. Record source index, SHA, subject, path list, and locked bucket.
 2. Before cherry-picking a non-marker commit, run a reference feature-presence gate:
@@ -351,7 +365,7 @@ Write `$REPORT_FILE` incrementally. Required sections:
 - Group 8 boundary, checkpoint build, `[compilation]` fixes, and marker preservation.
 - Per source commit: index, source SHA, output SHA or skip, bucket, path list, conflicts, HP-8 staged-path result, build result or no-build reason.
 - Ledger summary: deferred hunks, defer-commits, forward-folds, squashes, squash-clusters, applied-equivalents, waivers.
-- Build-driven fixes: failed log, error, fix paths, PASS log.
+- Build-driven fixes (BDF): failed log, error, fix paths, PASS log.
 - Final parity reconciliation commits.
 - Final null-diff SHA and final build log.
 

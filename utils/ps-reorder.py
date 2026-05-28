@@ -12,6 +12,7 @@ Groups (separated by MARKER commits):
                         - internal/
                         - plugin/tokudb-backup-plugin/
                         - storage/tokudb/
+                        - scripts/ps_tokudb_admin.sh
                         - MYSQL_VERSION + VERSION + storage/innobase/include/univ.i
                         - mysql-test/suite/tokudb* and MTR tests whose
                           filename contains "toku"
@@ -273,6 +274,7 @@ G1_MAN = 'man'
 G1_INTERNAL = 'internal'
 G1_TOKUDB_BACKUP = 'tokudb-backup-plugin'
 G1_STORAGE_TOKUDB = 'storage-tokudb'
+G1_PS_TOKUDB_ADMIN = 'ps-tokudb-admin'
 G1_VERSION_UNIV = 'version-univ'
 G1_TOKUDB_TESTS = 'tokudb-tests'
 
@@ -282,6 +284,7 @@ G1_SUBJECTS = {
     G1_INTERNAL:        'Squash: internal/',
     G1_TOKUDB_BACKUP:   'Squash: plugin/tokudb-backup-plugin/',
     G1_STORAGE_TOKUDB:  'Squash: storage/tokudb/',
+    G1_PS_TOKUDB_ADMIN: 'Squash: scripts/ps_tokudb_admin.sh',
     G1_VERSION_UNIV:    'Squash: MYSQL_VERSION, VERSION and storage/innobase/include/univ.i',
     G1_TOKUDB_TESTS:    'Squash: mysql-test/suite/tokudb* and MTR *toku* tests',
 }
@@ -390,6 +393,8 @@ def classify_file(path):
         return ('g1', G1_TOKUDB_BACKUP)
     if path.startswith('storage/tokudb/'):
         return ('g1', G1_STORAGE_TOKUDB)
+    if path == 'scripts/ps_tokudb_admin.sh':
+        return ('g1', G1_PS_TOKUDB_ADMIN)
     if (path == 'MYSQL_VERSION' or path == 'VERSION' or
             path == 'storage/innobase/include/univ.i'):
         return ('g1', G1_VERSION_UNIV)
@@ -2505,6 +2510,7 @@ def build_output_branch(args, input_hash, base_hash, plan):
     marker_commit(
         1, 'Squashes',
         'doc/, internal/, plugin/tokudb-backup-plugin/, storage/tokudb/, '
+        'scripts/ps_tokudb_admin.sh, '
         'MYSQL_VERSION + VERSION + storage/innobase/include/univ.i, '
         'tokudb MTR tests')
     g1_cats = sorted(plan['g1_files'].keys(),

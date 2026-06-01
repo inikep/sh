@@ -167,6 +167,7 @@ For each source commit after the Group 8 marker:
 3. If marker: `git commit --allow-empty` with the original marker subject; no build unless it is the Group 8 checkpoint position.
 4. Otherwise run plain `git cherry-pick <sha>`.
 5. Resolve conflicts hunk by hunk. Use `$REFERENCE_BRANCH` only for local inspection and semantic guidance. Prefer the destination/reference-shaped 5.7 API when the 5.6 hunk is obsolete, moved, split, or reference-absent; ledger the mapping.
+   If `git diff --check` or `git diff --cached --check` reports trailing whitespace, space-before-tab, or similar whitespace warnings, compare the exact warned line to `$REFERENCE_BRANCH` before editing it. If the same whitespace is present in the reference, keep it and ledger/report it as reference-matching whitespace; do not clean it just to satisfy `diff --check`. Only remove whitespace that is absent from the reference or that you introduced while resolving a conflict.
    If cherry-pick pseudo-files are lost while the index/worktree still contain the interrupted pick, recover them with:
 
    ```sh
@@ -317,6 +318,7 @@ Allowed helpers:
 - `ps_replay_build.py`: standard CMake/build runner that writes logs.
 - `ps_replay_errors.py`: extracts likely root-cause diagnostics from large build logs.
 - `ps_replay_conflict_triage.py`: prints conflict status and may stage only files whose conflict regions already match safely; remaining files require manual hunk review.
+- `ps_replay_diff_check.py`: runs `git diff --check` or `git diff --cached --check`, compares warning lines to `$REFERENCE_BRANCH`, and exits success when every warning is reference-matching whitespace that should be preserved.
 - `ps_replay_resolve_conflicts.py`: inspection-only conflict display with nearby reference context.
 - `ps_replay_resolve_hunks.py`: best-effort conflict-block resolver; it may replace only conflict blocks, never whole files. Review its output before continuing.
 - `ps_replay_residual_audit.py`: classifies final residual diff hunks before reconciliation.

@@ -74,6 +74,8 @@ class Style:
     def bold_red(self, t): return self._wrap("1;31", t)
     def bold_light_red(self, t): return self._wrap("1;91", t)
     def bold_magenta(self, t): return self._wrap("1;35", t)
+    def bold_blue(self, t): return self._wrap("1;34", t)
+    def pale_yellow(self, t): return self._wrap("38;5;220", t)
 
 
 STYLE = Style(False)
@@ -105,6 +107,7 @@ def run_git(args: list[str]) -> subprocess.CompletedProcess:
 FILES_RE = re.compile(r"(\d+) files? changed")
 INS_RE = re.compile(r"(\d+) insertion")
 DEL_RE = re.compile(r"(\d+) deletion")
+C_CPP_EXTS = (".h", ".c", ".cc", ".cxx", ".cpp", ".hh", ".hpp", ".hxx")
 DEPTH_VALUE_RE = re.compile(r"-?\d+")
 SUBJECT_MARKER_PREFIX_RE = re.compile(r"^((?:\[[^\]\s]+\]|\([^\)\s]+\)))(\s+)?")
 COMMIT_STATS_LINE_RE = re.compile(
@@ -260,41 +263,51 @@ def list_commits_with_depth(log_args: list[str], reverse: bool,
 
 
 def shortstat_for(sha: str,
-                  paths: list[str] | None) -> tuple[int, int, int]:
+                  paths: list[str] | None) -> tuple[int, int, int, bool]:
+    """Return (files, insertions, deletions, has_c_cpp) for a commit.
+    Uses --numstat so we get per-file paths in the same call, letting us
+    flag commits that touch C/C++ source. Binary files report '-' for the
+    added/deleted columns and contribute to the file count only."""
     cmd = ["git", "-c", "diff.renames=false", "show", "-m", "--first-parent",
-           "--no-patch", "--format=", "--shortstat", sha]
+           "--numstat", "--format=", sha]
     if paths:
         cmd.append("--")
         cmd.extend(paths)
     text = subprocess.run(cmd, capture_output=True, text=True,
                           check=True).stdout
     files = ins = dele = 0
-    m = FILES_RE.search(text)
-    if m:
-        files = int(m.group(1))
-    m = INS_RE.search(text)
-    if m:
-        ins = int(m.group(1))
-    m = DEL_RE.search(text)
-    if m:
-        dele = int(m.group(1))
-    return files, ins, dele
+    has_c = False
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        added, deleted, path = parts[0], parts[1], parts[2]
+        files += 1
+        if added.isdigit():
+            ins += int(added)
+        if deleted.isdigit():
+            dele += int(deleted)
+        if path.endswith(C_CPP_EXTS):
+            has_c = True
+    return files, ins, dele, has_c
 
 
 def fetch_rows(log_args: list[str], reverse: bool, limit: int | None,
                max_depth: int | None, paths: list[str] | None, jobs: int
-               ) -> list[tuple[str, str, int, int, int, int]]:
+               ) -> list[tuple[str, str, int, int, int, int, bool]]:
     items = list_commits_with_depth(log_args, reverse, limit, max_depth, paths)
     if not items:
         return []
     paths_t = tuple(paths) if paths else None
 
     def one(item: tuple[str, str, int]
-            ) -> tuple[str, str, int, int, int, int]:
+            ) -> tuple[str, str, int, int, int, int, bool]:
         h, s, d = item
-        files, ins, dele = shortstat_for(
+        files, ins, dele, has_c = shortstat_for(
             h, list(paths_t) if paths_t else None)
-        return (h, s, files, ins, dele, d)
+        return (h, s, files, ins, dele, d, has_c)
 
     if jobs <= 1 or len(items) == 1:
         return [one(it) for it in items]
@@ -359,7 +372,8 @@ def subject_style(text: str, bold: bool, red: bool,
         rest = text[prefix.end():]
         marker = prefix.group(1)
         return (subject_style(marker[0], bold, red, light_red) +
-                STYLE.blue(marker[1:-1]) +
+                (STYLE.bold_blue(marker[1:-1]) if bold
+                 else STYLE.blue(marker[1:-1])) +
                 subject_style(marker[-1], bold, red, light_red) +
                 (prefix.group(2) or "") +
                 subject_style(rest, bold, red, light_red))
@@ -401,17 +415,20 @@ def count_field_style(text: str, color: str, large_as_orange: bool) -> str:
 
 def colorize_stats_line(line: str, bold_subject: bool,
                         red_subject: bool,
-                        light_red_subject: bool = False) -> str:
+                        light_red_subject: bool = False,
+                        c_source: bool = False) -> str:
     if not STYLE.enabled:
         return line
     m = COMMIT_STATS_LINE_RE.match(line)
     if m:
+        sha = (STYLE.pale_yellow(m.group(7)) if c_source
+               else STYLE.yellow(m.group(7)))
         return (
             m.group(1) + m.group(2) +
             count_field_style(m.group(3), "green", large_as_orange=True) +
             m.group(4) +
             count_field_style(m.group(5), "red", large_as_orange=True) +
-            m.group(6) + STYLE.yellow(m.group(7)) + m.group(8) +
+            m.group(6) + sha + m.group(8) +
             subject_style(m.group(9), bold_subject, red_subject,
                           light_red_subject))
 
@@ -522,13 +539,14 @@ def render_section(label: str | None, log_args: list[str],
         rows = rows[:max(top, 0)]
 
     total_files = total_ins = total_dele = 0
-    for ch, subject, files, ins, dele, depth in rows:
+    for ch, subject, files, ins, dele, depth, has_c in rows:
         line = format_stats_line(files, ins, dele, ch, subject, depth)
         changed = ins + dele
-        bold = changed <= 8
+        bold = changed <= 16
         red = dele > ins and changed >= 100
         light_red = dele > ins and 10 <= changed < 100
-        print(colorize_stats_line(line, bold, red, light_red), flush=True)
+        print(colorize_stats_line(line, bold, red, light_red,
+                                  c_source=has_c), flush=True)
         total_files += files
         total_ins += ins
         total_dele += dele

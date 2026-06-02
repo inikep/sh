@@ -43,8 +43,15 @@ INTERESTING_PREFIXES = (
 
 
 @dataclass
+class IdentifierRecord:
+    identifier: str
+    origins: list[str]
+
+
+@dataclass
 class GrepHit:
     identifier: str
+    origins: list[str]
     hits: list[str]
 
 
@@ -114,25 +121,49 @@ def interesting_identifier(token: str) -> bool:
     return False
 
 
-def extract_identifiers(diff_text: str, message: str, added: Iterable[str], limit: int) -> list[str]:
-    candidates: list[str] = []
-    candidates.extend(Path(path).stem for path in added)
+def add_identifier(records: dict[str, set[str]], token: str, origin: str) -> None:
+    if not interesting_identifier(token):
+        return
+    records.setdefault(token, set()).add(origin)
+
+
+def extract_identifier_records(
+    diff_text: str,
+    subject: str,
+    body: str,
+    added: Iterable[str],
+    limit: int,
+) -> list[IdentifierRecord]:
+    records: dict[str, set[str]] = {}
+    for path in added:
+        add_identifier(records, Path(path).stem, "added_path")
     for line in diff_text.splitlines():
         if not line.startswith("+") or line.startswith("+++"):
             continue
-        candidates.extend(IDENT_RE.findall(line))
-    candidates.extend(IDENT_RE.findall(message))
+        for token in IDENT_RE.findall(line):
+            add_identifier(records, token, "diff_added_line")
+    for token in IDENT_RE.findall(subject):
+        add_identifier(records, token, "message_subject")
+    for token in IDENT_RE.findall(body):
+        add_identifier(records, token, "message_body")
 
-    seen: set[str] = set()
-    identifiers: list[str] = []
-    for token in candidates:
-        if token in seen or not interesting_identifier(token):
-            continue
-        seen.add(token)
-        identifiers.append(token)
-        if len(identifiers) >= limit:
-            break
-    return identifiers
+    return [
+        IdentifierRecord(identifier=token, origins=sorted(origins))
+        for token, origins in list(records.items())[:limit]
+    ]
+
+
+def extract_identifiers(diff_text: str, message: str, added: Iterable[str], limit: int) -> list[str]:
+    """Compatibility wrapper for callers/tests that only need identifier names."""
+    subject, _, body = message.partition("\n")
+    return [
+        record.identifier
+        for record in extract_identifier_records(diff_text, subject, body, added, limit)
+    ]
+
+
+def has_diff_origin(record) -> bool:
+    return "added_path" in record.origins or "diff_added_line" in record.origins
 
 
 def path_exists(worktree: Path, reference: str, path: str) -> bool:
@@ -164,23 +195,45 @@ def main() -> int:
     body = source_body(worktree, args.commit)
     paths = changed_paths(worktree, args.commit)
     added = added_paths(worktree, args.commit)
-    identifiers = extract_identifiers(
+    identifier_records = extract_identifier_records(
         source_diff(worktree, args.commit),
-        f"{subject}\n{body}",
+        subject,
+        body,
         added,
         args.max_identifiers,
     )
+    identifiers = [record.identifier for record in identifier_records]
 
     path_evidence = [
         {"path": path, "present_in_reference": path_exists(worktree, args.reference, path)}
         for path in added
     ]
     grep_hits = [
-        GrepHit(identifier=identifier, hits=grep_identifier(worktree, args.reference, identifier, args.max_hits))
-        for identifier in identifiers
+        GrepHit(
+            identifier=record.identifier,
+            origins=record.origins,
+            hits=grep_identifier(worktree, args.reference, record.identifier, args.max_hits),
+        )
+        for record in identifier_records
     ]
     present_identifiers = [hit.identifier for hit in grep_hits if hit.hits]
     absent_identifiers = [hit.identifier for hit in grep_hits if not hit.hits]
+    diff_identifiers = [record.identifier for record in identifier_records if has_diff_origin(record)]
+    message_only_identifiers = [
+        record.identifier for record in identifier_records if not has_diff_origin(record)
+    ]
+    present_diff_identifiers = [
+        hit.identifier for hit in grep_hits if hit.hits and has_diff_origin(hit)
+    ]
+    absent_diff_identifiers = [
+        hit.identifier for hit in grep_hits if not hit.hits and has_diff_origin(hit)
+    ]
+    present_message_only_identifiers = [
+        hit.identifier for hit in grep_hits if hit.hits and not has_diff_origin(hit)
+    ]
+    absent_message_only_identifiers = [
+        hit.identifier for hit in grep_hits if not hit.hits and not has_diff_origin(hit)
+    ]
 
     evidence = {
         "commit": args.commit,
@@ -189,15 +242,30 @@ def main() -> int:
         "changed_paths": paths,
         "added_paths": path_evidence,
         "identifiers_searched": identifiers,
+        "identifier_origins": {
+            record.identifier: record.origins for record in identifier_records
+        },
+        "diff_identifiers": diff_identifiers,
+        "message_only_identifiers": message_only_identifiers,
         "present_identifiers": present_identifiers,
         "absent_identifiers": absent_identifiers,
+        "present_diff_identifiers": present_diff_identifiers,
+        "absent_diff_identifiers": absent_diff_identifiers,
+        "present_message_only_identifiers": present_message_only_identifiers,
+        "absent_message_only_identifiers": absent_message_only_identifiers,
         "grep_hits": [asdict(hit) for hit in grep_hits],
         "summary": {
             "changed_path_count": len(paths),
             "added_path_count": len(added),
             "identifier_count": len(identifiers),
+            "diff_identifier_count": len(diff_identifiers),
+            "message_only_identifier_count": len(message_only_identifiers),
             "present_identifier_count": len(present_identifiers),
             "absent_identifier_count": len(absent_identifiers),
+            "present_diff_identifier_count": len(present_diff_identifiers),
+            "absent_diff_identifier_count": len(absent_diff_identifiers),
+            "present_message_only_identifier_count": len(present_message_only_identifiers),
+            "absent_message_only_identifier_count": len(absent_message_only_identifiers),
         },
     }
 

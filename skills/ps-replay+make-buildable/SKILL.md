@@ -147,7 +147,7 @@ For each source commit after the Group 8 marker:
 1. Record source index, SHA, subject, path list, and locked bucket.
 2. Before cherry-picking a non-marker commit, run a reference feature-presence gate:
 
-   - Extract concrete feature identifiers from the source diff and subject: new sysvars/status variables, command names, SQL tokens, C/C++ symbols, plugin names, test names, and newly added files.
+   - Extract concrete feature identifiers from the source diff first: new sysvars/status variables, command names, SQL tokens, C/C++ symbols, plugin names, test names, and newly added files. Message/subject identifiers are secondary context only because squashed or ported commit messages can mention features whose hunks are not in the current diff.
    - Capture the extraction and reference search evidence with the helper before deciding:
 
      ```sh
@@ -158,11 +158,12 @@ For each source commit after the Group 8 marker:
        --output $RUN_DIR/feature-evidence/<idx>-<sha12>.json
      ```
 
-     The JSON file is required run evidence. Cite it in the ledger row for apply/skip decisions.
-   - Search `$REFERENCE_BRANCH` for those identifiers and files with `git grep` and `git ls-tree`/`git cat-file` as needed. Inspect the nearby reference code only for semantic confirmation.
+     The JSON file is required run evidence. Cite it in the ledger row for apply/skip decisions. Prefer evidence fields that distinguish identifier origin: `diff_identifiers`, `message_only_identifiers`, `absent_diff_identifiers`, and `absent_message_only_identifiers`.
+   - Search `$REFERENCE_BRANCH` for diff/new-path identifiers and files with `git grep` and `git ls-tree`/`git cat-file` as needed. Inspect the nearby reference code only for semantic confirmation. Treat subject/body-only absent identifiers as a warning to inspect the patch, not as skip proof.
    - If the feature is present, moved, renamed, split, or implemented by a reference-equivalent mechanism, continue to the plain cherry-pick and ledger the mapping when it affects hunks or paths.
-   - If the feature itself is absent from `$REFERENCE_BRANCH`, do not cherry-pick the commit. Ledger `reference-feature-absent-skip` with the identifiers searched, reference evidence, source index/SHA/subject, and the no-output exception. No build is owed for this skipped non-marker commit, even if its locked bucket is source/build-system.
-   - Do not classify a feature as absent merely because a file moved or an API shape changed; absence means the reference lacks the feature behavior, user-visible variable/command/plugin, or equivalent implementation.
+   - If the feature itself is absent from `$REFERENCE_BRANCH`, do not cherry-pick the commit. Ledger `reference-feature-absent-skip` with the diff/new-path identifiers searched, reference evidence, source index/SHA/subject, and the no-output exception. No build is owed for this skipped non-marker commit, even if its locked bucket is source/build-system.
+   - Do not classify a feature as absent merely because a file moved, an API shape changed, or the commit message mentions absent side features. Absence means the reference lacks the feature behavior, user-visible variable/command/plugin, or equivalent implementation represented by the actual patch hunks.
+   - If the current diff hunks are present in the reference but subject/body identifiers are absent, apply the commit or let it become an `empty-skip-equivalent`; do not use `reference-feature-absent-skip` for the whole commit. Ledger this as `applied-equivalent` or `message-only-absent-apply` when it affects the decision.
 
 3. If marker: `git commit --allow-empty` with the original marker subject; no build unless it is the Group 8 checkpoint position.
 4. Otherwise run plain `git cherry-pick <sha>`.
@@ -237,7 +238,8 @@ Use only when needed for conflict or buildability, and ledger every row:
 - `squash`: combine exactly two adjacent source commits when most of the later commit is needed now.
 - `squash-cluster`: only with current-conversation engineer approval naming the members.
 - `applied-equivalent`: old source hunk is already present, moved/split/renamed, obsolete, or intentionally absent in the 5.7 reference.
-- `reference-feature-absent-skip`: skip a non-marker before cherry-pick when the pre-cherry-pick gate proves the feature behavior itself is absent from the reference.
+- `message-only-absent-apply`: apply a commit whose actual diff/new-path hunks are reference-present even though absent identifiers appear only in the subject/body.
+- `reference-feature-absent-skip`: skip a non-marker before cherry-pick when the pre-cherry-pick gate proves the feature behavior represented by the actual diff/new-path hunks is absent from the reference.
 
 Never use these mechanisms for convenience, batching, or hiding missing builds.
 

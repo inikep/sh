@@ -86,11 +86,14 @@ def warning_matches_reference(
     warning: DiffCheckWarning,
     get_reference_lines: Callable[[str], Iterable[str]],
 ) -> bool:
+    ref_lines = list(get_reference_lines(warning.path))
+    if warning.message == "new blank line at EOF.":
+        return (warning.added_line in (None, "")) and bool(ref_lines) and ref_lines[-1] == ""
     if warning.added_line is None:
         return False
     if "whitespace" not in warning.message and "space before tab" not in warning.message:
         return False
-    return warning.added_line in get_reference_lines(warning.path)
+    return warning.added_line in ref_lines
 
 
 def classify_warnings(

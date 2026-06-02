@@ -257,6 +257,11 @@ def phase_b_analyze(base, output, log_dir):
     print(f"  small with C/C++ (kept): {len(small_cpp)}")
     print(f"  small no-C++ (candidates): {len(small_nocpp)}  "
           f"squashable: {len(squash)}  orphan: {len(orphan)}")
+    for s, t in squash.items():
+        s_subj = git_out('log', '-1', '--format=%s', s).strip()
+        t_subj = git_out('log', '-1', '--format=%s', t).strip()
+        print(f"  squash {s[:11]} {s_subj}")
+        print(f"      -> {t[:11]} {t_subj}")
     return plan
 
 

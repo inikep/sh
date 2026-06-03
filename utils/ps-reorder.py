@@ -2681,17 +2681,6 @@ def build_output_branch(args, input_hash, base_hash, plan):
     return stats
 
 
-def emit_final_summary_marker(in_count, out_count, out_ins, out_del):
-    """Append an empty marker commit summarising the input/output sizes."""
-    subject = (f"=== {in_count} => {out_count} commits; "
-               f"total +{out_ins}/-{out_del} ===")
-    env = os.environ.copy()
-    for k in ('GIT_AUTHOR_DATE', 'GIT_COMMITTER_DATE'):
-        env.pop(k, None)
-    run_git(['commit', '--allow-empty', '-m', subject], env=env)
-    log_output_commit_stats(git_rev_parse('HEAD'))
-
-
 # ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
@@ -2843,8 +2832,6 @@ def log_terminal_summary(args, input_hash, base_hash, plan, stats):
     out_ins, out_del = scan_commits(base_hash, args.output_branch,
                                     label='OUTPUT_BRANCH')
 
-    emit_final_summary_marker(in_count, out_count, out_ins, out_del)
-
     diff_stat = run_git(['diff', '--stat', input_hash, args.output_branch],
                         check=False).stdout.strip()
     diff_content = run_git(['diff', input_hash, args.output_branch],
@@ -2970,12 +2957,15 @@ def main():
     parser = argparse.ArgumentParser(
         description='Reorder a Percona Server branch into logical commit groups.'
     )
-    parser.add_argument('--input-branch',  required=True,
+    parser.add_argument('--base',   required=True, dest='base_branch',
+                        metavar='BASE',
+                        help='Base branch of INPUT and OUTPUT.')
+    parser.add_argument('--input',  required=True, dest='input_branch',
+                        metavar='INPUT',
                         help='Branch name or commit hash to reorder.')
-    parser.add_argument('--output-branch', required=True,
+    parser.add_argument('--output', required=True, dest='output_branch',
+                        metavar='OUTPUT',
                         help='New branch name to create.')
-    parser.add_argument('--base-branch',   required=True,
-                        help='Base branch of INPUT_BRANCH and OUTPUT_BRANCH.')
     parser.add_argument('--report',        help=argparse.SUPPRESS)
     parser.add_argument('--force-output',  action='store_true',
                         help='Delete OUTPUT_BRANCH if it already exists.')

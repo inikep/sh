@@ -5,7 +5,11 @@ ps-reorder.py
 Reorder a Percona Server branch into logical commit groups and produce a
 new branch with a null diff to the original.
 
-Groups (separated by MARKER commits):
+Groups (separated by MARKER commits). The g<n> labels below are internal
+bucket ids; the MARKER commits display contiguous "GROUP N" numbers, which
+since the removal of the old group 9 no longer match the internal ids for the
+last groups (internal g10 displays as GROUP 9, g11 as GROUP 10, and the
+trailing "New commits" marker as GROUP 11):
   g1  Squashes        one squashed commit per category:
                         - doc/
                         - man/
@@ -19,7 +23,8 @@ Groups (separated by MARKER commits):
   g2  build-ps        build-ps/ portions split from source commits
   g3  CI configs      .travis.yml, .circleci/, azure-pipelines.yml,
                         .cirrus.yml, and .clang-tidy portions
-  g4  RocksDB         storage/rocksdb and mysql-test/suite/rocksdb*
+  g4  MyRocks: storage and MTR
+                      storage/rocksdb and mysql-test/suite/rocksdb*
                         portions; unsafe source-g11 moves stay in Remaining
   g5  MTR tests       [MTR-only] commits, plus g11 mysql-test-only commits
                         that cherry-pick cleanly and do not overlap earlier
@@ -33,14 +38,12 @@ Groups (separated by MARKER commits):
   g8  Upstream bug fixes
                       [upstream] commits, plus eligible g11 Remaining commits
                         that cherry-pick cleanly without protected overlaps
-  g9  Initial Percona Server tree
-                      commits whose subject starts with "[init]"
-  g10  MyRocks changes in kernel
+  g10  MyRocks kernel changes
                       commits whose subject contains "MYR" or "rocks"
                         (case-insensitive), unless moving would conflict or
                         overlap protected Remaining changes; mixed RocksDB
                         commits contribute only their non-g4 portion here
-  g11 Remaining       everything else, plus commits kept to preserve ordering
+  g11 Code changes    everything else, plus commits kept to preserve ordering
 
 Rules implemented (letters match the task):
   A) OUTPUT_BRANCH has null diff to INPUT_BRANCH. If the grouped replay still
@@ -54,10 +57,10 @@ Rules implemented (letters match the task):
      otherwise routed by subject-based whole-commit rules, and squashed into
      the corresponding g1 subcategory
   F) Commits containing g2/g3/g4 files are split; the g2/g3/g4 part goes to
-     its bucket, the remainder to g11. For g4+g11 splits, titles get suffixes
-     " [MyRocks part]" and " [non-MyRocks part]". When rerunning an already
-     grouped branch, source group 11 files stay in g11 if moving them into an
-     earlier dedicated bucket would be clobbered by a preserved later group.
+     its bucket, the remainder to g11. Split parts keep the original commit
+     subject unchanged. When rerunning an already grouped branch, source
+     group 11 files stay in g11 if moving them into an earlier dedicated
+     bucket would be clobbered by a preserved later group.
   G) Squashes keep the position of their first source commit (ordering within
      g1 follows first-seen position)
   H) A Markdown report is written
@@ -95,9 +98,6 @@ Rules implemented (letters match the task):
      skipped and one dedicated commit removes all such base files. If the path
      was introduced and deleted within INPUT_BRANCH, every reference to it is
      skipped so it never appears on OUTPUT_BRANCH.
-  P) Source commits whose subject starts with "[init]" are moved to the g9
-     initial Percona Server tree group after any g1 paths are extracted for
-     squash.
   Q) Source commits whose subject contains "MYR" or "rocks"
      (case-insensitive) are moved intact to the g10 MyRocks changes in kernel
      group unless a git cherry-pick probe reports a conflict or a later g11
@@ -124,12 +124,12 @@ Rules implemented (letters match the task):
      g6 Non-code changes group. Each candidate is probed by a cherry-pick at
      current HEAD: candidates that conflict are held back in g11, and
      candidates whose files would overlap a later protected group
-     (g7/g8/g9/g10) or an earlier-source Remaining commit are also kept in
+     (g7/g8/g10) or an earlier-source Remaining commit are also kept in
      g11, so promotion never drifts the tree from a reference replay.
      Promoted commits land in g6 in source order. Items with code files,
      locked subjects (Rule T), or any of the above conflicts stay in g11.
   T) Source commits whose subject contains "===" are locked from any
-     reordering: they skip the g5/g7/g8/g9/g10 subject routings (and the
+     reordering: they skip the g5/g7/g8/g10 subject routings (and the
      MyRocks/kernel "MYR"/"rocks" match), are not split into g2/g3/g4
      dedicated commits, and are also skipped by the g11 to g5 and g11 to g8
      cherry-pick promotions. The whole commit lands in g11 (or in its
@@ -710,20 +710,9 @@ def build_full_message(subject, body_rest, original_subject=None):
     return truncated + '\n\n' + body
 
 
-def truncate_with_suffix(subject, suffix):
-    """Return subject + suffix, ensuring total length <= MAX_TITLE_LEN."""
-    if len(subject) + len(suffix) <= MAX_TITLE_LEN:
-        return subject + suffix
-    return subject[:MAX_TITLE_LEN - len(suffix)] + suffix
-
-
-def truncate_with_suffix_and_original(subject, suffix):
-    full_subject = subject + suffix
-    truncated = truncate_with_suffix(subject, suffix)
-    original_subject = full_subject if truncated != full_subject else None
-    return truncated, original_subject
-
-
+# Suffixes a previous version of this tool appended to g4+g11 split parts.
+# No longer added, but still stripped before re-prefixing so that re-running
+# on an already-grouped branch does not stack tags onto the old suffix.
 SPLIT_SUBJECT_SUFFIXES = (' [MyRocks part]', ' [non-MyRocks part]')
 
 
@@ -813,22 +802,33 @@ def is_upstream_bug_fix_group_subject(subject):
     return subject.startswith('[upstream]')
 
 
-def is_init_group_subject(subject):
-    return subject.startswith('[init]')
-
-
+# Maps a marker's NAME to its INTERNAL group id (the g<id>_bucket it routes to
+# on re-parse, via source_group_bucket_name). After group 9 was removed the
+# displayed "GROUP N" numbers were made contiguous (… 8, 9, 10, 11), but the
+# internal ids below were left unchanged so the bucket plumbing stays stable.
+# Hence the divergence: e.g. "MyRocks kernel changes" displays as GROUP 9 but
+# keeps internal id 10 (bucket g10_bucket); "Code changes" displays as GROUP 10
+# but keeps internal id 11. Re-parse keys off the name, so the displayed number
+# is irrelevant here.
 GROUP_NAME_TO_NUMBER = {
     'Squashes': 1,
     'build-ps': 2,
     'CI configs': 3,
-    'RocksDB': 4,
+    'MyRocks: storage and MTR': 4,
+    'MyRocks': 4,   # legacy marker name; keep so old grouped branches re-parse
+    'RocksDB': 4,   # legacy marker name; keep so old grouped branches re-parse
     'MTR tests': 5,
     'Non-code changes': 6,
     'Build/Compilation': 7,
     'Upstream bug fixes': 8,
-    'Initial Percona Server tree': 9,
-    'MyRocks changes in kernel': 10,
-    'Remaining': 11,
+    'MyRocks kernel changes': 10,
+    'MyRocks changes in kernel': 10,  # legacy marker name
+    'Code changes': 11,
+    'Remaining': 11,  # legacy marker name; keep so old grouped branches re-parse
+    # Legacy group 9 was "Initial Percona Server tree"; its commits now route
+    # through normal classification (mostly Code changes) on a re-parse.
+    'Initial Percona Server tree': 11,
+    'New commits': 12,
 }
 
 _MARKER_RE = re.compile(r'^={3,} MARKER: GROUP \d+ — (.+?) ={3,}$')
@@ -1103,7 +1103,6 @@ def plan_commits(commits, base_hash, removed_paths):
         'g6_bucket':      [],
         'g7_bucket':      [],
         'g8_bucket':      [],
-        'g9_bucket':      [],
         'g10_bucket':      [],
         'g11_bucket':     [],
         'n_source_commits': len(commits),
@@ -1192,41 +1191,26 @@ def plan_commits(commits, base_hash, removed_paths):
                     if grp_part:
                         split_dedicated.append((grp, grp_part))
 
-            preserved_subject = info['subject']
-            preserved_original_subject = None
-            if any(grp == 'g4' for grp, _ in split_dedicated) and files:
-                preserved_subject, preserved_original_subject = (
-                    truncate_with_suffix_and_original(
-                        info['subject'], ' [non-MyRocks part]'))
-
             for grp, grp_part in split_dedicated:
-                subj = info['subject']
-                original_subject = None
-                if grp == 'g4' and files:
-                    subj, original_subject = (
-                        truncate_with_suffix_and_original(
-                            info['subject'], ' [MyRocks part]'))
                 append_bucket_item(f'{grp}_bucket', {
                     'info': info,
                     'files': list(grp_part),
-                    'subject': subj,
+                    'subject': info['subject'],
                     'body_rest': info['body_rest'],
                     'source_hash': ch,
                     'source_pos': idx,
                     'source_group': source_group,
-                    'original_subject': original_subject,
                 })
 
             if files:
                 append_bucket_item(source_group_bucket, {
                     'info': info,
                     'files': list(files),
-                    'subject': preserved_subject,
+                    'subject': info['subject'],
                     'body_rest': info['body_rest'],
                     'source_hash': ch,
                     'source_pos': idx,
                     'source_group': source_group,
-                    'original_subject': preserved_original_subject,
                 })
             elif g1_part or split_dedicated:
                 record_removed_commit(
@@ -1344,18 +1328,6 @@ def plan_commits(commits, base_hash, removed_paths):
                     'source_group': source_group,
                 })
             continue
-        if is_init_group_subject(info['subject']) and not locked_subject:
-            if files:
-                append_bucket_item('g9_bucket', {
-                    'info': info,
-                    'files': list(files),
-                    'subject': info['subject'],
-                    'body_rest': info['body_rest'],
-                    'source_hash': ch,
-                    'source_group': source_group,
-                })
-            continue
-
         # Partition by group
         g2_part, g3_part, g4_part = [], [], []
         g11_part = []
@@ -1446,37 +1418,24 @@ def plan_commits(commits, base_hash, removed_paths):
                     'source_group': source_group,
                 })
             if g4_part:
-                # "[MyRocks part]" suffix for the g4+g11 split per rule F.
-                subj = info['subject']
-                original_subject = None
-                if g11_part:
-                    subj, original_subject = truncate_with_suffix_and_original(
-                        info['subject'], ' [MyRocks part]')
                 append_bucket_item('g4_bucket', {
                     'info': info,
                     'files': list(g4_part),
-                    'subject': subj,
+                    'subject': info['subject'],
                     'body_rest': info['body_rest'],
                     'source_hash': ch,
                     'source_group': source_group,
-                    'original_subject': original_subject,
                 })
             if g11_part:
-                subj = info['subject']
-                original_subject = None
-                if g4_part:
-                    subj, original_subject = truncate_with_suffix_and_original(
-                        info['subject'], ' [non-MyRocks part]')
                 target_bucket = 'g10_bucket' if myrocks_kernel_subject else 'g11_bucket'
                 append_bucket_item(target_bucket, {
                     'info': info,
                     'files': list(g11_part),
-                    'subject': subj,
+                    'subject': info['subject'],
                     'body_rest': info['body_rest'],
                     'source_hash': ch,
                     'source_pos': idx,
                     'source_group': source_group,
-                    'original_subject': original_subject,
                 })
         elif g11_part:
             # No g2/g3/g4; just emit g11.
@@ -1787,7 +1746,7 @@ def init_hunk_dependency_graph(plan):
     global _HUNK_DEPENDENCY_GRAPH
     items = []
     for key in ('g2_bucket', 'g3_bucket', 'g4_bucket', 'g5_bucket',
-                'g6_bucket', 'g7_bucket', 'g8_bucket', 'g9_bucket',
+                'g6_bucket', 'g7_bucket', 'g8_bucket',
                 'g10_bucket', 'g11_bucket'):
         items.extend(plan.get(key, ()))
     log(f"=== HUNK DEPENDENCY GRAPH ===")
@@ -2256,7 +2215,7 @@ def drain_noncode_from_remaining(g11_bucket, g6_bucket, protected_items=None):
     the tree from a reference replay. Held back in g11 when (a) the
     cherry-pick probe at current HEAD reports a conflict, or (b) advancing
     the commit ahead of Remaining would overlap a later protected commit
-    (g7/g8/g9/g10 or an earlier-source Remaining commit)."""
+    (g7/g8/g10 or an earlier-source Remaining commit)."""
     def is_candidate(item):
         return (commit_has_no_code_files(item['files']) and
                 not is_locked_from_promotion(item['subject']))
@@ -2311,7 +2270,7 @@ def promote_remaining_to_upstream(g11_bucket, g8_bucket, protected_items=None):
 
 
 def emit_split_bucket(bucket, tag, removed_commits=None):
-    """Write individual commits of a split bucket (g2/g3/g4/g6/g7/g8/g9/g10/g11)."""
+    """Write individual commits of a split bucket (g2/g3/g4/g6/g7/g8/g10/g11)."""
     emitted = 0
     skipped_empty = 0
     total = len(bucket)
@@ -2489,7 +2448,6 @@ def build_output_branch(args, input_hash, base_hash, plan):
         'g8_remaining_result_kept': 0,
         'g8_remaining_myr_kept': 0,
         'g8_remaining_locked_kept': 0,
-        'g9_emitted': 0, 'g9_skipped': 0,
         'g10_emitted': 0, 'g10_skipped': 0,
         'g10_conflict_fallback': 0,
         'g10_overlap_fallback': 0,
@@ -2542,8 +2500,8 @@ def build_output_branch(args, input_hash, base_hash, plan):
     stats['g3_emitted'], stats['g3_skipped'] = e, s
 
     # -- Group 4 ------------------------------------------------------------
-    log("=== GROUP 4: RocksDB ===")
-    marker_commit(4, 'RocksDB',
+    log("=== GROUP 4: MyRocks: storage and MTR ===")
+    marker_commit(4, 'MyRocks: storage and MTR',
                   'storage/rocksdb and mysql-test/suite/rocksdb*')
     e, s = emit_split_bucket(plan['g4_bucket'], 'g4',
                              plan['removed_commits'])
@@ -2562,8 +2520,7 @@ def build_output_branch(args, input_hash, base_hash, plan):
     promoted_g5_bucket = []
     promoted, conflict_kept, overlap_kept = promote_mysql_test_only_to_mtr(
         plan['g11_bucket'], promoted_g5_bucket, 'g11',
-        plan['g7_bucket'] + plan['g8_bucket'] + plan['g9_bucket'] +
-        plan['g10_bucket'])
+        plan['g7_bucket'] + plan['g8_bucket'] + plan['g10_bucket'])
     stats['g5_promoted_from_remaining'] = promoted
     stats['g5_remaining_conflict_kept'] = conflict_kept
     stats['g5_remaining_overlap_kept'] = overlap_kept
@@ -2580,8 +2537,7 @@ def build_output_branch(args, input_hash, base_hash, plan):
                   '.hxx .cmake, and no CMakeLists.txt / *.cmake.in).')
     promoted, conflict_kept, overlap_kept = drain_noncode_from_remaining(
         plan['g11_bucket'], plan['g6_bucket'],
-        plan['g7_bucket'] + plan['g8_bucket'] + plan['g9_bucket'] +
-        plan['g10_bucket'])
+        plan['g7_bucket'] + plan['g8_bucket'] + plan['g10_bucket'])
     stats['g6_promoted_from_remaining'] = promoted
     stats['g6_remaining_conflict_kept'] = conflict_kept
     stats['g6_remaining_overlap_kept'] = overlap_kept
@@ -2622,7 +2578,7 @@ def build_output_branch(args, input_hash, base_hash, plan):
         (promoted, conflict_kept, overlap_kept, mtr_kept, result_kept, myr_kept,
          locked_kept) = promote_remaining_to_upstream(
             plan['g11_bucket'], promoted_g8_bucket,
-            plan['g9_bucket'] + plan['g10_bucket'])
+            plan['g10_bucket'])
         stats['g8_promoted_from_remaining'] = promoted
         stats['g8_remaining_conflict_kept'] = conflict_kept
         stats['g8_remaining_overlap_kept'] = overlap_kept
@@ -2635,17 +2591,9 @@ def build_output_branch(args, input_hash, base_hash, plan):
         stats['g8_emitted'] += e
         stats['g8_skipped'] += s
 
-    # -- Group 9 ------------------------------------------------------------
-    log("=== GROUP 9: Initial Percona Server tree ===")
-    marker_commit(9, 'Initial Percona Server tree',
-                  'Whole commits whose subject starts with "[init]".')
-    e, s = emit_split_bucket(plan['g9_bucket'], 'g9',
-                             plan['removed_commits'])
-    stats['g9_emitted'], stats['g9_skipped'] = e, s
-
-    # -- Group 10 ------------------------------------------------------------
-    log("=== GROUP 10: MyRocks changes in kernel ===")
-    marker_commit(10, 'MyRocks changes in kernel',
+    # -- Group 9 (internal bucket g10) ---------------------------------------
+    log("=== GROUP 9: MyRocks kernel changes ===")
+    marker_commit(9, 'MyRocks kernel changes',
                   'Whole commits whose subject contains "MYR" or "rocks" '
                   '(case-insensitive), unless moving would cause a git '
                   'conflict or a later Remaining commit would overwrite the '
@@ -2659,11 +2607,25 @@ def build_output_branch(args, input_hash, base_hash, plan):
     stats['g10_conflict_fallback'] = conflict_fallback
     stats['g10_overlap_fallback'] = overlap_fallback
 
-    # -- Group 11 -----------------------------------------------------------
-    log("=== GROUP 11: Remaining ===")
-    marker_commit(11, 'Remaining',
-                  'Everything not classified into groups 1-9.')
+    # -- Group 10 (internal bucket g11) --------------------------------------
+    log("=== GROUP 10: Code changes ===")
+    marker_commit(10, 'Code changes',
+                  'Everything not classified into the earlier groups.')
     plan['g11_bucket'].sort(key=lambda item: item.get('source_pos', -1))
+    myr_prefixed = 0
+    for item in plan['g11_bucket']:
+        if is_myrocks_kernel_group_subject(item['subject']):
+            subject, original_subject = add_subject_prefix_with_original(
+                item['subject'], '[MYR]',
+                original_subject=item.get('original_subject'))
+            if subject != item['subject']:
+                item['subject'] = subject
+                item['original_subject'] = original_subject
+                myr_prefixed += 1
+    if myr_prefixed:
+        log(f"  [g11] added [MYR] prefix to {myr_prefixed} MYR/rocks-subject "
+            f"commit(s) left in Remaining")
+    stats['g11_myr_prefixed'] = myr_prefixed
     e, s = emit_split_bucket(plan['g11_bucket'], 'g11',
                              plan['removed_commits'])
     stats['g11_emitted'], stats['g11_skipped'] = e, s
@@ -2677,6 +2639,11 @@ def build_output_branch(args, input_hash, base_hash, plan):
         stats['snap_emitted'] = 1
     elif snap_paths:
         stats['snap_skipped'] = 1
+
+    # -- Final marker (group 11) ---------------------------------------------
+    log("=== GROUP 11: New commits ===")
+    marker_commit(11, 'New commits',
+                  'Trailing marker; new commits are added after this point.')
 
     return stats
 
@@ -2876,7 +2843,7 @@ def log_terminal_summary(args, input_hash, base_hash, plan, stats):
     log("Group totals:")
     log("  Group              Emitted  Skipped")
     for g in ('g1', 'g2', 'g3', 'g4', 'g5', 'g6',
-              'g7', 'g8', 'g9', 'g10', 'g11'):
+              'g7', 'g8', 'g10', 'g11'):
         log(f"  {g:<18} {stats[f'{g}_emitted']:>7}  "
             f"{stats[f'{g}_skipped']:>7}")
     log(f"  {'removed-base-files':<18} "

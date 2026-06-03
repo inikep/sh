@@ -129,13 +129,14 @@ SOURCE_PREFIXES = (
     "mysys/",
     "mysys_ssl/",
     "plugin/",
+    "scripts/",
     "sql/",
     "storage/",
     "strings/",
     "unittest/",
     "vio/",
 )
-SOURCE_EXACT = {"CMakeLists.txt", "VERSION"}
+SOURCE_EXACT = {"CMakeLists.txt", "VERSION", "configure.cmake", "config.h.cmake"}
 SOURCE_EXTENSIONS = (
     ".h",
     ".c",
@@ -271,7 +272,6 @@ def is_no_build_path(path: str) -> bool:
         or "/mysql-test/" in path
         or path.endswith((".md", ".rst", ".1", ".8", ".result", ".spec"))
         or ".spec." in path
-        or (path.startswith("scripts/") and not path.lower().endswith(".cmake"))
     )
 
 

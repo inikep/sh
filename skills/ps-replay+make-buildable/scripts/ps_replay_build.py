@@ -21,6 +21,7 @@ DEFAULT_CMAKE_FLAGS = [
     "-DWITH_READLINE=system",
     "-DCMAKE_C_COMPILER_LAUNCHER=ccache",
     "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache",
+    "-DCMAKE_CXX_FLAGS=-fpermissive",
 ]
 
 

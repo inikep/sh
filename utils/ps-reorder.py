@@ -43,7 +43,11 @@ trailing "New commits" marker as GROUP 11):
                         (case-insensitive), unless moving would conflict or
                         overlap protected Remaining changes; mixed RocksDB
                         commits contribute only their non-g4 portion here
-  g11 Code changes    everything else, plus commits kept to preserve ordering
+  g11 Code changes    everything else, plus commits kept to preserve ordering.
+                        On a re-parse these commits (source group 11) are kept
+                        in place and are NOT re-promoted into earlier groups;
+                        only "New commits" (after the trailing marker) and
+                        freshly classified commits feed the g5/g6/g8 promotions.
 
 Rules implemented (letters match the task):
   A) OUTPUT_BRANCH has null diff to INPUT_BRANCH. If the grouped replay still
@@ -277,6 +281,13 @@ G1_STORAGE_TOKUDB = 'storage-tokudb'
 G1_PS_TOKUDB_ADMIN = 'ps-tokudb-admin'
 G1_VERSION_UNIV = 'version-univ'
 G1_TOKUDB_TESTS = 'tokudb-tests'
+
+# G1 squash categories that correspond to TokuDB content. A commit whose
+# TokuDB paths are peeled into these squashes, and which then stays in g10
+# (MyRocks kernel changes), is flagged with a [toku] subject prefix.
+G1_TOKUDB_CATEGORIES = frozenset({
+    G1_TOKUDB_BACKUP, G1_STORAGE_TOKUDB, G1_PS_TOKUDB_ADMIN, G1_TOKUDB_TESTS,
+})
 
 G1_SUBJECTS = {
     G1_DOC:             'Squash: doc/',
@@ -918,6 +929,14 @@ def is_preserved_source_group_item(item):
     return source_group_bucket_name(item.get('source_group')) is not None
 
 
+def is_code_changes_item(item):
+    """True for commits already settled under the "Code changes" marker
+    (internal source group 11) on a re-parse. These are kept in place and are
+    never promoted into earlier groups; only "New commits" (source group 12)
+    and freshly classified commits (no source group) are promotion candidates."""
+    return item.get('source_group') == 11
+
+
 def item_source_cache_key(item):
     source_by_file = item.get('source_by_file') or {}
     source_history_by_file = item.get('source_history_by_file') or {}
@@ -1222,6 +1241,7 @@ def plan_commits(commits, base_hash, removed_paths):
         g1_part, non_g1_files = split_out_g1_files(files)
         for cat, fl in g1_part.items():
             add_g1_files_to_plan(plan, cat, fl, info, idx)
+        has_toku_g1 = any(cat in G1_TOKUDB_CATEGORIES for cat in g1_part)
         files = non_g1_files
         if g1_part and not files:
             cats = ', '.join(sorted(g1_part))
@@ -1392,6 +1412,7 @@ def plan_commits(commits, base_hash, removed_paths):
                 'source_hash': ch,
                 'source_pos': idx,
                 'source_group': source_group,
+                'has_toku_g1': has_toku_g1,
             })
             continue
 
@@ -1436,6 +1457,7 @@ def plan_commits(commits, base_hash, removed_paths):
                     'source_hash': ch,
                     'source_pos': idx,
                     'source_group': source_group,
+                    'has_toku_g1': has_toku_g1,
                 })
         elif g11_part:
             # No g2/g3/g4; just emit g11.
@@ -1989,7 +2011,8 @@ def filter_with_drift_guard(*,
     # planning (e.g. source_group preservation): they emit before any new
     # promotion at this group's marker, so we pre-apply their file states to
     # HEAD before probing candidates. Preserve items inside the candidate set
-    # (g10's source_group==9 carve-out) bypass the cherry-pick but contribute
+    # (g10's source_group==10 carve-out: commits already settled in the
+    # MyRocks-kernel group on a re-parse) bypass the cherry-pick but contribute
     # their file state in turn.
     #
     # HEAD is reset to the baseline after probing so the subsequent emission
@@ -2190,6 +2213,7 @@ def promote_mysql_test_only_to_mtr(source_bucket, g5_bucket, source_tag,
         return (touches_only_mysql_test(item['files']) and
                 not contains_g1_paths(item['files']) and
                 not is_preserved_source_group_item(item) and
+                not is_code_changes_item(item) and
                 not is_locked_from_promotion(item['subject']))
 
     result = promote_with_drift_guard(
@@ -2218,6 +2242,7 @@ def drain_noncode_from_remaining(g11_bucket, g6_bucket, protected_items=None):
     (g7/g8/g10 or an earlier-source Remaining commit)."""
     def is_candidate(item):
         return (commit_has_no_code_files(item['files']) and
+                not is_code_changes_item(item) and
                 not is_locked_from_promotion(item['subject']))
 
     result = promote_with_drift_guard(
@@ -2257,7 +2282,7 @@ def promote_remaining_to_upstream(g11_bucket, g8_bucket, protected_items=None):
         source_tag='g11',
         dest_tag='g8',
         unit_label='remaining',
-        candidate_filter=lambda _item: True,
+        candidate_filter=lambda item: not is_code_changes_item(item),
         skip_classifier=classify_skip,
         external_protected_items=protected_items,
         overlap_strategy='global-unsafe',
@@ -2350,10 +2375,26 @@ def prepare_g10_bucket(g10_bucket, fallback_bucket, protected_items=None):
         source_tag='g10',
         fallback_tag='remaining',
         unit_label='MyRocks/kernel',
-        preserve_filter=lambda item: item.get('source_group') == 9,
+        preserve_filter=lambda item: item.get('source_group') == 10,
         external_protected_items=protected_items,
         overlap_strategy='global-unsafe',
     )
+    # Flag commits that stay in g10 and had TokuDB paths squashed into g1 with
+    # a [toku] subject prefix. Done here (not at planning time) so commits that
+    # fall back to Remaining via the drift guard above keep their plain subject.
+    toku_marked = 0
+    for item in working:
+        if item.get('has_toku_g1'):
+            subject, original_subject = add_subject_prefix_with_original(
+                item['subject'], '[toku]',
+                original_subject=item.get('original_subject'))
+            if subject != item['subject']:
+                item['subject'] = subject
+                item['original_subject'] = original_subject
+                toku_marked += 1
+    if toku_marked:
+        log(f"  [g10] added [toku] prefix to {toku_marked} commit(s) with "
+            f"TokuDB paths squashed into g1")
     return working, result['conflict_rejected'], result['overlap_rejected']
 
 

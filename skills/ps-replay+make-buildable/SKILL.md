@@ -49,6 +49,7 @@ The source list may include task-specified filters, for example `--first-parent`
 - **HR-9:** Do not strip source/plugin/build-system hunks to avoid a required build.
 - **HR-10:** Build-driven fixes update the side that lags `$REFERENCE_BRANCH`; do not revert a region that already matches reference.
 - **HR-11:** If a rule violation happens, the run is invalid from that point. Stop and report it; do not repair it by later null diff or final build.
+- **HR-12:** Feature gating is upfront and range-only: run `ps_replay_range_feature_gate.py` once before post-Group-8 replay, then consult that result. Do not run per-commit feature-gate helpers.
 
 ## Prepare
 
@@ -83,8 +84,8 @@ The source list may include task-specified filters, for example `--first-parent`
 
 5. Create `$OUTPUT_BRANCH` from `$DESTINATION_BASE_BRANCH`.
 6. Start `$RUN_DIR/ledger.tsv`. Record only non-routine events: conflict resolutions, empty skips, deferred hunks, forward-folds, squashes, build fixes, waivers, reconciliation commits, final parity, and final build. Routine clean cherry-picks need not be ledgered.
-7. Pre-Group-8: skip feature-evidence gating entirely. Cherry-pick and resolve conflicts only. Run the optional `scripts/ps_replay_feature_gate.py` only when a specific commit looks suspicious (e.g. introduces a top-level feature absent from `$REFERENCE_BRANCH`) and you need evidence to justify a `reference-feature-absent-skip` ledger row.
-8. Before post-Group-8 replay, build one range-level feature evidence file for the selected source commits against the target reference range:
+7. Pre-Group-8: skip feature-evidence gating entirely. Cherry-pick and resolve conflicts only.
+8. Before post-Group-8 replay, run the feature gate exactly once: build one range-level feature evidence file for the selected source commits against the target reference range:
 
    ```sh
    scripts/ps_replay_range_feature_gate.py \
@@ -97,7 +98,7 @@ The source list may include task-specified filters, for example `--first-parent`
      --output $RUN_DIR/feature-evidence/range-gate.json
    ```
 
-   This compares `$BASE_BRANCH..$TIP_BRANCH` after task filters (for example `^mysql-5.7.44`) to `$DESTINATION_BASE_BRANCH..$REFERENCE_BRANCH`, not every commit to the whole reference tree. Record the command and summary counts. Do not also run the per-commit feature gate for every commit.
+   This compares `$BASE_BRANCH..$TIP_BRANCH` after task filters (for example `^mysql-5.7.44`) to `$DESTINATION_BASE_BRANCH..$REFERENCE_BRANCH`, not every commit to the whole reference tree. Record the command and summary counts. This range gate is the only feature-gate run for the replay.
 
 ## Build Setup
 
@@ -152,7 +153,7 @@ Before the Group 8 checkpoint, no build is owed for any commit. Use the minimum 
 4. If there are conflicts: resolve hunk by hunk using the rules below, `git add`, `git cherry-pick --continue --no-edit`. Ledger one row per resolved file (or one summary row per commit). Continue.
 5. If the cherry-pick succeeded cleanly with no conflicts: no ledger row needed.
 
-Do not run `ps_replay_feature_gate.py` per commit, and do not write a ledger row for every clean apply. Only escalate to the full per-commit gate when a specific commit looks like it adds a feature absent from `$REFERENCE_BRANCH` and you intend to record a `reference-feature-absent-skip`.
+Do not run any feature gate per commit, and do not write a ledger row for every clean apply.
 
 ### Post-Group-8 (full path)
 
@@ -163,17 +164,7 @@ For each source commit after the Group 8 marker:
 
    - `reference-present`, `message-only-review`, `partial-match-review`, or `no-diff-identifiers` entries may proceed to plain cherry-pick unless the patch itself looks semantically absent. Ledger only entries whose mapping affects conflict resolution, skip decisions, or staged-path explanations.
    - `needs-review` entries are not automatic skips. Inspect the source patch, `diff_identifiers`, `unmatched_diff_identifiers`, path matches, and nearby `$REFERENCE_BRANCH` code. Search targeted identifiers/files with `git grep`, `git ls-tree`, or `git cat-file` as needed.
-   - Run the per-commit helper only for a specific ambiguous commit when you are considering `reference-feature-absent-skip` or need more detailed grep evidence:
-
-     ```sh
-     scripts/ps_replay_feature_gate.py \
-       --worktree . \
-       --commit <source-sha> \
-       --reference $REFERENCE_BRANCH \
-       --output $RUN_DIR/feature-evidence/<idx>-<sha12>.json
-     ```
-
-     Cite either the range-gate record or the per-commit JSON in ledger rows for apply/skip decisions. Prefer evidence fields that distinguish identifier origin: `diff_identifiers`, `message_only_identifiers`, `matched_diff_identifiers`, `unmatched_diff_identifiers`, `absent_diff_identifiers`, and `absent_message_only_identifiers`.
+   - Do not run `ps_replay_feature_gate.py` or any other per-commit feature-gate helper. For apply/skip decisions, cite the upfront range-gate record plus any targeted manual inspection commands. Prefer evidence fields that distinguish identifier origin: `diff_identifiers`, `message_only_identifiers`, `matched_diff_identifiers`, `unmatched_diff_identifiers`, `absent_diff_identifiers`, and `absent_message_only_identifiers`.
    - If the feature is present, moved, renamed, split, or implemented by a reference-equivalent mechanism, continue to the plain cherry-pick and ledger the mapping when it affects hunks or paths.
    - If the feature itself is absent from `$REFERENCE_BRANCH`, do not cherry-pick the commit. Ledger `reference-feature-absent-skip` with the diff/new-path identifiers searched, reference evidence, source index/SHA/subject, and the no-output exception. No build is owed for this skipped non-marker commit, even if its locked bucket is source/build-system.
    - Do not classify a feature as absent merely because a file moved, an API shape changed, or the commit message mentions absent side features. Absence means the reference lacks the feature behavior, user-visible variable/command/plugin, or equivalent implementation represented by the actual patch hunks.
@@ -329,12 +320,11 @@ Direct Git and build commands are the default. Helper scripts are optional and m
 Allowed helpers:
 
 - `ps_replay_scan_range.py`: preflight scan of source/reference ranges for markers, squash/snap-like commits, and reference-only commits. Use during the reference-shape audit.
-- `ps_replay_range_feature_gate.py`: range-level feature audit. Use once before post-Group-8 replay to compare selected source commits against `$DESTINATION_BASE_BRANCH..$REFERENCE_BRANCH`; consult `decision_hint` before each post-Group-8 non-marker commit.
+- `ps_replay_range_feature_gate.py`: range-level feature audit. Use once before post-Group-8 replay to compare selected source commits against `$DESTINATION_BASE_BRANCH..$REFERENCE_BRANCH`; consult `decision_hint` before each post-Group-8 non-marker commit. This is the only allowed feature-gate helper in this skill.
 - `ps_replay_batch.py`: bounded replay driver. It must stop on conflicts, build failures, missing build records, and HP-8 staged-path failures; use `--classify-only` before trusting bucket decisions.
 - `ps_replay_auto_loop.sh`: compatibility wrapper around `ps_replay_batch.py`; it must inherit the same stop/build/cross-check behavior.
 - `ps_replay_build.py`: standard CMake/build runner that writes logs.
 - `ps_replay_errors.py`: extracts likely root-cause diagnostics from large build logs.
-- `ps_replay_feature_gate.py`: detailed per-commit feature evidence. Use only for ambiguous range-gate entries or when considering `reference-feature-absent-skip`, not routinely for every post-Group-8 commit.
 - `ps_replay_conflict_triage.py`: prints conflict status and may stage only files whose conflict regions already match safely; remaining files require manual hunk review.
 - `ps_replay_diff_check.py`: runs `git diff --check` or `git diff --cached --check`, compares warning lines to `$REFERENCE_BRANCH`, and exits success when every warning is reference-matching whitespace that should be preserved.
 - `ps_replay_resolve_conflicts.py`: inspection-only conflict display with nearby reference context.

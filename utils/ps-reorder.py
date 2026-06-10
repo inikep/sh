@@ -6,10 +6,12 @@ Reorder a Percona Server branch into logical commit groups and produce a
 new branch with a null diff to the original.
 
 Groups (separated by MARKER commits). The g<n> labels below are internal
-bucket ids; the MARKER commits display contiguous "GROUP N" numbers, which
-since the removal of the old group 9 no longer match the internal ids for the
-last groups (internal g10 displays as GROUP 9, g11 as GROUP 10, and the
-trailing "New commits" marker as GROUP 11):
+bucket ids; the MARKER commits display contiguous "GROUP N" numbers in
+EMISSION order, which no longer match the internal ids. Emission order and
+displayed numbers are: g1=GROUP 1, g2=GROUP 2, g3=GROUP 3, g4=GROUP 4,
+g5=GROUP 5, g6=GROUP 6, g10 (TokuDB+MyRocks kernel)=GROUP 7, g7 (Build/Compilation)=
+GROUP 8, g8 (Upstream)=GROUP 9, g11 (Code changes)=GROUP 10, and the trailing
+"New commits" marker=GROUP 11:
   g1  Squashes        one squashed commit per category:
                         - doc/
                         - man/
@@ -38,7 +40,7 @@ trailing "New commits" marker as GROUP 11):
   g8  Upstream bug fixes
                       [upstream] commits, plus eligible g11 Remaining commits
                         that cherry-pick cleanly without protected overlaps
-  g10  MyRocks kernel changes
+  g10  TokuDB+MyRocks kernel changes
                       commits whose subject contains "MYR" or "rocks"
                         (case-insensitive), unless moving would conflict or
                         overlap protected Remaining changes; mixed RocksDB
@@ -814,13 +816,13 @@ def is_upstream_bug_fix_group_subject(subject):
 
 
 # Maps a marker's NAME to its INTERNAL group id (the g<id>_bucket it routes to
-# on re-parse, via source_group_bucket_name). After group 9 was removed the
-# displayed "GROUP N" numbers were made contiguous (… 8, 9, 10, 11), but the
-# internal ids below were left unchanged so the bucket plumbing stays stable.
-# Hence the divergence: e.g. "MyRocks kernel changes" displays as GROUP 9 but
-# keeps internal id 10 (bucket g10_bucket); "Code changes" displays as GROUP 10
-# but keeps internal id 11. Re-parse keys off the name, so the displayed number
-# is irrelevant here.
+# on re-parse, via source_group_bucket_name). The displayed "GROUP N" numbers
+# are contiguous in EMISSION order, but the internal ids below were left
+# unchanged so the bucket plumbing stays stable. Hence the divergence: e.g.
+# "TokuDB+MyRocks kernel changes" displays as GROUP 7 but keeps internal id 10
+# (bucket g10_bucket); "Build/Compilation" displays as GROUP 8 / internal id 7;
+# "Code changes" displays as GROUP 10 / internal id 11. Re-parse keys off the
+# name, so the displayed number is irrelevant here.
 GROUP_NAME_TO_NUMBER = {
     'Squashes': 1,
     'build-ps': 2,
@@ -832,7 +834,8 @@ GROUP_NAME_TO_NUMBER = {
     'Non-code changes': 6,
     'Build/Compilation': 7,
     'Upstream bug fixes': 8,
-    'MyRocks kernel changes': 10,
+    'TokuDB+MyRocks kernel changes': 10,
+    'MyRocks kernel changes': 10,     # legacy marker name
     'MyRocks changes in kernel': 10,  # legacy marker name
     'Code changes': 11,
     'Remaining': 11,  # legacy marker name; keep so old grouped branches re-parse
@@ -2586,22 +2589,39 @@ def build_output_branch(args, input_hash, base_hash, plan):
                              plan['removed_commits'])
     stats['g6_emitted'], stats['g6_skipped'] = e, s
 
-    # -- Group 7 ------------------------------------------------------------
-    log("=== GROUP 7: Build/Compilation ===")
-    marker_commit(7, 'Build/Compilation',
+    # -- Group 7 (internal bucket g10) ---------------------------------------
+    log("=== GROUP 7: TokuDB+MyRocks kernel changes ===")
+    marker_commit(7, 'TokuDB+MyRocks kernel changes',
+                  'Whole commits whose subject contains "MYR" or "rocks" '
+                  '(case-insensitive), unless moving would cause a git '
+                  'conflict or a later Remaining commit would overwrite the '
+                  'same patch; mixed g4 commits contribute only their non-g4 '
+                  'portion here.')
+    prepared_g10_bucket, conflict_fallback, overlap_fallback = prepare_g10_bucket(
+        plan['g10_bucket'], plan['g11_bucket'],
+        plan['g7_bucket'] + plan['g8_bucket'] + plan['g11_bucket'])
+    e, s = emit_split_bucket(prepared_g10_bucket, 'g10',
+                             plan['removed_commits'])
+    stats['g10_emitted'], stats['g10_skipped'] = e, s
+    stats['g10_conflict_fallback'] = conflict_fallback
+    stats['g10_overlap_fallback'] = overlap_fallback
+
+    # -- Group 8 (internal bucket g7) ----------------------------------------
+    log("=== GROUP 8: Build/Compilation ===")
+    marker_commit(8, 'Build/Compilation',
                   'Whole commits whose subject starts with "[compilation]".')
     e, s = emit_split_bucket(plan['g7_bucket'], 'g7',
                              plan['removed_commits'])
     stats['g7_emitted'], stats['g7_skipped'] = e, s
 
-    # -- Group 8 ------------------------------------------------------------
-    log("=== GROUP 8: Upstream bug fixes ===")
-    marker_commit(8, 'Upstream bug fixes',
+    # -- Group 9 (internal bucket g8) ----------------------------------------
+    log("=== GROUP 9: Upstream bug fixes ===")
+    marker_commit(9, 'Upstream bug fixes',
                   'Whole commits whose subject starts with "[upstream]", plus '
                   'Remaining commits that cherry-pick cleanly after existing '
-                  'g8 commits without patch-overlapping later groups or '
-                  'matching g10 MyRocks/kernel subject rules; g11 promotions '
-                  'keep their original subjects.')
+                  'g8 commits, excluding [MTR-only]/[result-only]/MyRocks-'
+                  'kernel-subject commits; g11 promotions keep their original '
+                  'subjects.')
     e, s = emit_split_bucket(plan['g8_bucket'], 'g8',
                              plan['removed_commits'])
     stats['g8_emitted'], stats['g8_skipped'] = e, s
@@ -2619,7 +2639,7 @@ def build_output_branch(args, input_hash, base_hash, plan):
         (promoted, conflict_kept, overlap_kept, mtr_kept, result_kept, myr_kept,
          locked_kept) = promote_remaining_to_upstream(
             plan['g11_bucket'], promoted_g8_bucket,
-            plan['g10_bucket'])
+            [])
         stats['g8_promoted_from_remaining'] = promoted
         stats['g8_remaining_conflict_kept'] = conflict_kept
         stats['g8_remaining_overlap_kept'] = overlap_kept
@@ -2631,22 +2651,6 @@ def build_output_branch(args, input_hash, base_hash, plan):
                                  plan['removed_commits'])
         stats['g8_emitted'] += e
         stats['g8_skipped'] += s
-
-    # -- Group 9 (internal bucket g10) ---------------------------------------
-    log("=== GROUP 9: MyRocks kernel changes ===")
-    marker_commit(9, 'MyRocks kernel changes',
-                  'Whole commits whose subject contains "MYR" or "rocks" '
-                  '(case-insensitive), unless moving would cause a git '
-                  'conflict or a later Remaining commit would overwrite the '
-                  'same patch; mixed g4 commits contribute only their non-g4 '
-                  'portion here.')
-    prepared_g10_bucket, conflict_fallback, overlap_fallback = prepare_g10_bucket(
-        plan['g10_bucket'], plan['g11_bucket'], plan['g11_bucket'])
-    e, s = emit_split_bucket(prepared_g10_bucket, 'g10',
-                             plan['removed_commits'])
-    stats['g10_emitted'], stats['g10_skipped'] = e, s
-    stats['g10_conflict_fallback'] = conflict_fallback
-    stats['g10_overlap_fallback'] = overlap_fallback
 
     # -- Group 10 (internal bucket g11) --------------------------------------
     log("=== GROUP 10: Code changes ===")

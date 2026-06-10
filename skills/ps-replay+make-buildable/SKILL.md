@@ -77,7 +77,7 @@ The source list may include task-specified filters, for example `--first-parent`
 4. Locate the exact marker subject:
 
    ```text
-   ==================== MARKER: GROUP 8 — Upstream bug fixes ====================
+   ==================== MARKER: GROUP 9 — Upstream bug fixes ====================
    ```
 
    Record its 1-based source index. Stop if absent.
@@ -321,8 +321,8 @@ Allowed helpers:
 
 - `ps_replay_scan_range.py`: preflight scan of source/reference ranges for markers, squash/snap-like commits, and reference-only commits. Use during the reference-shape audit.
 - `ps_replay_range_feature_gate.py`: range-level feature audit. Use once before post-Group-8 replay to compare selected source commits against `$DESTINATION_BASE_BRANCH..$REFERENCE_BRANCH`; consult `decision_hint` before each post-Group-8 non-marker commit. This is the only allowed feature-gate helper in this skill.
-- `ps_replay_batch.py`: bounded replay driver. It must stop on conflicts, build failures, missing build records, and HP-8 staged-path failures; use `--classify-only` before trusting bucket decisions.
-- `ps_replay_auto_loop.sh`: compatibility wrapper around `ps_replay_batch.py`; it must inherit the same stop/build/cross-check behavior.
+- `ps_replay_batch.py`: bounded replay driver. It must use plain `git cherry-pick <sha>` for every non-marker commit, preserve marker commits with `git commit --allow-empty`, stop on conflicts/build failures/missing build records, and HP-8 check post-Group-8 source/plugin commits. For clean plain cherry-picks it checks the resulting output commit's changed paths; for conflicts, do the staged-path HP-8 check manually before `git cherry-pick --continue`. Use `--classify-only` before trusting bucket decisions.
+- `ps_replay_auto_loop.sh`: compatibility wrapper around `ps_replay_batch.py`; it must inherit the same stop/build/cross-check behavior. Set `PS_REPLAY_CMAKE_FLAGS='-DCMAKE_CXX_FLAGS=-fpermissive'` or pass `--cmake-flag` to the Python helper for task-specific build flags.
 - `ps_replay_build.py`: standard CMake/build runner that writes logs.
 - `ps_replay_errors.py`: extracts likely root-cause diagnostics from large build logs.
 - `ps_replay_conflict_triage.py`: prints conflict status and may stage only files whose conflict regions already match safely; remaining files require manual hunk review.

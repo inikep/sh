@@ -3,8 +3,9 @@
 
 Every non-marker source-range commit before the Group 8 marker is forced into
 the no-build bucket. The Group 8 marker is a checkpoint: build before
-preserving it as an empty marker commit. After Group 8, source/plugin commits
-are staged with --no-commit, HP-8 checked, committed, and built immediately.
+preserving it as an empty marker commit. All non-marker commits are applied
+with plain `git cherry-pick <sha>`. After Group 8, source/plugin commits are
+HP-8 checked against the resulting output commit and built immediately.
 Post-Group-8 no-build batches are build-checked at batch boundaries.
 """
 
@@ -31,7 +32,7 @@ DEFAULT_CMAKE_FLAGS = [
     "-DCMAKE_C_COMPILER_LAUNCHER=ccache",
     "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache",
 ]
-GROUP8_MARKER_SUBJECT = "==================== MARKER: GROUP 8 — Upstream bug fixes ===================="
+GROUP8_MARKER_SUBJECT = "==================== MARKER: GROUP 9 — Upstream bug fixes ===================="
 MARKER_RE = re.compile(r"^\s*=+\sMARKER:")
 
 
@@ -115,6 +116,12 @@ def parse_args() -> argparse.Namespace:
         "--clean-build",
         action="store_true",
         help="Delete and reconfigure the build directory before each build",
+    )
+    parser.add_argument(
+        "--cmake-flag",
+        action="append",
+        default=[],
+        help="Additional CMake flag passed through to ps_replay_build.py. May be passed multiple times.",
     )
     return parser.parse_args()
 
@@ -324,6 +331,8 @@ def run_build(args: argparse.Namespace, idx: int, sha: str) -> tuple[int, Path]:
             pass
         else:
             cmd.append("--incremental")
+        for flag in args.cmake_flag:
+            cmd.append(f"--cmake-flag={flag}")
         return subprocess.run(cmd, text=True).returncode, log
 
     build_dir = args.build_dir.resolve()
@@ -333,7 +342,7 @@ def run_build(args: argparse.Namespace, idx: int, sha: str) -> tuple[int, Path]:
         if build_dir.exists():
             shutil.rmtree(build_dir)
     build_dir.mkdir(parents=True, exist_ok=True)
-    cmake_cmd = ["cmake", str(args.worktree.resolve()), *DEFAULT_CMAKE_FLAGS]
+    cmake_cmd = ["cmake", str(args.worktree.resolve()), *DEFAULT_CMAKE_FLAGS, *args.cmake_flag]
     make_cmd = ["make", f"-j{args.jobs}"]
     env = {**os.environ, "CC": "gcc-9", "CXX": "g++-9"}
     with log.open("w") as fh:
@@ -400,6 +409,42 @@ def hp8_check_staged_paths(
         return False
     append(report_file, f"- Commit {idx}: HP-8 staged-paths check PASS.")
     return True
+
+
+def hp8_expected_paths(source_paths: list[str]) -> list[str]:
+    return sorted(path for path in source_paths if source_or_plugin_path(path))
+
+
+def hp8_missing_paths(source_paths: list[str], output_paths: list[str]) -> list[str]:
+    output = set(output_paths)
+    return [path for path in hp8_expected_paths(source_paths) if path not in output]
+
+
+def hp8_check_output_paths(
+    worktree: Path,
+    source_paths: list[str],
+    idx: int,
+    sha: str,
+    output_sha: str,
+    report_file: Path | None,
+) -> bool:
+    output_paths = out(worktree, ["diff-tree", "--no-commit-id", "--name-only", "-r", output_sha]).splitlines()
+    missing = hp8_missing_paths(source_paths, output_paths)
+    if missing:
+        message = (
+            f"- Commit {idx}: `{sha}` HP-8 output-paths check failed; "
+            f"missing source/plugin paths from output commit `{output_sha[:12]}`: "
+            f"`{', '.join(missing)}`."
+        )
+        append(report_file, message)
+        print(message, flush=True)
+        return False
+    append(report_file, f"- Commit {idx}: HP-8 output-paths check PASS.")
+    return True
+
+
+def preserve_empty_marker(worktree: Path, subject: str) -> subprocess.CompletedProcess[str]:
+    return git(worktree, ["commit", "--allow-empty", "-m", subject], check=False)
 
 
 def main() -> int:
@@ -484,30 +529,23 @@ def main() -> int:
             append(args.report_file, f"- Group 8 checkpoint build result: PASS; log `{log}`.")
             print(f"[{idx}/{len(commits)}] checkpoint build passed", flush=True)
 
-        pick_args = ["cherry-pick"]
         if bucket == "empty-marker":
-            pick_args.append("--allow-empty")
-        elif post_group8 and bucket in {"source", "plugin"}:
-            pick_args.append("--no-commit")
-        pick_args.append(sha)
-        pick = git(args.worktree, pick_args, check=False)
-        apply_status = "clean"
-        if pick.returncode != 0:
-            if "previous cherry-pick is now empty" in pick.stdout or "nothing to commit" in pick.stdout:
-                if bucket == "empty-marker":
-                    commit = git(args.worktree, ["commit", "--allow-empty", "-C", sha], check=False)
-                    if commit.returncode != 0:
-                        print(commit.stdout, end="")
-                        append(args.report_file, f"- Commit {idx}: `{sha}` failed to preserve empty marker (`{subject}`).")
-                        return 3
-                    apply_status = "preserved-empty-marker"
-                else:
+            commit = preserve_empty_marker(args.worktree, subject)
+            if commit.returncode != 0:
+                print(commit.stdout, end="")
+                append(args.report_file, f"- Commit {idx}: `{sha}` failed to preserve empty marker (`{subject}`).")
+                return 3
+            apply_status = "preserved-empty-marker"
+        else:
+            pick = git(args.worktree, ["cherry-pick", sha], check=False)
+            apply_status = "clean"
+            if pick.returncode != 0:
+                if "previous cherry-pick is now empty" in pick.stdout or "nothing to commit" in pick.stdout:
                     git(args.worktree, ["cherry-pick", "--skip"])
                     append(args.report_file, f"- Commit {idx}: `{sha}` skipped as empty (`{subject}`).")
                     print(f"[{idx}/{len(commits)}] skipped empty", flush=True)
                     continue
 
-            else:
                 conflicts = describe_conflicts(args.worktree, args.reference)
                 if not conflicts:
                     print(pick.stdout, end="")
@@ -520,31 +558,19 @@ def main() -> int:
                     f"- Commit {idx}: `{sha}` stopped on conflicts in `{names}` (`{subject}`); resolve hunks manually using `{args.reference}` as guidance.",
                 )
                 print(
-                    "Stopped before modifying conflicted files. Resolve hunks manually, continue/build this commit, then restart the batch after this index.",
+                    "Stopped before modifying conflicted files. Resolve hunks manually, run the HP-8 staged-path check before git cherry-pick --continue, build this commit if required, then restart the batch after this index.",
                     flush=True,
                 )
                 return 3
 
-        if bucket == "empty-marker" and apply_status == "clean":
-            apply_status = "preserved-empty-marker"
-
-        if post_group8 and bucket in {"source", "plugin"}:
-            if git(args.worktree, ["diff", "--cached", "--quiet"], check=False).returncode == 0:
-                append(args.report_file, f"- Commit {idx}: `{sha}` skipped as empty after staging (`{subject}`).")
-                print(f"[{idx}/{len(commits)}] skipped empty after staging", flush=True)
-                git(args.worktree, ["reset", "--hard", "HEAD"], check=False)
-                continue
-            if not hp8_check_staged_paths(args.worktree, source_paths, idx, sha, args.report_file):
-                return 5
-            commit = git(args.worktree, ["commit", "-C", sha], check=False)
-            if commit.returncode != 0:
-                print(commit.stdout, end="")
-                append(args.report_file, f"- Commit {idx}: `{sha}` failed to commit after HP-8 check (`{subject}`).")
-                return 6
-            apply_status = "staged-hp8-checked"
-
         new_full_sha = out(args.worktree, ["rev-parse", "HEAD"])
         new_sha = new_full_sha[:12]
+
+        if post_group8 and bucket in {"source", "plugin"}:
+            if not hp8_check_output_paths(args.worktree, source_paths, idx, sha, new_full_sha, args.report_file):
+                return 5
+            apply_status = "plain-cherry-pick-hp8-checked"
+
         forced_note = "; forced pre-Group-8 no-build: yes" if idx in forced_pre_group8 else ""
         append(
             args.report_file,

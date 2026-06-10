@@ -16,7 +16,7 @@ class ArgumentParsingTests(unittest.TestCase):
 
         self.assertEqual(
             args.group8_marker,
-            "==================== MARKER: GROUP 8 — Upstream bug fixes ====================",
+            "==================== MARKER: GROUP 9 — Upstream bug fixes ====================",
         )
         self.assertFalse(args.allow_missing_group8_marker)
 
@@ -47,7 +47,7 @@ class SubjectLoadingTests(unittest.TestCase):
             sha: f"subject {idx}"
             for idx, sha in enumerate(commits, start=1)
         }
-        subjects_by_sha["sha-45"] = "==================== MARKER: GROUP 8 — Upstream bug fixes ===================="
+        subjects_by_sha["sha-45"] = "==================== MARKER: GROUP 9 — Upstream bug fixes ===================="
         calls = []
 
         def lookup(_worktree: Path, sha: str) -> str:
@@ -59,7 +59,7 @@ class SubjectLoadingTests(unittest.TestCase):
             commits,
             1,
             70,
-            "==================== MARKER: GROUP 8 — Upstream bug fixes ====================",
+            "==================== MARKER: GROUP 9 — Upstream bug fixes ====================",
             lookup,
         )
 
@@ -73,7 +73,7 @@ class SubjectLoadingTests(unittest.TestCase):
             sha: f"subject {idx}"
             for idx, sha in enumerate(commits, start=1)
         }
-        subjects_by_sha["sha-45"] = "==================== MARKER: GROUP 8 — Upstream bug fixes ===================="
+        subjects_by_sha["sha-45"] = "==================== MARKER: GROUP 9 — Upstream bug fixes ===================="
         calls = []
 
         def lookup(_worktree: Path, sha: str) -> str:
@@ -85,7 +85,7 @@ class SubjectLoadingTests(unittest.TestCase):
             commits,
             150,
             155,
-            "==================== MARKER: GROUP 8 — Upstream bug fixes ====================",
+            "==================== MARKER: GROUP 9 — Upstream bug fixes ====================",
             lookup,
         )
 
@@ -99,7 +99,7 @@ class SubjectLoadingTests(unittest.TestCase):
             sha: f"subject {idx}"
             for idx, sha in enumerate(commits, start=1)
         }
-        subjects_by_sha["sha-45"] = "==================== MARKER: GROUP 8 — Upstream bug fixes ===================="
+        subjects_by_sha["sha-45"] = "==================== MARKER: GROUP 9 — Upstream bug fixes ===================="
         calls = []
 
         def lookup(_worktree: Path, sha: str) -> str:
@@ -111,7 +111,7 @@ class SubjectLoadingTests(unittest.TestCase):
             commits,
             1,
             40,
-            "==================== MARKER: GROUP 8 — Upstream bug fixes ====================",
+            "==================== MARKER: GROUP 9 — Upstream bug fixes ====================",
             lookup,
         )
 
@@ -168,6 +168,38 @@ class BuildPolicyTests(unittest.TestCase):
         self.assertEqual(reason, "plugin-commit")
 
 
+class Hp8PathCheckTests(unittest.TestCase):
+    def test_missing_paths_uses_source_plugin_subset(self):
+        missing = ps_replay_batch.hp8_missing_paths(
+            [
+                "sql/sql_class.cc",
+                "mysql-test/r/source_only.result",
+                "plugin/audit/audit_log.cc",
+                "docs/readme.md",
+            ],
+            ["sql/sql_class.cc", "mysql-test/r/source_only.result"],
+        )
+
+        self.assertEqual(missing, ["plugin/audit/audit_log.cc"])
+
+    def test_output_paths_can_satisfy_post_boundary_hp8(self):
+        missing = ps_replay_batch.hp8_missing_paths(
+            ["client/mysqldump.c", "mysql-test/r/mysqldump.result"],
+            ["client/mysqldump.c"],
+        )
+
+        self.assertEqual(missing, [])
+
+
+class ReplayCommandSafetyTests(unittest.TestCase):
+    def test_batch_driver_does_not_use_no_commit_cherry_pick(self):
+        script = Path(ps_replay_batch.__file__).read_text()
+
+        self.assertNotIn('["cherry-pick", "--no-commit"', script)
+        self.assertNotIn("cherry-pick --no-commit", script)
+        self.assertNotIn("--allow-empty\", sha", script)
+
+
 class ClassifyPathsTests(unittest.TestCase):
     """HP-8 extension-based Source override (SKILL.md §2 Bucketing)."""
 
@@ -181,7 +213,7 @@ class ClassifyPathsTests(unittest.TestCase):
         self.assertEqual(
             ps_replay_batch.classify_paths(
                 ["sql/sql_acl.cc"],
-                "==================== MARKER: GROUP 8 — Upstream bug fixes ====================",
+                "==================== MARKER: GROUP 9 — Upstream bug fixes ====================",
             ),
             "empty-marker",
         )

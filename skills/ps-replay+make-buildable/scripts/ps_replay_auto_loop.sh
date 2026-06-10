@@ -19,6 +19,7 @@ REFERENCE=${PS_REPLAY_REFERENCE:?PS_REPLAY_REFERENCE not set}
 SCRIPTS=${PS_REPLAY_SCRIPTS:-$(dirname "$0")}
 REPORT_ARGS=()
 GROUP8_ARGS=()
+CMAKE_ARGS=()
 
 if [ -n "${PS_REPLAY_REPORT_FILE:-}" ]; then
     REPORT_ARGS=(--report-file "$PS_REPLAY_REPORT_FILE")
@@ -26,6 +27,15 @@ fi
 
 if [ -n "${PS_REPLAY_GROUP8_MARKER:-}" ]; then
     GROUP8_ARGS=(--group8-marker "$PS_REPLAY_GROUP8_MARKER")
+fi
+
+if [ -n "${PS_REPLAY_CMAKE_FLAGS:-}" ]; then
+    # Whitespace-separated compatibility hook for simple flags such as
+    # -DCMAKE_CXX_FLAGS=-fpermissive.
+    read -r -a _PS_REPLAY_CMAKE_FLAGS <<< "$PS_REPLAY_CMAKE_FLAGS"
+    for flag in "${_PS_REPLAY_CMAKE_FLAGS[@]}"; do
+        CMAKE_ARGS+=(--cmake-flag "$flag")
+    done
 fi
 
 exec python3 "$SCRIPTS/ps_replay_batch.py" \
@@ -38,4 +48,5 @@ exec python3 "$SCRIPTS/ps_replay_batch.py" \
     --log-dir "$LOG_DIR" \
     --build-policy bucketed \
     "${REPORT_ARGS[@]}" \
-    "${GROUP8_ARGS[@]}"
+    "${GROUP8_ARGS[@]}" \
+    "${CMAKE_ARGS[@]}"

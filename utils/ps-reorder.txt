@@ -1,0 +1,290 @@
+ps-reorder2: implementation algorithm
+=====================================
+
+This file is the operational form of ps-reorder.txt. It describes the data
+structures and output loop for a reorder tool that reads up to 11 source groups,
+creates g1-g4 in pass 1, then promotes from g11 during pass 2 with real
+cherry-pick probes.
+
+Definitions
+-----------
+
+Source group:
+  The group a commit was found in while parsing an already marked input branch.
+  When the input has no recognized group marker, every commit has source group
+  g11.
+
+Plan item:
+  A pending unit to emit. It records source SHA, source position, subject,
+  author metadata, touched paths, consumed paths, remaining paths, source group,
+  target group, and whether it is synthetic, split, promoted, skipped, or kept.
+
+g11 queue:
+  The mutable ordered list of remaining commits. Pass 2 removes items from this
+  queue only when they are successfully promoted or proven empty at the current
+  output HEAD.
+
+build_only_changes:
+  Items whose changed paths contain only CMakeLists.txt, *.cmake, or
+  *.cmake.in paths.
+
+code_changes:
+  Items whose changed paths contain at least one .h, .hh, .hpp, .hxx, .c, .cc,
+  .cpp, or .cxx path.
+
+mtr_only_changes:
+  Items whose changed paths all satisfy the MTR path rule: each path is under
+  mysql-test/ or ends with .test, .results, or .opt.
+
+g1_paths:
+  Paths extracted first and squashed into group 1 categories:
+  doc/, man/, internal/, plugin/tokudb-backup-plugin/, storage/tokudb/,
+  scripts/ps_tokudb_admin.sh, scripts/fill_help_tables.sql, MYSQL_VERSION, VERSION,
+  storage/innobase/include/univ.i, mysql-test/suite/tokudb*, and MTR test
+  files under mysql-test/ whose filename contains "toku".
+  scripts/fill_help_tables.sql is squashed with scripts/ps_tokudb_admin.sh in
+  the same group 1 commit.
+
+base_removed_files:
+  Paths that exist in BASE but are absent from INPUT. These paths are removed
+  by one dedicated commit with subject "Remove files deleted by input branch".
+  The commit is the first real commit in group 1, immediately after the GROUP 1
+  marker and before any g1 squash commits. Normal source references to these
+  paths are skipped so later split/squash/replay commits do not reintroduce
+  them.
+
+transient_removed_files:
+  Paths that are introduced and deleted entirely inside BASE..INPUT, so they do
+  not exist in BASE and do not exist in INPUT. These paths get no output commit
+  at all. Every source touch of each transient_removed_file is skipped during
+  planning so no split/squash/replay commit can introduce, modify, or delete
+  the path on OUTPUT.
+
+ci_config_paths:
+  Paths split into group 3: .travis.yml, .circleci/, azure-pipelines.yml,
+  .cirrus.yml, .clang-tidy, and .github/workflows/.
+
+Recognized Markers
+------------------
+
+Recognize these exact marker names and map them to source groups:
+
+  GROUP 1   Squashes
+  GROUP 2   build-ps
+  GROUP 3   CI configs
+  GROUP 4   MyRocks: storage and MTR
+  GROUP 5   MTR tests
+  GROUP 6   Non-code changes
+  GROUP 7   TokuDB+MyRocks kernel changes
+  GROUP 8   Build/Compilation
+  GROUP 9   Upstream bug fixes
+  GROUP 10  Code changes
+  GROUP 11  New commits
+
+The expected current marker subjects are:
+
+  ==================== MARKER: GROUP 1 — Squashes ====================
+  ==================== MARKER: GROUP 2 — build-ps ====================
+  ==================== MARKER: GROUP 3 — CI configs ====================
+  ==================== MARKER: GROUP 4 — MyRocks: storage and MTR ====================
+  ==================== MARKER: GROUP 5 — MTR tests ====================
+  ==================== MARKER: GROUP 6 — Non-code changes ====================
+  ==================== MARKER: GROUP 7 — TokuDB+MyRocks kernel changes ====================
+  ==================== MARKER: GROUP 8 — Build/Compilation ====================
+  ==================== MARKER: GROUP 9 — Upstream bug fixes ====================
+  ==================== MARKER: GROUP 10 — Code changes ====================
+  ==================== MARKER: GROUP 11 — New commits ====================
+
+Marker hashes may differ on a regenerated branch. Parse by marker subject/name,
+not by SHA.
+
+Parsing Algorithm
+-----------------
+
+1. Read first-parent commits in chronological order from BASE..INPUT.
+2. Detect marker commits by the marker subject form.
+3. If there are no recognized markers, set current_source_group = g11 for the
+   whole range.
+4. If markers exist, update current_source_group whenever a marker is seen and
+   omit the marker from the source plan.
+5. Assign each non-marker commit to current_source_group. If no marker has been
+   seen yet, assign it to g11.
+6. Collect paths and patch metadata for every non-marker commit before planning.
+7. Compute base_removed_files with:
+   git diff --name-only --diff-filter=D --no-renames BASE INPUT
+8. Compute transient_removed_files by collecting every path deleted by any
+   source commit, subtracting base_removed_files, then keeping only paths absent
+   from both BASE and INPUT.
+9. Skip base_removed_files and transient_removed_files from normal commit
+   planning. For base_removed_files, remember the first source commit that
+   deleted any of them as the author metadata for the dedicated removal commit.
+   If none is found, use the last source commit's metadata.
+
+Pass 1: Classification and Synthetic Early Groups
+-------------------------------------------------
+
+Initialize buckets g1 through g11. Then process source commits in source order:
+
+0. Remove base_removed_files and transient_removed_files from each source
+   commit's changed-path list before applying the normal split/squash
+   classification. If a source commit becomes empty because all of its paths
+   were skipped removed paths, record it as elided.
+
+1. Extract g1_paths first.
+   - Record each extracted path under its squash category.
+   - Preserve first-seen source position for category ordering.
+   - Remove those paths from the commit remainder.
+
+2. Split dedicated early paths from the remainder.
+   - build-ps/ and scripts/systemd/ paths go to g2.
+   - ci_config_paths go to g3.
+   - storage/rocksdb, mysql-test/suite/rocksdb*,
+     mysql-test/include/have_rocksdb.inc, and
+     mysql-test/include/have_rocksdb_as_default.inc paths go to g4.
+   - Split items keep the original source subject and metadata unless the tool
+     has an explicit synthetic-subject rule.
+
+3. Route the post-split remainder.
+   - If empty, record the source commit as fully consumed.
+   - If the input source group is g5-g10, append the remainder to that group.
+   - Otherwise append it to g11.
+
+4. Preserve source order within every bucket, except g1 squash categories which
+   are ordered by first contribution.
+
+Output pass 1:
+
+1. Create the GROUP 1 marker.
+2. Emit the "Remove files deleted by input branch" commit first in group 1 when
+   base_removed_files is non-empty. The commit removes every base_removed_file
+   and uses this body shape:
+   Removed N path(s) that existed in BASE_BRANCH and are absent from
+   INPUT_BRANCH.
+3. Do not emit transient_removed_files anywhere.
+4. Emit g1 squash commits.
+5. Create the GROUP 2 marker and emit g2 split commits.
+6. Create the GROUP 3 marker and emit g3 split commits.
+7. Create the GROUP 4 marker and emit g4 split commits.
+
+Pass 2: Existing Group Replay plus g11 Promotion
+------------------------------------------------
+
+For each target group from g5 through g10, run:
+
+  emit_marker(target_group)
+  emit_existing_items(target_group)
+  promote_from_g11(target_group)
+
+Promotion candidates are evaluated in current g11 source order. Use a real
+cherry-pick against the current output HEAD:
+
+  git cherry-pick <source_sha>
+
+or an equivalent no-commit probe followed by committing the original metadata.
+The probe must be cumulative: successful promotion advances HEAD before the next
+candidate is tested.
+
+Candidate handling:
+
+  clean cherry-pick:
+    Keep the new commit in the target group. Remove the item from g11. Mark it
+    as promoted from g11 in the end-of-run terminal report.
+
+  overlap/clobber guard:
+    Before accepting a clean g5-g9 promotion, compare the candidate's
+    zero-context patch hunks with earlier-source items still scheduled for
+    later groups. If any old-side or new-side line ranges overlap on the same
+    path, treat this like a failed promotion.
+
+    Also check full-file-state clobber risk. Output commits are emitted by
+    materializing each touched file from the source commit, so a later-emitted
+    item whose source position is earlier than the candidate can overwrite the
+    whole file to a pre-candidate state. Therefore any shared path with such a
+    protected later item is unsafe even when the zero-context hunks do not line
+    overlap. Treat this like a failed promotion: add [gX] to the subject and
+    move it to g10.
+
+  empty cherry-pick:
+    Skip the item, remove it from g11, and record that the change was already
+    represented at this point.
+
+  conflict:
+    Abort the cherry-pick and reset to the pre-probe HEAD. Add a [gX] prefix to
+    the subject, where X is the failed target group number, and move the item
+    to g10 Code changes instead of leaving it in g11. Failed g5-g9 promotions
+    are queued for g10 before the g10 marker; failed g10 promotions are emitted
+    immediately in g10. Do not try to resolve the conflict during promotion.
+
+  unexpected git failure:
+    Abort, reset to the pre-probe HEAD, and fail the run with the command output.
+
+Target Promotion Predicates
+---------------------------
+
+g5 MTR tests:
+  Promote g11 mtr_only_changes.
+
+g6 Non-code changes:
+  Promote g11 items that are neither code_changes nor build_only_changes.
+
+g7 TokuDB+MyRocks kernel changes:
+  Promote g11 items whose subject or remaining paths identify TokuDB, MyRocks,
+  RocksDB, or MYR kernel work after g4 extraction.
+
+g8 Build/Compilation:
+  Promote g11 build_only_changes.
+
+g9 Upstream bug fixes:
+  Promote ordinary code_changes from g11 that are not better classified into
+  g5-g8 and that cleanly cherry-pick after those groups.
+
+g10 Code changes:
+  Promote ordinary code_changes from g11 that are not better classified into
+  g5-g9 and that cleanly cherry-pick after those groups.
+  Before emitting g10, drain all remaining g10 candidates into the g10 bucket,
+  then emit the whole g10 bucket in source order. This keeps normal g10 commits
+  and failed [gX] promotions ordered together so later full-file-state emission
+  does not invert their source dependencies.
+
+An implementation may apply stricter predicates or overlap guards, but not
+looser ones: a promoted commit must always satisfy the target predicate and
+must always have a clean cherry-pick probe.
+
+Final g11 Emission
+------------------
+
+After g10 promotion:
+
+1. Create the GROUP 11 marker.
+2. Emit every remaining g11 item in source order. Normally this should be
+   empty; failed promotions have already been moved to g10 with [gX] subjects,
+   so only reconciliation or truly unclassified leftovers should remain.
+
+Safety Checks
+-------------
+
+Before starting:
+  - require a clean worktree;
+  - verify BASE, INPUT, and OUTPUT refs;
+  - refuse to overwrite OUTPUT unless forced.
+
+During promotion:
+  - save pre-probe HEAD;
+  - never pass -X ours, -X theirs, or similar strategy shortcuts;
+  - on conflict, abort the cherry-pick and verify HEAD returned to pre-probe;
+  - on success, verify the new commit is non-marker and has the expected source
+    SHA recorded in the end-of-run terminal report.
+
+After finishing:
+  - compare OUTPUT tree to INPUT tree;
+  - fail or create an explicit final reconciliation commit if they differ;
+  - print an end-of-run terminal report covering promoted, kept, skipped,
+    split, and squashed source commits; do not create a markdown report file.
+
+Core Invariant
+--------------
+
+Pass 1 may split or squash only into g1-g4. Pass 2 may move a g11 commit into
+g5-g10 only by proving that it cleanly cherry-picks at that exact output point.
+Everything else stays in g11. This keeps the algorithm deterministic while
+letting clean late commits move earlier when Git proves the move is safe.

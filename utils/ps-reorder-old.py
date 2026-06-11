@@ -1,0 +1,2983 @@
+#!/usr/bin/env python3
+"""
+ps-reorder.py
+
+Reorder a Percona Server branch into logical commit groups and produce a
+new branch with a null diff to the original.
+
+Groups (separated by MARKER commits). The g<n> labels below are internal
+bucket ids; the MARKER commits display contiguous "GROUP N" numbers in
+EMISSION order, which no longer match the internal ids. Emission order and
+displayed numbers are: g1=GROUP 1, g2=GROUP 2, g3=GROUP 3, g4=GROUP 4,
+g5=GROUP 5, g6=GROUP 6, g10 (TokuDB+MyRocks kernel)=GROUP 7, g7 (Build/Compilation)=
+GROUP 8, g8 (Upstream)=GROUP 9, g11 (Code changes)=GROUP 10, and the trailing
+"New commits" marker=GROUP 11:
+  g1  Squashes        one squashed commit per category:
+                        - doc/
+                        - man/
+                        - internal/
+                        - plugin/tokudb-backup-plugin/
+                        - storage/tokudb/
+                        - scripts/ps_tokudb_admin.sh
+                        - MYSQL_VERSION + VERSION + storage/innobase/include/univ.i
+                        - mysql-test/suite/tokudb* and MTR tests whose
+                          filename contains "toku"
+  g2  build-ps        build-ps/ portions split from source commits
+  g3  CI configs      .travis.yml, .circleci/, azure-pipelines.yml,
+                        .cirrus.yml, and .clang-tidy portions
+  g4  MyRocks: storage and MTR
+                      storage/rocksdb and mysql-test/suite/rocksdb*
+                        portions; unsafe source-g11 moves stay in Remaining
+  g5  MTR tests       [MTR-only] commits, plus g11 mysql-test-only commits
+                        that cherry-pick cleanly and do not overlap earlier
+                        protected Remaining changes or later groups
+  g6  Non-code changes
+                      Remaining commits whose files contain no C/C++ or CMake
+                        source (nothing ending in .h .c .cc .cxx .cpp .hh
+                        .hpp .hxx .cmake, and no CMakeLists.txt / *.cmake.in).
+  g7  Build/Compilation
+                      commits whose subject starts with "[compilation]"
+  g8  Upstream bug fixes
+                      [upstream] commits, plus eligible g11 Remaining commits
+                        that cherry-pick cleanly without protected overlaps
+  g10  TokuDB+MyRocks kernel changes
+                      commits whose subject contains "MYR" or "rocks"
+                        (case-insensitive), unless moving would conflict or
+                        overlap protected Remaining changes; mixed RocksDB
+                        commits contribute only their non-g4 portion here
+  g11 Code changes    everything else, plus commits kept to preserve ordering.
+                        On a re-parse these commits (source group 11) are kept
+                        in place and are NOT re-promoted into earlier groups;
+                        only "New commits" (after the trailing marker) and
+                        freshly classified commits feed the g5/g6/g8 promotions.
+
+Rules implemented (letters match the task):
+  A) OUTPUT_BRANCH has null diff to INPUT_BRANCH. If the grouped replay still
+     leaves a residual diff, one final SNAP reconciliation commit applies the
+     remaining file-state differences before verification/reporting.
+  B) MARKER commits between groups 1-11
+  C) Empty commits are removed except markers when commit creation reports
+     "nothing to commit".
+  D) Subjects > 91 chars are truncated; original subject is moved into body
+  E) Files in g1 are extracted from their origin commits, including commits
+     otherwise routed by subject-based whole-commit rules, and squashed into
+     the corresponding g1 subcategory
+  F) Commits containing g2/g3/g4 files are split; the g2/g3/g4 part goes to
+     its bucket, the remainder to g11. Split parts keep the original commit
+     subject unchanged. When rerunning an already grouped branch, source
+     group 11 files stay in g11 if moving them into an earlier dedicated
+     bucket would be clobbered by a preserved later group.
+  G) Squashes keep the position of their first source commit (ordering within
+     g1 follows first-seen position)
+  I) The reorder script no longer rewrites commits to absorb removals.
+  J) Source commits whose subject starts with "[compilation]" are moved to the
+     g7 build/compilation group after any g1 paths are extracted for squash.
+  K) Source commits whose subject starts with "[MTR-only]" are moved to the g5
+     MTR tests group after any g1 paths are extracted for squash and any g4
+     RocksDB paths are extracted for the RocksDB bucket. When rerunning an
+     already reordered branch, commits that already appear before source group
+     11 stay in their source group and "[MTR-only]" commits that already appear
+     in source group 11 stay in g11 so prior "marked but not moved" decisions
+     do not create a non-null diff.
+  L) Commits that touch only mysql-test/ files are eligible for the g5 MTR tests
+     group, except for paths that belong to g1 tokudb-test squashes or g4
+     RocksDB paths. Remaining-group mysql-test-only commits are probed with git
+     cherry-pick after existing g5 commits are emitted. Commits that apply
+     without conflict are emitted in g5; g11 commits moved to g5 keep their
+     original subject, while g11 commits that stay in Remaining get an
+     "[MTR-only]" subject prefix. Later g11 commits that overlap the same files
+     do not block promotion because they still replay after the promoted commit,
+     matching the source ordering.
+  M) Source commits whose subject starts with "[upstream]" are moved to the g8
+     upstream bug fixes group after any g1 paths are extracted for squash.
+  N) Remaining-group commits are probed with git cherry-pick after existing g8
+     commits are emitted. Commits that apply without conflict, do not start
+     with "[MTR-only]" or "[result-only]", do not match the g10 MyRocks/kernel
+     subject rules, and do not patch-overlap later groups are emitted in g8
+     with their original subject; conflicted, MTR-only, result-only,
+     g10-subject, or later-patch-overlapped commits stay in Remaining.
+  O) Paths deleted by INPUT_BRANCH are handled outside the normal buckets.
+     If the path exists in BASE_BRANCH, all normal references to it are
+     skipped and one dedicated commit removes all such base files. If the path
+     was introduced and deleted within INPUT_BRANCH, every reference to it is
+     skipped so it never appears on OUTPUT_BRANCH.
+  Q) Source commits whose subject contains "MYR" or "rocks"
+     (case-insensitive) are moved intact to the g10 MyRocks changes in kernel
+     group unless a git cherry-pick probe reports a conflict or a later g11
+     commit touches the same patch. When such a commit also contains g2/g3/g4
+     paths, those dedicated portions are split first and only the remaining
+     non-dedicated portion is queued for g10. Conflicted or
+     later-patch-overlapped commits stay in the remaining group. When rerunning
+     an already reordered branch, commits that already appear in source group 10
+     stay in g10.
+  R) Commits whose remaining files all end in ".result" are squashed file by
+     file into the previous in-range planned item that touched each file. If a
+     file's previous occurrence is only in BASE_BRANCH, it remains in the
+     current commit, and that commit is tagged with a "[result-only]" subject
+     prefix. Tagged "[result-only]" commits are then candidates for promotion
+     to g5 alongside other mysql-test-only commits (Rule L): they keep their
+     "[result-only]" subject (no "[MTR-only]" is stacked on top) and are
+     emitted in g5 when the cherry-pick probe is clean and they do not
+     overlap a later protected group; otherwise they stay in Remaining.
+  S) The report lists source commits that were removed or elided, with the
+     source hash, subject, and reason.
+  V) After g5 is emitted, Remaining commits whose modified files contain no
+     C/C++ or CMake source files (extensions .h .c .cc .cxx .cpp .hh .hpp .hxx
+     .cmake, plus CMakeLists.txt and *.cmake.in) are candidates for the new
+     g6 Non-code changes group. Each candidate is probed by a cherry-pick at
+     current HEAD: candidates that conflict are held back in g11, and
+     candidates whose files would overlap a later protected group
+     (g7/g8/g10) or an earlier-source Remaining commit are also kept in
+     g11, so promotion never drifts the tree from a reference replay.
+     Promoted commits land in g6 in source order. Items with code files,
+     locked subjects (Rule T), or any of the above conflicts stay in g11.
+  T) Source commits whose subject contains "===" are locked from any
+     reordering: they skip the g5/g7/g8/g10 subject routings (and the
+     MyRocks/kernel "MYR"/"rocks" match), are not split into g2/g3/g4
+     dedicated commits, and are also skipped by the g11 to g5 and g11 to g8
+     cherry-pick promotions. The whole commit lands in g11 (or in its
+     preserved source bucket when rerunning a grouped branch) as a single
+     item. Only g1 squash extraction still applies, since those paths must
+     be folded into the squash for null diff.
+  U) A later g2/g3/g4 path is kept in Remaining if an earlier Remaining commit
+     touched the same path. Remaining commits materialise whole file states, so
+     moving the later dedicated path before Remaining can otherwise clobber it.
+
+Usage:
+  ps-reorder-py --input-branch <branch|hash> \
+                     --output-branch <new_branch> \
+                     --base-branch  <base>
+                     [--force-output]
+                     [--color auto|always|never]
+"""
+
+import argparse
+import concurrent.futures
+import os
+import re
+import subprocess
+import sys
+import time
+from collections import OrderedDict, defaultdict
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+MAX_TITLE_LEN = 91
+BATCH_SIZE = 500            # max paths per git invocation
+OUTPUT_STAT_LINE_LEN = 104
+
+
+class Style:
+    """ANSI styling for terminal output; a no-op when disabled."""
+
+    def __init__(self, enabled=False):
+        self.enabled = enabled
+
+    def _wrap(self, code, text):
+        if not self.enabled or not text:
+            return text
+        return f"\033[{code}m{text}\033[0m"
+
+    def bold(self, t): return self._wrap("1", t)
+    def dim(self, t): return self._wrap("2", t)
+    def red(self, t): return self._wrap("31", t)
+    def green(self, t): return self._wrap("32", t)
+    def yellow(self, t): return self._wrap("33", t)
+    def blue(self, t): return self._wrap("34", t)
+    def magenta(self, t): return self._wrap("35", t)
+    def cyan(self, t): return self._wrap("36", t)
+    def default(self, t): return self._wrap("39", t)
+
+
+STYLE = Style(False)
+
+
+def configure_style(mode):
+    """Resolve --color {auto,always,never} into STYLE.enabled."""
+    if mode == "always":
+        STYLE.enabled = True
+        return
+    if mode == "never":
+        STYLE.enabled = False
+        return
+    if os.environ.get("NO_COLOR") is not None:
+        STYLE.enabled = False
+        return
+    if os.environ.get("FORCE_COLOR"):
+        STYLE.enabled = True
+        return
+    STYLE.enabled = sys.stderr.isatty()
+
+
+CONFLICT_LINE_RE = re.compile(r"^(CONFLICT \([^)]+\):.*)$", re.MULTILINE)
+SECTION_LINE_RE = re.compile(r"^=== .+ ===$")
+SHORT_HASH_RE = re.compile(r"\b[0-9a-f]{12,40}\b")
+TAG_RE = re.compile(r"(^|\s)(\[[A-Za-z0-9_.:<>\-]+(?:->[A-Za-z0-9_.:<>\-]+)?\])")
+SHORTSTAT_INSERTIONS_RE = re.compile(
+    r"(^|[\s/])(\+\d+[KM]?|\d+[KM]?\+)(?=[\s/]|$)")
+SHORTSTAT_DELETIONS_RE = re.compile(
+    r"(^|[\s/])(-\d+[KM]?|\d+[KM]?-)(?=\s|$)")
+RED_STATUS_RE = re.compile(r"\b(conflict(?:ed)?|failed|failure|MISMATCH)\b")
+YELLOW_STATUS_RE = re.compile(r"\b(skipped|dropped|empty|none)\b")
+GREEN_STATUS_RE = re.compile(r"\b(emitted|promoted|clean|ready|passed|OK)\b")
+
+
+def colorize_conflicts(text):
+    """Highlight `CONFLICT (...): ...` lines in red within multi-line output."""
+    if not STYLE.enabled or not text:
+        return text
+    return CONFLICT_LINE_RE.sub(lambda m: STYLE.red(m.group(1)), text)
+
+
+def colorize_decision_tag(tag):
+    if tag == '[keep]':
+        return STYLE.green(tag)
+    if tag == '[skip]':
+        return STYLE.red(tag)
+    return STYLE.cyan(tag)
+
+
+def colorize_log_message(msg):
+    if not STYLE.enabled or not msg:
+        return msg
+    if SECTION_LINE_RE.match(msg):
+        return STYLE.bold(STYLE.cyan(msg))
+    msg = colorize_conflicts(msg)
+    msg = SHORTSTAT_INSERTIONS_RE.sub(
+        lambda m: m.group(1) + STYLE.green(m.group(2)), msg)
+    msg = SHORTSTAT_DELETIONS_RE.sub(
+        lambda m: m.group(1) + STYLE.red(m.group(2)), msg)
+    msg = SHORT_HASH_RE.sub(lambda m: STYLE.yellow(m.group(0)), msg)
+    msg = TAG_RE.sub(
+        lambda m: m.group(1) + colorize_decision_tag(m.group(2)), msg)
+    msg = RED_STATUS_RE.sub(lambda m: STYLE.red(m.group(0)), msg)
+    msg = YELLOW_STATUS_RE.sub(lambda m: STYLE.yellow(m.group(0)), msg)
+    msg = GREEN_STATUS_RE.sub(lambda m: STYLE.green(m.group(0)), msg)
+    return msg
+
+
+def short_sha(sha):
+    return STYLE.yellow(sha[:12])
+
+
+def styled_path(path):
+    return STYLE.magenta(path)
+
+
+def log(msg):
+    print(colorize_log_message(msg), file=sys.stderr, flush=True)
+
+
+def log_error(msg):
+    print(f"{STYLE.bold(STYLE.red('error:'))} {colorize_conflicts(msg)}",
+          file=sys.stderr, flush=True)
+
+G1_DOC = 'doc'
+G1_MAN = 'man'
+G1_INTERNAL = 'internal'
+G1_TOKUDB_BACKUP = 'tokudb-backup-plugin'
+G1_STORAGE_TOKUDB = 'storage-tokudb'
+G1_PS_TOKUDB_ADMIN = 'ps-tokudb-admin'
+G1_VERSION_UNIV = 'version-univ'
+G1_TOKUDB_TESTS = 'tokudb-tests'
+
+# G1 squash categories that correspond to TokuDB content. A commit whose
+# TokuDB paths are peeled into these squashes, and which then stays in g10
+# (MyRocks kernel changes), is flagged with a [toku] subject prefix.
+G1_TOKUDB_CATEGORIES = frozenset({
+    G1_TOKUDB_BACKUP, G1_STORAGE_TOKUDB, G1_PS_TOKUDB_ADMIN, G1_TOKUDB_TESTS,
+})
+
+G1_SUBJECTS = {
+    G1_DOC:             'Squash: doc/',
+    G1_MAN:             'Squash: man/',
+    G1_INTERNAL:        'Squash: internal/',
+    G1_TOKUDB_BACKUP:   'Squash: plugin/tokudb-backup-plugin/',
+    G1_STORAGE_TOKUDB:  'Squash: storage/tokudb/',
+    G1_PS_TOKUDB_ADMIN: 'Squash: scripts/ps_tokudb_admin.sh',
+    G1_VERSION_UNIV:    'Squash: MYSQL_VERSION, VERSION and storage/innobase/include/univ.i',
+    G1_TOKUDB_TESTS:    'Squash: mysql-test/suite/tokudb* and MTR *toku* tests',
+}
+
+DEDICATED_GROUP_NUMBERS = {
+    'g2': 2,
+    'g3': 3,
+    'g4': 4,
+}
+
+# ---------------------------------------------------------------------------
+# Git helpers
+# ---------------------------------------------------------------------------
+
+
+def run_git(args, check=True, env=None, retry_on_lock=True):
+    retries = 3 if retry_on_lock else 1
+    last = None
+    for attempt in range(retries):
+        last = subprocess.run(
+            ['git'] + list(args),
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            env=env,
+        )
+        if last.returncode == 0:
+            return last
+        if retry_on_lock and 'index.lock' in (last.stdout + last.stderr):
+            time.sleep(0.5 * (attempt + 1))
+            continue
+        break
+    if check and last.returncode != 0:
+        argv = ['git'] + list(args)
+        preview = ' '.join(argv[:6] + ['...', f'({len(argv)-6} more args)']) \
+            if len(argv) > 10 else ' '.join(argv)
+        raise RuntimeError(
+            f"{preview} failed (rc={last.returncode})\n"
+            f"STDOUT:\n{last.stdout}\nSTDERR:\n{last.stderr}"
+        )
+    return last
+
+
+def git_rev_parse(rev):
+    return run_git(['rev-parse', rev]).stdout.strip()
+
+
+def branch_exists(branch):
+    return run_git(['rev-parse', '--verify', '--quiet', branch],
+                   check=False).returncode == 0
+
+
+def ensure_clean_worktree():
+    r = run_git(['status', '--porcelain'], check=False)
+    if r.stdout.strip():
+        raise RuntimeError(
+            "Working tree is not clean. Commit or stash changes first "
+            "(or pass --allow-dirty).")
+
+
+def get_current_branch():
+    r = run_git(['symbolic-ref', '--short', '-q', 'HEAD'], check=False)
+    return r.stdout.strip() or None
+
+
+# ---------------------------------------------------------------------------
+# Classification
+# ---------------------------------------------------------------------------
+
+
+CODE_EXTENSIONS = ('.h', '.c', '.cc', '.cxx', '.cpp',
+                   '.hh', '.hpp', '.hxx', '.cmake')
+
+
+NON_CODE_CMAKELISTS = frozenset({
+    # CMakeLists.txt files that exist purely to install/package non-code
+    # script assets, with no real build-graph effect on the binaries.
+    'scripts/CMakeLists.txt',
+})
+
+
+def is_code_file(path):
+    if path.endswith(CODE_EXTENSIONS):
+        return True
+    if path in NON_CODE_CMAKELISTS:
+        return False
+    base = os.path.basename(path)
+    return base == 'CMakeLists.txt' or base.endswith('.cmake.in')
+
+
+def commit_has_no_code_files(files):
+    return bool(files) and not any(is_code_file(p) for p in files)
+
+
+def classify_file(path):
+    """Return a (group, subkey) tuple for a single file path."""
+    # g1 — explicit subcategories
+    if path.startswith('doc/'):
+        return ('g1', G1_DOC)
+    if path.startswith('man/'):
+        return ('g1', G1_MAN)
+    if path.startswith('internal/'):
+        return ('g1', G1_INTERNAL)
+    if path.startswith('plugin/tokudb-backup-plugin/'):
+        return ('g1', G1_TOKUDB_BACKUP)
+    if path.startswith('storage/tokudb/'):
+        return ('g1', G1_STORAGE_TOKUDB)
+    if path == 'scripts/ps_tokudb_admin.sh':
+        return ('g1', G1_PS_TOKUDB_ADMIN)
+    if (path == 'MYSQL_VERSION' or path == 'VERSION' or
+            path == 'storage/innobase/include/univ.i'):
+        return ('g1', G1_VERSION_UNIV)
+    if is_tokudb_mtr_test_path(path):
+        return ('g1', G1_TOKUDB_TESTS)
+
+    # g2 — build-ps
+    if path.startswith('build-ps/'):
+        return ('g2', None)
+
+    # g3 — CI configuration
+    if (path == '.travis.yml' or
+            path.startswith('.circleci/') or
+            path == 'azure-pipelines.yml' or
+            path == '.cirrus.yml' or
+            path == '.clang-tidy'):
+        return ('g3', None)
+
+    # g4 — RocksDB
+    if path.startswith('storage/rocksdb'):
+        return ('g4', None)
+    if path.startswith('mysql-test/suite/rocksdb'):
+        return ('g4', None)
+
+    # g11 — remaining
+    return ('g11', None)
+
+
+def is_tokudb_mtr_test_path(path):
+    basename = os.path.basename(path)
+    return (path.startswith('mysql-test/suite/tokudb') or
+            (path.startswith('mysql-test/') and 'toku' in basename.lower()))
+
+
+# ---------------------------------------------------------------------------
+# Commit inspection
+# ---------------------------------------------------------------------------
+
+
+def get_commit_list(base, head):
+    """Return commit hashes on head's first-parent line since base, oldest first."""
+    r = run_git(['log', '--first-parent', '--reverse', '--format=%H',
+                 f'{base}..{head}'])
+    return [line for line in r.stdout.strip().split('\n') if line]
+
+
+def get_commit_parents(ch):
+    r = run_git(['rev-list', '--parents', '-n', '1', ch])
+    parts = r.stdout.strip().split()
+    return parts[1:] if len(parts) > 1 else []
+
+
+def get_commit_files(ch):
+    """Files modified by ch compared to its first parent (or the full tree for
+    a root commit). Renames are not followed — both old and new path appear."""
+    parents = get_commit_parents(ch)
+    if not parents:
+        r = run_git(['ls-tree', '-r', '--name-only', ch])
+        return [f for f in r.stdout.strip().split('\n') if f]
+    parent = parents[0]
+    r = run_git(['diff', '--name-only', '--no-renames', parent, ch])
+    return [f for f in r.stdout.strip().split('\n') if f]
+
+
+def get_commit_deleted_paths(ch):
+    """Return paths deleted by ch compared to its first parent."""
+    parents = get_commit_parents(ch)
+    if not parents:
+        return []
+    parent = parents[0]
+    r = run_git(['diff', '--name-only', '--diff-filter=D', '--no-renames',
+                 parent, ch])
+    return [f for f in r.stdout.strip().split('\n') if f]
+
+
+def get_commit_info(ch):
+    sep = '\x1f'          # ASCII unit separator
+    fmt = sep.join(['%H', '%an', '%ae', '%aI',
+                    '%cn', '%ce', '%cI', '%s', '%B'])
+    r = run_git(['show', '-s', f'--format={fmt}', ch])
+    raw = r.stdout.rstrip('\n')
+    parts = raw.split(sep, 8)
+    full = parts[8].rstrip('\n') if len(parts) > 8 else parts[7]
+    # Body (everything after the subject line)
+    body_rest = ''
+    if '\n' in full:
+        body_rest = full.split('\n', 1)[1].lstrip('\n')
+    return {
+        'hash':             parts[0],
+        'author_name':      parts[1],
+        'author_email':     parts[2],
+        'author_date':      parts[3],
+        'committer_name':   parts[4],
+        'committer_email':  parts[5],
+        'committer_date':   parts[6],
+        'subject':          parts[7],
+        'body_rest':        body_rest,
+    }
+
+
+def get_commit_shortstat(ch):
+    r = run_git(['show', '--format=', '--shortstat', ch])
+    text = r.stdout.strip()
+    ins = 0
+    dele = 0
+    m = re.search(r'(\d+) insertion', text)
+    if m:
+        ins = int(m.group(1))
+    m = re.search(r'(\d+) deletion', text)
+    if m:
+        dele = int(m.group(1))
+    return ins, dele
+
+
+def truncate_line(line, max_len=MAX_TITLE_LEN):
+    return line[:max_len]
+
+
+def format_output_commit_stats_line(ch, subject):
+    line = f"{ch[:12]} {subject}"
+    return truncate_line(line, OUTPUT_STAT_LINE_LEN)
+
+
+def subject_style(text, magenta=False):
+    return STYLE.magenta(text) if magenta else STYLE.default(text)
+
+
+def colorize_output_commit_stats_line(line, magenta_subject=False):
+    if not STYLE.enabled:
+        return line
+    m = re.match(r"^(\[\w+\])?( ?)([0-9a-f]{12})(\s?)(.*)$", line)
+    if not m:
+        return colorize_log_message(line)
+    prefix = colorize_decision_tag(m.group(1)) if m.group(1) else ''
+    return (
+        prefix + m.group(2) + STYLE.yellow(m.group(3)) + m.group(4) +
+        subject_style(m.group(5), magenta_subject))
+
+
+def log_output_commit_stats(ch, decision_prefix=None):
+    subject = get_commit_subject(ch)
+    line = format_output_commit_stats_line(ch, subject)
+    if decision_prefix:
+        line = truncate_line(f"{decision_prefix} {line}",
+                             OUTPUT_STAT_LINE_LEN)
+    print(colorize_output_commit_stats_line(line),
+          file=sys.stderr, flush=True)
+
+
+def log_skipped_output_commit(item):
+    line = truncate_line(
+        '[skip] ' + format_output_commit_stats_line(
+            item['source_hash'], item['subject']),
+        OUTPUT_STAT_LINE_LEN)
+    print(colorize_output_commit_stats_line(line),
+          file=sys.stderr, flush=True)
+
+
+def get_commit_subject(ch):
+    return run_git(['show', '-s', '--format=%s', ch]).stdout.rstrip('\n')
+
+
+# ---------------------------------------------------------------------------
+# File-state application
+# ---------------------------------------------------------------------------
+
+
+def batched(paths, size=BATCH_SIZE):
+    for i in range(0, len(paths), size):
+        yield paths[i:i + size]
+
+
+def classify_existence(source_hash, paths):
+    """Split `paths` into (present_at_source, absent_at_source) using one
+    `ls-tree` call per batch — far cheaper than calling ls-tree per file."""
+    if not paths:
+        return [], []
+    present = set()
+    # Unique paths for probing (git ls-tree doesn't mind duplicates but we do).
+    uniq = list({p for p in paths})
+    for batch in batched(uniq):
+        r = run_git(['ls-tree', source_hash, '--'] + batch, check=False)
+        for line in r.stdout.split('\n'):
+            if not line:
+                continue
+            # format: "<mode> <type> <sha>\t<path>"
+            tab = line.find('\t')
+            if tab >= 0:
+                present.add(line[tab + 1:])
+    present_list = [p for p in paths if p in present]
+    absent_list = [p for p in paths if p not in present]
+    return present_list, absent_list
+
+
+class PathExistenceCache:
+    """Cache path existence checks for a single tree-ish."""
+
+    def __init__(self, source_hash):
+        self.source_hash = source_hash
+        self._present = {}
+
+    def split(self, paths):
+        unknown = [p for p in set(paths) if p not in self._present]
+        if unknown:
+            present, absent = classify_existence(self.source_hash, unknown)
+            for p in present:
+                self._present[p] = True
+            for p in absent:
+                self._present[p] = False
+        return ([p for p in paths if self._present[p]],
+                [p for p in paths if not self._present[p]])
+
+
+def checkout_paths(source_hash, paths):
+    """Batch-materialise `paths` in the index + working tree from source_hash."""
+    if not paths:
+        return
+    for batch in batched(paths):
+        run_git(['checkout', source_hash, '--'] + batch)
+
+
+def remove_paths(paths):
+    """Batch-remove `paths` from the index + working tree, tolerating absence."""
+    if not paths:
+        return
+    for batch in batched(paths):
+        run_git(['rm', '-rf', '--quiet', '--ignore-unmatch', '--'] + batch,
+                check=False)
+    for p in paths:
+        if os.path.lexists(p):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+
+
+def apply_file_states(source_hash, paths):
+    """Make each path in `paths` match its state at source_hash, in batches.
+    A path present at source is checked out; a path absent from source is
+    removed. Works efficiently for thousands of files."""
+    present, absent = classify_existence(source_hash, paths)
+    checkout_paths(source_hash, present)
+    remove_paths(absent)
+
+
+def apply_item_file_states(item):
+    source_by_file = item.get('source_by_file') or {}
+    if not source_by_file:
+        apply_file_states(item['source_hash'], item['files'])
+        return
+
+    paths_by_source = defaultdict(list)
+    for path in item['files']:
+        paths_by_source[source_by_file.get(path, item['source_hash'])].append(path)
+    for source_hash, paths in paths_by_source.items():
+        apply_file_states(source_hash, paths)
+
+
+# ---------------------------------------------------------------------------
+# Commit building
+# ---------------------------------------------------------------------------
+
+
+def build_full_message(subject, body_rest, original_subject=None):
+    """Apply Rule D: truncate subjects >91 chars, preserve original in body."""
+    if len(subject) <= MAX_TITLE_LEN and not original_subject:
+        return subject + ('\n\n' + body_rest if body_rest.strip() else '')
+    truncated = subject[:MAX_TITLE_LEN]
+    body = f"Original title:\n{original_subject or subject}"
+    if body_rest.strip():
+        body += '\n\n' + body_rest
+    return truncated + '\n\n' + body
+
+
+# Suffixes a previous version of this tool appended to g4+g11 split parts.
+# No longer added, but still stripped before re-prefixing so that re-running
+# on an already-grouped branch does not stack tags onto the old suffix.
+SPLIT_SUBJECT_SUFFIXES = (' [MyRocks part]', ' [non-MyRocks part]')
+
+
+def split_preserved_subject_suffix(subject):
+    for suffix in SPLIT_SUBJECT_SUFFIXES:
+        if subject.endswith(suffix):
+            return subject[:-len(suffix)], suffix
+    return subject, ''
+
+
+def do_commit(info, subject, body_rest='', allow_empty=False,
+              original_subject=None, decision_prefix=None):
+    """Commit the staged index with author/committer info. Returns True on
+    success, False if there was nothing to commit."""
+    message = build_full_message(subject, body_rest, original_subject)
+
+    env = os.environ.copy()
+    env['GIT_AUTHOR_NAME']     = info['author_name']
+    env['GIT_AUTHOR_EMAIL']    = info['author_email']
+    env['GIT_AUTHOR_DATE']     = info['author_date']
+    env['GIT_COMMITTER_NAME']  = info['committer_name']
+    env['GIT_COMMITTER_EMAIL'] = info['committer_email']
+    env['GIT_COMMITTER_DATE']  = info['committer_date']
+
+    cmd = ['commit', '-m', message]
+    if allow_empty:
+        cmd.append('--allow-empty')
+    if not message.strip():
+        # Source commit had an empty subject; preserve that by allowing it.
+        cmd.append('--allow-empty-message')
+    r = run_git(cmd, check=False, env=env)
+    if r.returncode != 0:
+        combined = (r.stdout + r.stderr).lower()
+        if ('nothing to commit' in combined or
+                'nothing added to commit' in combined or
+                'no changes added' in combined):
+            return False
+        raise RuntimeError(
+            f"git commit failed:\nSTDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}")
+    log_output_commit_stats(git_rev_parse('HEAD'), decision_prefix)
+    return True
+
+
+MARKER_AUTHOR = {
+    'author_name':     'ps-reorder',
+    'author_email':    'ps-reorder@local',
+    'author_date':     '1970-01-01T00:00:00+00:00',
+    'committer_name':  'ps-reorder',
+    'committer_email': 'ps-reorder@local',
+    'committer_date':  '1970-01-01T00:00:00+00:00',
+}
+
+
+def marker_commit(number, name, description=''):
+    subject = (f"==================== MARKER: GROUP {number} — {name} "
+               "====================")
+    body = description
+    # marker author/date is arbitrary; keep current HEAD date so the commit is
+    # visible in log in insertion order.
+    env = os.environ.copy()
+    for k in ('GIT_AUTHOR_DATE', 'GIT_COMMITTER_DATE'):
+        env.pop(k, None)
+    r = run_git(['commit', '--allow-empty',
+                 '-m', build_full_message(subject, body)], env=env)
+    log_output_commit_stats(git_rev_parse('HEAD'))
+    return r
+
+
+# ---------------------------------------------------------------------------
+# Planning
+# ---------------------------------------------------------------------------
+
+
+def is_compilation_group_subject(subject):
+    return subject.startswith('[compilation]')
+
+
+def is_mtr_only_group_subject(subject):
+    return subject.startswith('[MTR-only]')
+
+
+def is_result_only_group_subject(subject):
+    return subject.startswith('[result-only]')
+
+
+def is_upstream_bug_fix_group_subject(subject):
+    return subject.startswith('[upstream]')
+
+
+# Maps a marker's NAME to its INTERNAL group id (the g<id>_bucket it routes to
+# on re-parse, via source_group_bucket_name). The displayed "GROUP N" numbers
+# are contiguous in EMISSION order, but the internal ids below were left
+# unchanged so the bucket plumbing stays stable. Hence the divergence: e.g.
+# "TokuDB+MyRocks kernel changes" displays as GROUP 7 but keeps internal id 10
+# (bucket g10_bucket); "Build/Compilation" displays as GROUP 8 / internal id 7;
+# "Code changes" displays as GROUP 10 / internal id 11. Re-parse keys off the
+# name, so the displayed number is irrelevant here.
+GROUP_NAME_TO_NUMBER = {
+    'Squashes': 1,
+    'build-ps': 2,
+    'CI configs': 3,
+    'MyRocks: storage and MTR': 4,
+    'MyRocks': 4,   # legacy marker name; keep so old grouped branches re-parse
+    'RocksDB': 4,   # legacy marker name; keep so old grouped branches re-parse
+    'MTR tests': 5,
+    'Non-code changes': 6,
+    'Build/Compilation': 7,
+    'Upstream bug fixes': 8,
+    'TokuDB+MyRocks kernel changes': 10,
+    'MyRocks kernel changes': 10,     # legacy marker name
+    'MyRocks changes in kernel': 10,  # legacy marker name
+    'Code changes': 11,
+    'Remaining': 11,  # legacy marker name; keep so old grouped branches re-parse
+    # Legacy group 9 was "Initial Percona Server tree"; its commits now route
+    # through normal classification (mostly Code changes) on a re-parse.
+    'Initial Percona Server tree': 11,
+    'New commits': 12,
+}
+
+_MARKER_RE = re.compile(r'^={3,} MARKER: GROUP \d+ — (.+?) ={3,}$')
+
+
+def marker_group_number(subject):
+    """Resolve a marker subject to its new-scheme group number via name lookup,
+    so re-running on a previously grouped branch with the old 1-10 numbering
+    (Build/Compilation=6, ..., Remaining=10) still maps to the right buckets."""
+    m = _MARKER_RE.match(subject)
+    if not m:
+        return None
+    return GROUP_NAME_TO_NUMBER.get(m.group(1).strip())
+
+
+def is_myrocks_kernel_group_subject(subject):
+    sl = subject.lower()
+    return 'myr' in sl or 'rocks' in sl
+
+
+def is_locked_from_promotion(subject):
+    """Subjects containing '===' opt out of subject-based moves and g11
+    promotions; the commit stays in whichever bucket it would land in by
+    file-content partitioning alone (Rule T)."""
+    return '===' in subject
+
+
+def is_mysql_test_only_commit(files):
+    return touches_only_mysql_test(files)
+
+
+def contains_g1_paths(files):
+    return any(classify_file(path)[0] == 'g1' for path in files)
+
+
+def add_g1_files_to_plan(plan, cat, files, info, idx):
+    plan['g1_files'][cat].update(files)
+    if cat not in plan['g1_first_info']:
+        plan['g1_first_info'][cat] = info
+        plan['g1_first_pos'][cat] = idx
+
+
+def split_out_g1_files(files):
+    g1_part = defaultdict(list)
+    other_files = []
+    for path in files:
+        grp, sub = classify_file(path)
+        if grp == 'g1':
+            g1_part[sub].append(path)
+        else:
+            other_files.append(path)
+    return g1_part, other_files
+
+
+def split_out_group_files(files, group):
+    group_files = []
+    other_files = []
+    for path in files:
+        grp, _sub = classify_file(path)
+        if grp == group:
+            group_files.append(path)
+        else:
+            other_files.append(path)
+    return group_files, other_files
+
+
+def is_result_file(path):
+    return path.endswith('.result')
+
+
+def is_result_only_commit(files):
+    return bool(files) and all(is_result_file(path) for path in files)
+
+
+def is_result_only_item(item):
+    return item.get('result_only') or is_result_only_group_subject(
+        item['subject'])
+
+
+def source_group_bucket_name(source_group):
+    if source_group is None or source_group < 2 or source_group > 10:
+        return None
+    return f"g{source_group}_bucket"
+
+
+def is_preserved_source_group_item(item):
+    return source_group_bucket_name(item.get('source_group')) is not None
+
+
+def is_code_changes_item(item):
+    """True for commits already settled under the "Code changes" marker
+    (internal source group 11) on a re-parse. These are kept in place and are
+    never promoted into earlier groups; only "New commits" (source group 12)
+    and freshly classified commits (no source group) are promotion candidates."""
+    return item.get('source_group') == 11
+
+
+def item_source_cache_key(item):
+    source_by_file = item.get('source_by_file') or {}
+    source_history_by_file = item.get('source_history_by_file') or {}
+    source_history_key = tuple(
+        (path, tuple(sources))
+        for path, sources in sorted(source_history_by_file.items()))
+    return (item['source_hash'],
+            tuple(sorted(item['files'])),
+            tuple(sorted(source_by_file.items())),
+            source_history_key)
+
+
+def add_file_source_override(item, path, source_hash):
+    if path not in item['files']:
+        item['files'].append(path)
+    source_history_by_file = item.setdefault('source_history_by_file', {})
+    source_history_by_file.setdefault(path, [item['source_hash']]).append(
+        source_hash)
+    item.setdefault('source_by_file', {})[path] = source_hash
+
+
+def register_result_file_occurrences(item, result_file_last_item):
+    for path in item['files']:
+        if is_result_file(path):
+            result_file_last_item[path] = item
+
+
+def append_plan_item(bucket, item, result_file_last_item):
+    bucket.append(item)
+    register_result_file_occurrences(item, result_file_last_item)
+
+
+def record_removed_commit_entry(entries, source_hash, subject, reason):
+    entries.append({
+        'hash': source_hash,
+        'subject': subject,
+        'reason': reason,
+    })
+
+
+def record_removed_commit(plan, info, reason, source_hash=None, subject=None):
+    record_removed_commit_entry(
+        plan['removed_commits'],
+        source_hash or info['hash'],
+        subject if subject is not None else info['subject'],
+        reason)
+
+
+def record_removed_item(entries, item, reason):
+    info = item['info']
+    record_removed_commit_entry(
+        entries,
+        item.get('source_hash') or info['hash'],
+        info['subject'],
+        reason)
+
+
+def squash_result_files_into_previous(files, source_hash, result_file_last_item):
+    remaining = []
+    squashed = 0
+    for path in files:
+        previous_item = result_file_last_item.get(path)
+        if previous_item is None:
+            remaining.append(path)
+            continue
+        add_file_source_override(previous_item, path, source_hash)
+        squashed += 1
+    return remaining, squashed
+
+
+def final_removed_base_paths(base_hash, input_hash):
+    """Paths present in BASE_BRANCH and absent from INPUT_BRANCH."""
+    r = run_git(['diff', '--name-only', '--diff-filter=D', '--no-renames',
+                 base_hash, input_hash])
+    return set(f for f in r.stdout.strip().split('\n') if f)
+
+
+def analyze_removed_paths(commits, base_hash, input_hash):
+    """Classify deleted paths before planning normal output commits."""
+    base_removed = final_removed_base_paths(base_hash, input_hash)
+    deleted_in_range = set()
+    first_base_removal_info = None
+
+    for ch in commits:
+        deleted = set(get_commit_deleted_paths(ch))
+        if not deleted:
+            continue
+        deleted_in_range.update(deleted)
+        if first_base_removal_info is None and deleted.intersection(base_removed):
+            first_base_removal_info = get_commit_info(ch)
+
+    transient_candidates = deleted_in_range.difference(base_removed)
+    _base_present, absent_in_base = classify_existence(
+        base_hash, transient_candidates)
+    _input_present, absent_in_input = classify_existence(
+        input_hash, absent_in_base)
+    transient_removed = set(absent_in_input)
+
+    if base_removed and first_base_removal_info is None:
+        first_base_removal_info = get_commit_info(commits[-1]) \
+            if commits else MARKER_AUTHOR
+
+    return {
+        'base_removed': base_removed,
+        'transient_removed': transient_removed,
+        'base_removal_info': first_base_removal_info,
+    }
+
+
+def collect_later_preserved_group_paths(commits, skipped_paths):
+    """Paths touched by preserved source groups that emit after g2/g3/g4.
+
+    On already grouped input branches, source group 11 commits are final
+    corrections. Pulling their g2/g3/g4 paths before a preserved later group can
+    let that later group's full file-state replay overwrite the correction.
+    """
+    later_paths = {group: set() for group in DEDICATED_GROUP_NUMBERS}
+    source_group = None
+    skipped_paths = set(skipped_paths)
+    for ch in commits:
+        info = get_commit_info(ch)
+        marker_group = marker_group_number(info['subject'])
+        if marker_group is not None:
+            source_group = marker_group
+            continue
+        if source_group_bucket_name(source_group) is None:
+            continue
+        files = [f for f in get_commit_files(ch) if f not in skipped_paths]
+        for group, group_number in DEDICATED_GROUP_NUMBERS.items():
+            if source_group > group_number:
+                later_paths[group].update(files)
+    return later_paths
+
+
+def keep_clobbered_dedicated_paths_in_remaining(files, clobber_paths):
+    dedicated = []
+    remaining = []
+    for path in files:
+        if path in clobber_paths:
+            remaining.append(path)
+        else:
+            dedicated.append(path)
+    return dedicated, remaining
+
+
+def log_removed_paths(removed_paths):
+    """Print every removed path, grouped by output handling."""
+    base_removed = sorted(removed_paths['base_removed'])
+    transient_removed = sorted(removed_paths['transient_removed'])
+
+    log("Removed files present in BASE_BRANCH "
+        "(will be removed in one commit):")
+    if base_removed:
+        for path in base_removed:
+            log(f"  {styled_path(path)}")
+    else:
+        log("  (none)")
+
+    log("Removed files introduced by INPUT_BRANCH "
+        "(will be skipped entirely):")
+    if transient_removed:
+        for path in transient_removed:
+            log(f"  {styled_path(path)}")
+    else:
+        log("  (none)")
+
+
+def plan_commits(commits, base_hash, removed_paths):
+    """Walk the commit list once and produce the plan for the output branch."""
+    base_removed = set(removed_paths['base_removed'])
+    transient_removed = set(removed_paths['transient_removed'])
+    skipped_paths = base_removed.union(transient_removed)
+    later_preserved_group_paths = collect_later_preserved_group_paths(
+        commits, skipped_paths)
+    plan = {
+        'g1_files':       defaultdict(set),   # cat  -> set(files)
+        'g1_first_info':  {},                 # cat  -> info
+        'g1_first_pos':   {},                 # cat  -> int
+        'g2_bucket':      [],
+        'g3_bucket':      [],
+        'g4_bucket':      [],
+        'g5_bucket':      [],
+        'g6_bucket':      [],
+        'g7_bucket':      [],
+        'g8_bucket':      [],
+        'g10_bucket':      [],
+        'g11_bucket':     [],
+        'n_source_commits': len(commits),
+        'base_removed_files': sorted(base_removed),
+        'transient_removed_files': sorted(transient_removed),
+        'base_removal_info': removed_paths['base_removal_info'],
+        'base_removed_refs_skipped': 0,
+        'transient_removed_refs_skipped': 0,
+        'result_only_files_squashed': 0,
+        'result_only_commits_elided': 0,
+        'result_only_base_files_kept': 0,
+        'result_only_base_commits_kept': 0,
+        'removed_commits': [],
+    }
+
+    source_group = None
+    result_file_last_item = {}
+    base_existence = PathExistenceCache(base_hash)
+    prior_remaining_paths = set()
+
+    def append_bucket_item(bucket_name, item):
+        append_plan_item(plan[bucket_name], item, result_file_last_item)
+        if bucket_name == 'g11_bucket':
+            prior_remaining_paths.update(item['files'])
+
+    for idx, ch in enumerate(commits):
+        info = get_commit_info(ch)
+        marker_group = marker_group_number(info['subject'])
+        if marker_group is not None:
+            source_group = marker_group
+            record_removed_commit(
+                plan, info,
+                f"source marker for group {marker_group} omitted; "
+                "output markers are regenerated")
+            continue
+        files = get_commit_files(ch)
+        if skipped_paths:
+            base_refs = sum(1 for f in files if f in base_removed)
+            transient_refs = sum(1 for f in files if f in transient_removed)
+            plan['base_removed_refs_skipped'] += base_refs
+            plan['transient_removed_refs_skipped'] += transient_refs
+            files = [f for f in files if f not in skipped_paths]
+        if not files:
+            if skipped_paths and (base_refs or transient_refs):
+                details = []
+                if base_refs:
+                    details.append(
+                        f"{base_refs} base-removed file reference(s)")
+                if transient_refs:
+                    details.append(
+                        f"{transient_refs} input-only removed file reference(s)")
+                record_removed_commit(
+                    plan, info,
+                    "all modified paths were skipped because they are absent "
+                    f"from INPUT_BRANCH ({', '.join(details)})")
+            else:
+                record_removed_commit(
+                    plan, info,
+                    "source commit has no file changes relative to its first "
+                    "parent")
+            continue
+
+        source_group_bucket = source_group_bucket_name(source_group)
+        if source_group_bucket is not None:
+            # Split g1 paths into the G1 squash so its INPUT-final state is
+            # not clobbered when this preserved group's whole-commit replay
+            # emits later.
+            g1_part, files = split_out_g1_files(files)
+            for cat, fl in g1_part.items():
+                add_g1_files_to_plan(plan, cat, fl, info, idx)
+
+            # For preserved groups that emit AFTER a dedicated bucket (g5+
+            # follows g2/g3/g4), peel off any g2/g3/g4 paths so the dedicated
+            # bucket's source-ordered last writer remains correct.
+            split_dedicated = []
+            if source_group >= 5:
+                for grp in ('g2', 'g3', 'g4'):
+                    grp_part, files = split_out_group_files(files, grp)
+                    if grp_part:
+                        split_dedicated.append((grp, grp_part))
+
+            for grp, grp_part in split_dedicated:
+                append_bucket_item(f'{grp}_bucket', {
+                    'info': info,
+                    'files': list(grp_part),
+                    'subject': info['subject'],
+                    'body_rest': info['body_rest'],
+                    'source_hash': ch,
+                    'source_pos': idx,
+                    'source_group': source_group,
+                    'promoted': True,
+                })
+
+            if files:
+                append_bucket_item(source_group_bucket, {
+                    'info': info,
+                    'files': list(files),
+                    'subject': info['subject'],
+                    'body_rest': info['body_rest'],
+                    'source_hash': ch,
+                    'source_pos': idx,
+                    'source_group': source_group,
+                })
+            elif g1_part or split_dedicated:
+                record_removed_commit(
+                    plan, info,
+                    f"all paths from source group {source_group} routed to "
+                    "g1 squashes and/or earlier dedicated buckets")
+            continue
+
+        g1_part, non_g1_files = split_out_g1_files(files)
+        for cat, fl in g1_part.items():
+            add_g1_files_to_plan(plan, cat, fl, info, idx)
+        has_toku_g1 = any(cat in G1_TOKUDB_CATEGORIES for cat in g1_part)
+        files = non_g1_files
+        if g1_part and not files:
+            cats = ', '.join(sorted(g1_part))
+            record_removed_commit(
+                plan, info,
+                f"all remaining paths were folded into g1 squash(es): {cats}")
+            continue
+
+        if is_result_only_commit(files):
+            result_files_before_squash = list(files)
+            files, squashed = squash_result_files_into_previous(
+                files, ch, result_file_last_item)
+            plan['result_only_files_squashed'] += squashed
+            if not files:
+                plan['result_only_commits_elided'] += 1
+                record_removed_commit(
+                    plan, info,
+                    f"all {len(result_files_before_squash)} .result path(s) "
+                    "were squashed into previous in-range commit(s)")
+                continue
+            base_result_files, files = base_existence.split(files)
+            if base_result_files:
+                plan['result_only_base_files_kept'] += len(base_result_files)
+                plan['result_only_base_commits_kept'] += 1
+                result_subject, original_subject = add_subject_prefix_with_original(
+                    info['subject'], '[result-only]', space_before_plain=True)
+                append_bucket_item('g11_bucket', {
+                    'info': info,
+                    'files': list(base_result_files),
+                    'subject': result_subject,
+                    'body_rest': info['body_rest'],
+                    'source_hash': ch,
+                    'source_pos': idx,
+                    'source_group': source_group,
+                    'result_only': True,
+                    'original_subject': original_subject,
+                })
+            if not files:
+                continue
+
+        locked_subject = is_locked_from_promotion(info['subject'])
+
+        mtr_like_commit = (is_mtr_only_group_subject(info['subject']) or
+                           is_mysql_test_only_commit(files))
+        if mtr_like_commit and not locked_subject:
+            g4_files, files = split_out_group_files(files, 'g4')
+            if g4_files:
+                append_bucket_item('g4_bucket', {
+                    'info': info,
+                    'files': list(g4_files),
+                    'subject': info['subject'],
+                    'body_rest': info['body_rest'],
+                    'source_hash': ch,
+                    'source_group': source_group,
+                    'promoted': True,
+                })
+            if not files:
+                continue
+
+        if is_compilation_group_subject(info['subject']) and not locked_subject:
+            if files:
+                append_bucket_item('g7_bucket', {
+                    'info': info,
+                    'files': list(files),
+                    'subject': info['subject'],
+                    'body_rest': info['body_rest'],
+                    'source_hash': ch,
+                    'source_group': source_group,
+                })
+            continue
+        if is_mtr_only_group_subject(info['subject']) and not locked_subject:
+            if files:
+                target_bucket = 'g11_bucket' if source_group == 11 else 'g5_bucket'
+                append_bucket_item(target_bucket, {
+                    'info': info,
+                    'files': list(files),
+                    'subject': info['subject'],
+                    'body_rest': info['body_rest'],
+                    'source_hash': ch,
+                    'source_pos': idx,
+                    'source_group': source_group,
+                })
+            continue
+        if (is_mysql_test_only_commit(files) and not contains_g1_paths(files)
+                and not locked_subject):
+            append_bucket_item('g11_bucket', {
+                'info': info,
+                'files': list(files),
+                'subject': info['subject'],
+                'body_rest': info['body_rest'],
+                'source_hash': ch,
+                'source_pos': idx,
+                'source_group': source_group,
+                'mtr_only_candidate': True,
+            })
+            continue
+        if is_upstream_bug_fix_group_subject(info['subject']) and not locked_subject:
+            if files:
+                append_bucket_item('g8_bucket', {
+                    'info': info,
+                    'files': list(files),
+                    'subject': info['subject'],
+                    'body_rest': info['body_rest'],
+                    'source_hash': ch,
+                    'source_group': source_group,
+                })
+            continue
+        # Partition by group
+        g2_part, g3_part, g4_part = [], [], []
+        g11_part = []
+        for f in files:
+            grp, sub = classify_file(f)
+            if grp == 'g2':
+                g2_part.append(f)
+            elif grp == 'g3':
+                g3_part.append(f)
+            elif grp == 'g4':
+                g4_part.append(f)
+            else:
+                g11_part.append(f)
+
+        myrocks_kernel_subject = (
+            is_myrocks_kernel_group_subject(info['subject'])
+            and not locked_subject)
+
+        dedicated_forced_remaining = False
+        g2_part, unsafe = keep_clobbered_dedicated_paths_in_remaining(
+            g2_part, prior_remaining_paths)
+        dedicated_forced_remaining = dedicated_forced_remaining or bool(unsafe)
+        g11_part.extend(unsafe)
+        g3_part, unsafe = keep_clobbered_dedicated_paths_in_remaining(
+            g3_part, prior_remaining_paths)
+        dedicated_forced_remaining = dedicated_forced_remaining or bool(unsafe)
+        g11_part.extend(unsafe)
+        g4_part, unsafe = keep_clobbered_dedicated_paths_in_remaining(
+            g4_part, prior_remaining_paths)
+        dedicated_forced_remaining = dedicated_forced_remaining or bool(unsafe)
+        g11_part.extend(unsafe)
+
+        if source_group == 11:
+            g2_part, unsafe = keep_clobbered_dedicated_paths_in_remaining(
+                g2_part, later_preserved_group_paths['g2'])
+            dedicated_forced_remaining = dedicated_forced_remaining or bool(unsafe)
+            g11_part.extend(unsafe)
+            g3_part, unsafe = keep_clobbered_dedicated_paths_in_remaining(
+                g3_part, later_preserved_group_paths['g3'])
+            dedicated_forced_remaining = dedicated_forced_remaining or bool(unsafe)
+            g11_part.extend(unsafe)
+            g4_part, unsafe = keep_clobbered_dedicated_paths_in_remaining(
+                g4_part, later_preserved_group_paths['g4'])
+            dedicated_forced_remaining = dedicated_forced_remaining or bool(unsafe)
+            g11_part.extend(unsafe)
+
+        if locked_subject and (g2_part or g3_part or g4_part):
+            # Rule T — locked commits stay intact, no g2/g3/g4 split.
+            g11_part.extend(g2_part)
+            g11_part.extend(g3_part)
+            g11_part.extend(g4_part)
+            g2_part, g3_part, g4_part = [], [], []
+
+        has_g234 = bool(g2_part or g3_part or g4_part)
+
+        if myrocks_kernel_subject and not has_g234 and not dedicated_forced_remaining:
+            append_bucket_item('g10_bucket', {
+                'info': info,
+                'files': list(files),
+                'subject': info['subject'],
+                'body_rest': info['body_rest'],
+                'source_hash': ch,
+                'source_pos': idx,
+                'source_group': source_group,
+                'has_toku_g1': has_toku_g1,
+            })
+            continue
+
+        if has_g234:
+            # Rule F — split g2/g3/g4 as dedicated commits; the remainder stays
+            # in g11 except MYR/rocks subjects whose non-dedicated portion
+            # belongs in g10.
+            if g2_part:
+                append_bucket_item('g2_bucket', {
+                    'info': info,
+                    'files': list(g2_part),
+                    'subject': info['subject'],
+                    'body_rest': info['body_rest'],
+                    'source_hash': ch,
+                    'source_group': source_group,
+                    'promoted': True,
+                })
+            if g3_part:
+                append_bucket_item('g3_bucket', {
+                    'info': info,
+                    'files': list(g3_part),
+                    'subject': info['subject'],
+                    'body_rest': info['body_rest'],
+                    'source_hash': ch,
+                    'source_group': source_group,
+                    'promoted': True,
+                })
+            if g4_part:
+                append_bucket_item('g4_bucket', {
+                    'info': info,
+                    'files': list(g4_part),
+                    'subject': info['subject'],
+                    'body_rest': info['body_rest'],
+                    'source_hash': ch,
+                    'source_group': source_group,
+                    'promoted': True,
+                })
+            if g11_part:
+                target_bucket = 'g10_bucket' if myrocks_kernel_subject else 'g11_bucket'
+                append_bucket_item(target_bucket, {
+                    'info': info,
+                    'files': list(g11_part),
+                    'subject': info['subject'],
+                    'body_rest': info['body_rest'],
+                    'source_hash': ch,
+                    'source_pos': idx,
+                    'source_group': source_group,
+                    'has_toku_g1': has_toku_g1,
+                })
+        elif g11_part:
+            # No g2/g3/g4; just emit g11.
+            append_bucket_item('g11_bucket', {
+                'info': info,
+                'files': list(g11_part),
+                'subject': info['subject'],
+                'body_rest': info['body_rest'],
+                'source_hash': ch,
+                'source_pos': idx,
+                'source_group': source_group,
+            })
+
+    return plan
+
+
+# ---------------------------------------------------------------------------
+# Output branch construction
+# ---------------------------------------------------------------------------
+
+
+def is_git_conflict_output(text):
+    tl = text.lower()
+    return any(token in tl for token in (
+        'conflict',
+        'would be overwritten',
+        'unmerged',
+        'needs merge',
+    ))
+
+
+def is_non_conflict_cherry_pick_failure(text):
+    tl = text.lower()
+    return ('is a merge but no -m option was given' in tl or
+            'cherry-pick is now empty' in tl or
+            'previous cherry-pick is now empty' in tl or
+            'nothing to commit' in tl)
+
+
+def can_move_without_git_conflict(source_hash):
+    """Probe whether moving `source_hash` here would hit a git conflict."""
+    original_head = git_rev_parse('HEAD')
+    r = run_git(['cherry-pick', '--no-commit', source_hash], check=False)
+    combined = r.stdout + r.stderr
+    run_git(['cherry-pick', '--abort'], check=False)
+    run_git(['reset', '--hard', original_head])
+
+    if r.returncode == 0:
+        return True
+    if is_non_conflict_cherry_pick_failure(combined):
+        return True
+    if is_git_conflict_output(combined):
+        return False
+    raise RuntimeError(
+        f"git cherry-pick probe failed for {source_hash}:\n"
+        f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}")
+
+
+def try_cumulative_cherry_pick(source_hash):
+    """Cherry-pick `source_hash` onto current HEAD. On clean apply, the
+    cherry-pick auto-commits and HEAD advances. On conflict, the in-progress
+    cherry-pick is aborted and HEAD is left unchanged.
+
+    Returns True when the cherry-pick was clean (including empty/no-op cases
+    where HEAD does NOT advance, e.g. merge commits without -m, or already
+    applied diffs), False when git reported a true content conflict."""
+    r = run_git(['cherry-pick', source_hash], check=False)
+    combined = r.stdout + r.stderr
+    if r.returncode == 0:
+        return True
+    run_git(['cherry-pick', '--abort'], check=False)
+    if is_non_conflict_cherry_pick_failure(combined):
+        return True
+    if is_git_conflict_output(combined):
+        return False
+    raise RuntimeError(
+        f"git cherry-pick failed for {source_hash}:\n"
+        f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}")
+
+
+def probe_apply_item_state(item):
+    """For probe simulation: apply the item's file state and commit so HEAD
+    advances. Used between cumulative cherry-pick probes so that pre-existing
+    dest-bucket items and preserve items contribute their file state to the
+    base seen by subsequent candidate probes. These commits are reset away
+    after the probe loop completes."""
+    apply_item_file_states(item)
+    run_git(['commit', '--allow-empty', '-m', 'probe-stub'], check=False)
+
+
+def add_subject_prefix_with_original(subject, prefix, space_before_plain=False,
+                                     original_subject=None):
+    if subject.startswith(prefix):
+        return subject, original_subject
+    separator = ' ' if space_before_plain and not subject.startswith('[') else ''
+    body, suffix = split_preserved_subject_suffix(subject)
+    max_body_len = MAX_TITLE_LEN - len(prefix) - len(separator) - len(suffix)
+    prefixed = prefix + separator + body[:max_body_len] + suffix
+
+    original_base = original_subject or subject
+    original_separator = (
+        ' ' if space_before_plain and not original_base.startswith('[') else '')
+    full_subject = prefix + original_separator + original_base
+    if prefixed != full_subject:
+        return prefixed, full_subject
+    return prefixed, None
+
+
+def add_subject_prefix(subject, prefix, space_before_plain=False):
+    prefixed, _original_subject = add_subject_prefix_with_original(
+        subject, prefix, space_before_plain)
+    return prefixed
+
+
+_PATCH_HUNK_CACHE = {}
+_PATCH_HUNK_MAP_CACHE = {}
+_HUNK_RE = re.compile(
+    r'^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@')
+
+# Module-level cache for the hunk dependency graph. Populated once by
+# `init_hunk_dependency_graph(plan)` before any group emission begins.
+# Keyed by `item_source_cache_key(item)` so it survives the shallow copies
+# that `_with_subject_prefix` produces during bucket routing.
+_HUNK_DEPENDENCY_GRAPH = None
+
+
+def _range_with_min_width(start, count):
+    count = max(count, 1)
+    return start, start + count - 1
+
+
+def item_patch_hunks(item):
+    """Return zero-context diff hunks for an item's partial source commit."""
+    key = item_source_cache_key(item)
+    if key in _PATCH_HUNK_CACHE:
+        return _PATCH_HUNK_CACHE[key]
+
+    source_by_file = item.get('source_by_file') or {}
+    if source_by_file:
+        hunks = []
+        paths_by_source = defaultdict(list)
+        source_history_by_file = item.get('source_history_by_file') or {}
+        for path in item['files']:
+            source_history = source_history_by_file.get(path)
+            if source_history:
+                for source_hash in source_history:
+                    paths_by_source[source_hash].append(path)
+            else:
+                paths_by_source[source_by_file.get(
+                    path, item['source_hash'])].append(path)
+        for source_hash, paths in paths_by_source.items():
+            hunks.extend(item_patch_hunks({
+                'source_hash': source_hash,
+                'files': paths,
+            }))
+        _PATCH_HUNK_CACHE[key] = hunks
+        return hunks
+
+    parents = get_commit_parents(item['source_hash'])
+    if parents:
+        args = ['diff', '--unified=0', '--no-renames',
+                parents[0], item['source_hash'], '--'] + list(item['files'])
+    else:
+        args = ['show', '--format=', '--unified=0', '--no-renames',
+                item['source_hash'], '--'] + list(item['files'])
+    r = run_git(args, check=False)
+
+    hunks = []
+    old_path = None
+    new_path = None
+    current_path = None
+    for line in r.stdout.splitlines():
+        if line.startswith('diff --git '):
+            old_path = None
+            new_path = None
+            current_path = None
+            continue
+        if line.startswith('--- '):
+            raw = line[4:]
+            new_path = None
+            old_path = None if raw == '/dev/null' else raw[2:] if raw.startswith('a/') else raw
+            current_path = new_path or old_path
+            continue
+        if line.startswith('+++ '):
+            raw = line[4:]
+            new_path = None if raw == '/dev/null' else raw[2:] if raw.startswith('b/') else raw
+            current_path = new_path or old_path
+            continue
+
+        m = _HUNK_RE.match(line)
+        if not m or current_path is None:
+            continue
+        old_start = int(m.group(1))
+        old_count = int(m.group(2) or '1')
+        new_start = int(m.group(3))
+        new_count = int(m.group(4) or '1')
+        old_range = _range_with_min_width(old_start, old_count)
+        new_range = _range_with_min_width(new_start, new_count)
+        hunks.append((current_path, old_range, new_range))
+
+    _PATCH_HUNK_CACHE[key] = hunks
+    return hunks
+
+
+def ranges_overlap(a, b):
+    return max(a[0], b[0]) <= min(a[1], b[1])
+
+
+def patch_hunks_overlap(left, right):
+    return (left[0] == right[0] and
+            (ranges_overlap(left[1], right[1]) or
+             ranges_overlap(left[2], right[2])))
+
+
+def patches_overlap(left_item, right_item):
+    left_map = item_patch_hunk_map(left_item)
+    right_map = item_patch_hunk_map(right_item)
+    for path in set(left_map).intersection(right_map):
+        if any(patch_hunks_overlap(lh, rh)
+               for lh in left_map[path] for rh in right_map[path]):
+            return True
+    return False
+
+
+def item_patch_hunk_map(item):
+    key = item_source_cache_key(item)
+    if key in _PATCH_HUNK_MAP_CACHE:
+        return _PATCH_HUNK_MAP_CACHE[key]
+    hunk_map = defaultdict(list)
+    for hunk in item_patch_hunks(item):
+        hunk_map[hunk[0]].append(hunk)
+    _PATCH_HUNK_MAP_CACHE[key] = hunk_map
+    return hunk_map
+
+
+def patch_overlaps_any(item, protected_items):
+    return any(patches_overlap(item, protected) for protected in protected_items)
+
+
+def patch_overlap_keep_ids(candidates, protected_items):
+    """Return candidate ids that must stay later due to patch overlap.
+
+    The fixed-point loop means a candidate newly kept due to overlap becomes
+    protected for the remaining candidates too.
+    """
+    keep_items = list(protected_items)
+    keep_ids = set()
+    changed = True
+    while changed:
+        changed = False
+        for item in candidates:
+            item_id = id(item)
+            if item_id in keep_ids:
+                continue
+            if patch_overlaps_any(item, keep_items):
+                keep_ids.add(item_id)
+                keep_items.append(item)
+                changed = True
+    return keep_ids
+
+
+def _hunk_lists_overlap(hunks_a, hunks_b):
+    """Symmetric line-range overlap test for two hunk lists on the same path.
+    A hunk tuple is (path, old_range, new_range); paths are assumed equal."""
+    for ha in hunks_a:
+        for hb in hunks_b:
+            if ranges_overlap(ha[1], hb[1]) or ranges_overlap(ha[2], hb[2]):
+                return True
+    return False
+
+
+def build_hunk_dependency_graph(items):
+    """Build a symmetric hunk-overlap graph over `items`.
+
+    Two items have an undirected edge when they have hunks on a shared path
+    whose old-side OR new-side line ranges intersect. The graph keys are
+    `item_source_cache_key(item)` so lookups survive the shallow item copies
+    that bucket routing introduces.
+
+    Returns: dict mapping cache_key -> set of cache_keys (neighbors)."""
+    items_by_path = defaultdict(list)
+    for item in items:
+        cache_key = item_source_cache_key(item)
+        for path, hunks in item_patch_hunk_map(item).items():
+            items_by_path[path].append((cache_key, hunks))
+
+    graph = defaultdict(set)
+    for entries in items_by_path.values():
+        for i in range(len(entries)):
+            key_i, hunks_i = entries[i]
+            for j in range(i + 1, len(entries)):
+                key_j, hunks_j = entries[j]
+                if key_i == key_j:
+                    continue
+                if _hunk_lists_overlap(hunks_i, hunks_j):
+                    graph[key_i].add(key_j)
+                    graph[key_j].add(key_i)
+    return dict(graph)
+
+
+def init_hunk_dependency_graph(plan):
+    """Build and cache the hunk dependency graph over all bucketed plan items.
+
+    Called once at the start of `build_output_branch`, before any overlap
+    probe consults the cache. Subsequent calls to overlap helpers consult
+    `_HUNK_DEPENDENCY_GRAPH` via `item_source_cache_key` so bucket reshuffling
+    and subject-prefix copies don't invalidate the cache."""
+    global _HUNK_DEPENDENCY_GRAPH
+    items = []
+    for key in ('g2_bucket', 'g3_bucket', 'g4_bucket', 'g5_bucket',
+                'g6_bucket', 'g7_bucket', 'g8_bucket',
+                'g10_bucket', 'g11_bucket'):
+        items.extend(plan.get(key, ()))
+    log(f"=== HUNK DEPENDENCY GRAPH ===")
+    start = time.monotonic()
+    _HUNK_DEPENDENCY_GRAPH = build_hunk_dependency_graph(items)
+    edges = sum(len(v) for v in _HUNK_DEPENDENCY_GRAPH.values()) // 2
+    log(f"  built over {len(items)} items: {len(_HUNK_DEPENDENCY_GRAPH)} "
+        f"nodes, {edges} edges ({time.monotonic() - start:.2f}s)")
+
+
+def _item_clobbered_by_full_state_replay(item, protected_items):
+    """Return True iff some `protected` item's whole-file-state replay would
+    clobber `item`'s diff.
+
+    Source-pos gated: only protected items strictly earlier in source order
+    can clobber. A later-source protected item's source state already includes
+    `item`'s diff, so its `apply_item_file_states` replay preserves rather
+    than overwrites the candidate's changes.
+
+    File-path coarse: `apply_item_file_states` rewrites the WHOLE file from
+    the protected item's source tree, so any shared path is a clobber risk
+    regardless of whether the candidate's hunks and the protected item's
+    hunks line-range-overlap. (A hunk-DAG-only check would let two
+    same-file changes at far-apart lines coexist on paper, then watch the
+    later-emitted full-state replay revert the candidate's hunks anyway.)"""
+    item_paths = set(item['files'])
+    if not item_paths:
+        return False
+    item_pos = item_source_pos(item)
+    for protected in protected_items:
+        if item_source_pos(protected) >= item_pos:
+            continue
+        if item_paths.intersection(protected['files']):
+            return True
+    return False
+
+
+def full_state_overlap_keep_ids(candidates, protected_items):
+    """Return candidate ids clobbered by later full file-state replay.
+
+    Source-pos gated: a candidate is blocked only when there is a protected
+    item with strictly earlier `source_pos` that shares a file path with the
+    candidate (the protected item's replay would overwrite the file with a
+    pre-candidate state). Later-source protected items already contain the
+    candidate's diff in their source state, so their replay preserves rather
+    than clobbers. The fixed-point loop propagates: a candidate kept due to
+    overlap becomes a protected item for the remaining candidates too."""
+    keep_items = list(protected_items)
+    keep_ids = set()
+    changed = True
+    while changed:
+        changed = False
+        for item in candidates:
+            item_id = id(item)
+            if item_id in keep_ids:
+                continue
+            if _item_clobbered_by_full_state_replay(item, keep_items):
+                keep_ids.add(item_id)
+                keep_items.append(item)
+                changed = True
+    return keep_ids
+
+
+def unsafe_later_overlap_keep_ids(candidates, protected_items):
+    return (patch_overlap_keep_ids(candidates, protected_items) |
+            full_state_overlap_keep_ids(candidates, protected_items))
+
+
+def item_source_pos(item):
+    return item.get('source_pos', -1)
+
+
+def item_full_state_overlaps_any(item, protected_items):
+    """Hunk-DAG-backed clobber check. See `_item_clobbered_by_full_state_replay`
+    for the gating rules (graph edge + earlier `source_pos`)."""
+    return _item_clobbered_by_full_state_replay(item, protected_items)
+
+
+def item_has_unsafe_overlap(item, protected_items):
+    return (patch_overlaps_any(item, protected_items) or
+            item_full_state_overlaps_any(item, protected_items))
+
+
+def promotion_overlap_keep_ids(candidates, external_protected_items,
+                               remaining_protected_items):
+    """Return candidate ids unsafe to promote before Remaining.
+
+    External protected items are emitted after g5 and before Remaining, so any
+    overlap would be reordered. Remaining protected items only block a candidate
+    when they originally came before it; later Remaining commits still replay
+    after a promoted candidate, preserving the original dependency order.
+    """
+    keep_ids = set()
+    remaining_protected = list(remaining_protected_items)
+    for item in sorted(candidates, key=item_source_pos):
+        pos = item_source_pos(item)
+        earlier_remaining = [
+            protected for protected in remaining_protected
+            if item_source_pos(protected) < pos
+        ]
+        if item_has_unsafe_overlap(
+                item, list(external_protected_items) + earlier_remaining):
+            keep_ids.add(id(item))
+            remaining_protected.append(item)
+    return keep_ids
+
+
+def touches_only_mysql_test(paths):
+    return bool(paths) and all(p.startswith('mysql-test/') for p in paths)
+
+
+def _with_subject_prefix(item, prefix, space_before_plain):
+    """Return a shallow copy of `item` with `prefix` applied to its subject.
+    Idempotent: returns the original item unchanged when no prefix is set,
+    the subject already starts with it, or the subject already carries a
+    different `[tag]` (so promotion-tag stacking like `[MTR-only][result-only]`
+    is avoided)."""
+    if prefix is None or item['subject'].startswith(prefix):
+        return item
+    if item['subject'].startswith('['):
+        return item
+    new_item = dict(item)
+    subject, original_subject = add_subject_prefix_with_original(
+        item['subject'], prefix, space_before_plain=space_before_plain,
+        original_subject=item.get('original_subject'))
+    new_item['subject'] = subject
+    new_item['original_subject'] = original_subject
+    return new_item
+
+
+def filter_with_drift_guard(*,
+                            source_bucket,
+                            other_bucket,
+                            source_tag,
+                            other_tag,
+                            unit_label,
+                            direction,
+                            candidate_filter=None,
+                            skip_classifier=None,
+                            preserve_filter=None,
+                            external_protected_items=None,
+                            overlap_strategy='per-candidate',
+                            accept_subject_prefix=None,
+                            reject_subject_prefix=None,
+                            subject_prefix_space_before_plain=False,
+                            sort_accepted_by_source_pos=True):
+    """Shared probe-and-overlap classifier used by g5/g6/g8 (promote) and g10
+    (keep-in-place). Items in `source_bucket` are split into an accepted set
+    and a rejected set; `direction` controls which set ends up in which bucket:
+
+      'promote'       — rejected items stay in `source_bucket`; accepted items
+                        move to `other_bucket`. Log tag is "[other<-source]".
+      'keep_in_place' — accepted items stay in `source_bucket`; rejected items
+                        fall back to `other_bucket`. Log tag is "[source]".
+
+    Per item:
+      candidate_filter(item) is False           -> stays in source_bucket
+                                                   (silent pass-through; no
+                                                   subject prefix)
+      preserve_filter(item) is True             -> accepted without probing
+                                                   (also contributes to sibling
+                                                   overlap protection)
+      skip_classifier(item) -> (label, phrase)  -> rejected with logged reason
+      can_move_without_git_conflict is False    -> rejected ("conflict")
+      overlap_ids contains the item             -> rejected ("overlap")
+      otherwise                                 -> accepted
+
+    `overlap_strategy`:
+      'per-candidate' — promotion_overlap_keep_ids; earlier-source remaining
+                        items only (used by g5/g6).
+      'global-unsafe' — unsafe_later_overlap_keep_ids; full protected set
+                        regardless of source position (used by g8/g10).
+
+    Returns: dict with `accepted`, `conflict_rejected`, `overlap_rejected`,
+    `preserved`, and `skips` (label -> count)."""
+    if direction == 'promote':
+        log_tag = f"[{other_tag}<-{source_tag}]"
+    elif direction == 'keep_in_place':
+        log_tag = f"[{source_tag}]"
+    else:
+        raise ValueError(f"unknown direction: {direction!r}")
+
+    if overlap_strategy not in ('per-candidate', 'global-unsafe'):
+        raise ValueError(f"unknown overlap_strategy: {overlap_strategy!r}")
+
+    external_protected_items = list(external_protected_items or ())
+    if candidate_filter is None:
+        candidate_filter = lambda _item: True
+
+    candidates = []
+    preserve_ids = set()
+    skip_lookup = {}
+    for item in source_bucket:
+        if not candidate_filter(item):
+            continue
+        if preserve_filter is not None and preserve_filter(item):
+            preserve_ids.add(id(item))
+            candidates.append(item)
+            continue
+        skip = skip_classifier(item) if skip_classifier is not None else None
+        if skip is not None:
+            skip_lookup[id(item)] = skip
+        else:
+            candidates.append(item)
+
+    pre_skip_counts = defaultdict(int)
+    for skip_label, _phrase in skip_lookup.values():
+        pre_skip_counts[skip_label] += 1
+
+    if not candidates and not skip_lookup:
+        log(f"  {log_tag} no {unit_label} commits to probe")
+        return {'accepted': 0, 'conflict_rejected': 0, 'overlap_rejected': 0,
+                'preserved': 0, 'skips': {}}
+
+    if skip_lookup:
+        parts = ', '.join(f"{count} {label}"
+                          for label, count in sorted(pre_skip_counts.items()))
+        skip_summary = f" ({parts} pre-skipped)"
+    else:
+        skip_summary = ''
+    log(f"  {log_tag} probing {len(candidates)} {unit_label} commit(s)"
+        f"{skip_summary}")
+
+    # Cumulative cherry-pick probe: walk candidates in source-pos order and
+    # let each clean apply advance HEAD so the next candidate's probe sees its
+    # predecessors. A candidate whose diff is anchored on text introduced by an
+    # earlier sibling candidate no longer fails just because the isolated probe
+    # at the marker lacks that anchor text.
+    #
+    # For 'promote' the dest bucket may already contain items routed there by
+    # planning (e.g. source_group preservation): they emit before any new
+    # promotion at this group's marker, so we pre-apply their file states to
+    # HEAD before probing candidates. Preserve items inside the candidate set
+    # (g10's source_group==10 carve-out: commits already settled in the
+    # MyRocks-kernel group on a re-parse) bypass the cherry-pick but contribute
+    # their file state in turn.
+    #
+    # HEAD is reset to the baseline after probing so the subsequent emission
+    # phase starts from the right place.
+    probe_baseline_head = git_rev_parse('HEAD')
+    if direction == 'promote':
+        for dest_item in list(other_bucket):
+            probe_apply_item_state(dest_item)
+    ordered_candidates = sorted(candidates, key=item_source_pos)
+    clean_candidates = []
+    conflict_ids = set()
+    for item in ordered_candidates:
+        iid = id(item)
+        if iid in preserve_ids:
+            probe_apply_item_state(item)
+            clean_candidates.append(item)
+        elif try_cumulative_cherry_pick(item['source_hash']):
+            clean_candidates.append(item)
+        else:
+            conflict_ids.add(iid)
+    run_git(['reset', '--hard', probe_baseline_head])
+
+    candidate_ids = {id(item) for item in candidates}
+
+    def _build_protected_source_items():
+        return [item for item in source_bucket
+                if id(item) not in candidate_ids or id(item) in conflict_ids]
+
+    if overlap_strategy == 'per-candidate':
+        overlap_ids = promotion_overlap_keep_ids(
+            clean_candidates, external_protected_items,
+            _build_protected_source_items())
+    else:  # 'global-unsafe' (validated above)
+        overlap_ids = unsafe_later_overlap_keep_ids(
+            clean_candidates,
+            external_protected_items + _build_protected_source_items())
+
+    # Preserve items are forced-clean: they never get rejected on overlap.
+    overlap_ids.difference_update(preserve_ids)
+
+    accepted_items = []
+    rejected_items = []
+    pass_through_items = []
+    accepted = 0
+    conflict_rejected = 0
+    overlap_rejected = 0
+    preserved = 0
+    skip_counts = defaultdict(int)
+
+    def log_decision(decision, item):
+        line = truncate_line(
+            f"{decision} {item['source_hash'][:12]} {item['subject']}",
+            OUTPUT_STAT_LINE_LEN)
+        print(colorize_output_commit_stats_line(line),
+              file=sys.stderr, flush=True)
+
+    for item in source_bucket:
+        iid = id(item)
+        if iid in skip_lookup:
+            skip_label, _log_phrase = skip_lookup[iid]
+            log_decision('[skip]', item)
+            skip_counts[skip_label] += 1
+            rejected_items.append(_with_subject_prefix(
+                item, reject_subject_prefix,
+                subject_prefix_space_before_plain))
+            continue
+        if iid not in candidate_ids:
+            pass_through_items.append(item)
+            continue
+        if iid in conflict_ids:
+            log_decision('[skip]', item)
+            conflict_rejected += 1
+            rejected_items.append(_with_subject_prefix(
+                item, reject_subject_prefix,
+                subject_prefix_space_before_plain))
+        elif iid in overlap_ids:
+            log_decision('[skip]', item)
+            overlap_rejected += 1
+            rejected_items.append(_with_subject_prefix(
+                item, reject_subject_prefix,
+                subject_prefix_space_before_plain))
+        else:
+            if iid in preserve_ids:
+                preserved += 1
+            else:
+                accepted += 1
+            log_decision('[keep]', item)
+            accepted_item = _with_subject_prefix(
+                item, accept_subject_prefix,
+                subject_prefix_space_before_plain)
+            if direction == 'promote':
+                accepted_item['promoted'] = True
+            accepted_items.append(accepted_item)
+
+    if sort_accepted_by_source_pos:
+        accepted_items.sort(key=lambda it: it.get('source_pos', -1))
+
+    if direction == 'promote':
+        # Non-candidates stay in source (alongside rejects); accepted moves out.
+        other_bucket.extend(accepted_items)
+        source_bucket[:] = pass_through_items + rejected_items
+    else:  # 'keep_in_place'
+        # Non-candidates stay in source (alongside accepted); rejects move out.
+        source_bucket[:] = pass_through_items + accepted_items
+        other_bucket.extend(rejected_items)
+
+    parts = [f"{accepted + preserved} accepted",
+             f"{conflict_rejected} conflict rejected",
+             f"{overlap_rejected} overlap rejected"]
+    if preserved:
+        parts.append(f"{preserved} preserved")
+    for label, count in sorted(skip_counts.items()):
+        parts.append(f"{count} {label} rejected")
+    total_eligible = len(candidates) + len(skip_lookup)
+    log(f"  {log_tag} {total_eligible} eligible ({', '.join(parts)})")
+
+    return {'accepted': accepted, 'conflict_rejected': conflict_rejected,
+            'overlap_rejected': overlap_rejected, 'preserved': preserved,
+            'skips': dict(skip_counts)}
+
+
+def promote_with_drift_guard(*,
+                             source_bucket,
+                             dest_bucket,
+                             source_tag,
+                             dest_tag,
+                             unit_label,
+                             candidate_filter,
+                             skip_classifier=None,
+                             external_protected_items=None,
+                             overlap_strategy='per-candidate',
+                             promoted_subject_prefix=None,
+                             kept_subject_prefix=None,
+                             subject_prefix_space_before_plain=False,
+                             sort_moved_by_source_pos=True):
+    """Promote pattern wrapper around `filter_with_drift_guard` used by
+    g5/g6/g8: clean candidates move from `source_bucket` to `dest_bucket`;
+    conflicts/overlaps/skips stay in `source_bucket`."""
+    result = filter_with_drift_guard(
+        source_bucket=source_bucket,
+        other_bucket=dest_bucket,
+        source_tag=source_tag,
+        other_tag=dest_tag,
+        unit_label=unit_label,
+        direction='promote',
+        candidate_filter=candidate_filter,
+        skip_classifier=skip_classifier,
+        external_protected_items=external_protected_items,
+        overlap_strategy=overlap_strategy,
+        accept_subject_prefix=promoted_subject_prefix,
+        reject_subject_prefix=kept_subject_prefix,
+        subject_prefix_space_before_plain=subject_prefix_space_before_plain,
+        sort_accepted_by_source_pos=sort_moved_by_source_pos,
+    )
+    return {'promoted': result['accepted'],
+            'conflict_kept': result['conflict_rejected'],
+            'overlap_kept': result['overlap_rejected'],
+            'skips': result['skips']}
+
+
+def keep_in_place_with_drift_guard(*,
+                                   source_bucket,
+                                   fallback_bucket,
+                                   source_tag,
+                                   fallback_tag,
+                                   unit_label,
+                                   candidate_filter=None,
+                                   preserve_filter=None,
+                                   skip_classifier=None,
+                                   external_protected_items=None,
+                                   overlap_strategy='global-unsafe'):
+    """Keep-in-place wrapper around `filter_with_drift_guard` used by g10:
+    clean candidates remain in `source_bucket`; conflicts/overlaps/skips fall
+    back to `fallback_bucket`. `preserve_filter` items bypass the probe and
+    are always accepted (they still contribute to overlap protection)."""
+    return filter_with_drift_guard(
+        source_bucket=source_bucket,
+        other_bucket=fallback_bucket,
+        source_tag=source_tag,
+        other_tag=fallback_tag,
+        unit_label=unit_label,
+        direction='keep_in_place',
+        candidate_filter=candidate_filter,
+        preserve_filter=preserve_filter,
+        skip_classifier=skip_classifier,
+        external_protected_items=external_protected_items,
+        overlap_strategy=overlap_strategy,
+        sort_accepted_by_source_pos=False,
+    )
+
+
+def promote_mysql_test_only_to_mtr(source_bucket, g5_bucket, source_tag,
+                                   protected_items=None):
+    def is_candidate(item):
+        return (touches_only_mysql_test(item['files']) and
+                not contains_g1_paths(item['files']) and
+                not is_preserved_source_group_item(item) and
+                not is_code_changes_item(item) and
+                not is_locked_from_promotion(item['subject']))
+
+    result = promote_with_drift_guard(
+        source_bucket=source_bucket,
+        dest_bucket=g5_bucket,
+        source_tag=source_tag,
+        dest_tag='g5',
+        unit_label='mysql-test-only',
+        candidate_filter=is_candidate,
+        external_protected_items=protected_items,
+        overlap_strategy='per-candidate',
+        promoted_subject_prefix=(None if source_tag == 'g11'
+                                 else '[MTR-only]'),
+        kept_subject_prefix='[MTR-only]',
+        subject_prefix_space_before_plain=True,
+    )
+    return result['promoted'], result['conflict_kept'], result['overlap_kept']
+
+
+def drain_noncode_from_remaining(g11_bucket, g6_bucket, protected_items=None):
+    """Move Remaining items whose files contain no C/C++ or CMake source into
+    the Non-code group, but only when the move can be done without drifting
+    the tree from a reference replay. Held back in g11 when (a) the
+    cherry-pick probe at current HEAD reports a conflict, or (b) advancing
+    the commit ahead of Remaining would overlap a later protected commit
+    (g7/g8/g10 or an earlier-source Remaining commit)."""
+    def is_candidate(item):
+        return (commit_has_no_code_files(item['files']) and
+                not is_code_changes_item(item) and
+                not is_locked_from_promotion(item['subject']))
+
+    result = promote_with_drift_guard(
+        source_bucket=g11_bucket,
+        dest_bucket=g6_bucket,
+        source_tag='g11',
+        dest_tag='g6',
+        unit_label='non-code-only',
+        candidate_filter=is_candidate,
+        external_protected_items=protected_items,
+        overlap_strategy='per-candidate',
+    )
+    return result['promoted'], result['conflict_kept'], result['overlap_kept']
+
+
+def promote_remaining_to_upstream(g11_bucket, g8_bucket, protected_items=None):
+    if not g11_bucket:
+        log("  [g8<-g11] no remaining commits to probe")
+        return 0, 0, 0, 0, 0, 0, 0
+
+    def classify_skip(item):
+        if is_locked_from_promotion(item['subject']):
+            return ('=== locked',
+                    "because subject contains '===' (locked from promotion)")
+        if is_mtr_only_group_subject(item['subject']):
+            return ('MTR', "because subject starts with [MTR-only]")
+        if is_result_only_item(item):
+            return ('result', "because subject starts with [result-only]")
+        if is_myrocks_kernel_group_subject(item['subject']):
+            return ('g10',
+                    "because subject matches g10 MyRocks/kernel rules")
+        return None
+
+    result = promote_with_drift_guard(
+        source_bucket=g11_bucket,
+        dest_bucket=g8_bucket,
+        source_tag='g11',
+        dest_tag='g8',
+        unit_label='remaining',
+        candidate_filter=lambda item: not is_code_changes_item(item),
+        skip_classifier=classify_skip,
+        external_protected_items=protected_items,
+        overlap_strategy='global-unsafe',
+    )
+    skips = result['skips']
+    return (result['promoted'], result['conflict_kept'],
+            result['overlap_kept'],
+            skips.get('MTR', 0), skips.get('result', 0),
+            skips.get('g10', 0), skips.get('=== locked', 0))
+
+
+def emit_split_bucket(bucket, tag, removed_commits=None):
+    """Write individual commits of a split bucket (g2/g3/g4/g6/g7/g8/g10/g11)."""
+    emitted = 0
+    skipped_empty = 0
+    total = len(bucket)
+    if total == 0:
+        log(f"  [{tag}] (empty bucket)")
+        return 0, 0
+    total_files = sum(len(it['files']) for it in bucket)
+    log(f"  [{tag}] {total} commits, {total_files} file-modifications")
+    for item in bucket:
+        apply_item_file_states(item)
+        promoted = item.get('promoted', False)
+        if do_commit(item['info'], item['subject'], item['body_rest'],
+                     original_subject=item.get('original_subject'),
+                     decision_prefix='[keep]' if promoted else None):
+            emitted += 1
+        else:
+            skipped_empty += 1
+            if promoted:
+                log_skipped_output_commit(item)
+            if removed_commits is not None:
+                record_removed_item(
+                    removed_commits, item,
+                    f"planned {tag} output commit produced no staged changes")
+    return emitted, skipped_empty
+
+
+def emit_conflict_aware_split_bucket(bucket, tag, fallback_bucket,
+                                     removed_commits=None):
+    emitted = 0
+    skipped_empty = 0
+    conflict_fallback = 0
+    total = len(bucket)
+    if total == 0:
+        log(f"  [{tag}] (empty bucket)")
+        return 0, 0, 0
+    total_files = sum(len(it['files']) for it in bucket)
+    log(f"  [{tag}] {total} commits, {total_files} file-modifications")
+    for item in bucket:
+        promoted = item.get('promoted', False)
+        if not can_move_without_git_conflict(item['source_hash']):
+            if promoted:
+                log_skipped_output_commit(item)
+            log(f"  [{tag}] {item['source_hash'][:12]} falls back to "
+                "remaining because cherry-pick probe reported a conflict")
+            fallback_bucket.append(item)
+            conflict_fallback += 1
+        else:
+            apply_item_file_states(item)
+            if do_commit(item['info'], item['subject'], item['body_rest'],
+                         original_subject=item.get('original_subject'),
+                         decision_prefix='[keep]' if promoted else None):
+                emitted += 1
+            else:
+                skipped_empty += 1
+                if promoted:
+                    log_skipped_output_commit(item)
+                if removed_commits is not None:
+                    record_removed_item(
+                        removed_commits, item,
+                        f"planned {tag} output commit produced no staged changes")
+    return emitted, skipped_empty, conflict_fallback
+
+
+def prepare_g10_bucket(g10_bucket, fallback_bucket, protected_items=None):
+    if not g10_bucket:
+        log("  [g10] (empty bucket)")
+        return [], 0, 0
+    working = list(g10_bucket)
+    result = keep_in_place_with_drift_guard(
+        source_bucket=working,
+        fallback_bucket=fallback_bucket,
+        source_tag='g10',
+        fallback_tag='remaining',
+        unit_label='MyRocks/kernel',
+        preserve_filter=lambda item: item.get('source_group') == 10,
+        external_protected_items=protected_items,
+        overlap_strategy='global-unsafe',
+    )
+    # Flag commits that stay in g10 and had TokuDB paths squashed into g1 with
+    # a [toku] subject prefix. Done here (not at planning time) so commits that
+    # fall back to Remaining via the drift guard above keep their plain subject.
+    toku_marked = 0
+    for item in working:
+        if item.get('has_toku_g1'):
+            subject, original_subject = add_subject_prefix_with_original(
+                item['subject'], '[toku]',
+                original_subject=item.get('original_subject'))
+            if subject != item['subject']:
+                item['subject'] = subject
+                item['original_subject'] = original_subject
+                toku_marked += 1
+    if toku_marked:
+        log(f"  [g10] added [toku] prefix to {toku_marked} commit(s) with "
+            f"TokuDB paths squashed into g1")
+    return working, result['conflict_rejected'], result['overlap_rejected']
+
+
+def emit_squash(input_hash, files_set, info, subject, tag):
+    """Write one squashed commit using final file state from input_hash."""
+    files = sorted(files_set)
+    log(f"  [{tag}] squashing {len(files)} file(s) "
+        f"(first source: {info['hash'][:12]})")
+    apply_file_states(input_hash, files)
+    body = (f"Squashed changes covering {len(files_set)} path(s). "
+            f"First source commit: {info['hash']}.")
+    return do_commit(info, subject, body)
+
+
+def emit_base_removed_files(plan):
+    files = plan['base_removed_files']
+    if not files:
+        log("  [removed-base-files] (none)")
+        return False
+    info = plan['base_removal_info']
+    log(f"  [removed-base-files] removing {len(files)} file(s)")
+    remove_paths(files)
+    subject = "Remove files deleted by input branch"
+    body = (f"Removed {len(files)} path(s) that existed in BASE_BRANCH and "
+            "are absent from INPUT_BRANCH.")
+    return do_commit(info, subject, body)
+
+
+def remaining_diff_paths(input_hash, output_branch):
+    r = run_git(['diff', '--name-only', '--no-renames', input_hash, output_branch],
+                check=False)
+    return [p for p in r.stdout.strip().split('\n') if p]
+
+
+def emit_snap_reconciliation_commit(input_hash, output_branch):
+    paths = remaining_diff_paths(input_hash, output_branch)
+    if not paths:
+        log("=== SNAP RECONCILIATION ===")
+        log("  [snap] no remaining diff to reconcile")
+        return False, 0, '', []
+
+    log("=== SNAP RECONCILIATION ===")
+    log(f"  [snap] reconciling {len(paths)} differing path(s) to INPUT_BRANCH")
+    diff_stat = run_git(['diff', '--stat', output_branch, input_hash],
+                        check=False).stdout.strip()
+    apply_file_states(input_hash, paths)
+    info = get_commit_info(input_hash)
+    subject = "SNAP: reconcile remaining diff to INPUT_BRANCH"
+    body = (f"Applied final file-state reconciliation for {len(paths)} path(s) "
+            f"so {output_branch} matches INPUT_BRANCH exactly.")
+    return do_commit(info, subject, body), len(paths), diff_stat, paths
+
+
+def build_output_branch(args, input_hash, base_hash, plan):
+    # Create / reset the output branch at the base
+    if branch_exists(args.output_branch):
+        if not args.force_output:
+            raise RuntimeError(
+                f"Output branch {args.output_branch!r} already exists; pass "
+                f"--force-output to overwrite.")
+        # Switch away if currently checked out
+        if get_current_branch() == args.output_branch:
+            run_git(['checkout', '--detach', 'HEAD'])
+        run_git(['branch', '-D', args.output_branch])
+
+    run_git(['checkout', '-b', args.output_branch, base_hash])
+
+    init_hunk_dependency_graph(plan)
+
+    stats = {
+        'g1_emitted': 0, 'g1_skipped': 0,
+        'g2_emitted': 0, 'g2_skipped': 0,
+        'g3_emitted': 0, 'g3_skipped': 0,
+        'g4_emitted': 0, 'g4_skipped': 0,
+        'g5_emitted': 0, 'g5_skipped': 0,
+        'g5_promoted_from_upstream': 0,
+        'g5_upstream_conflict_kept': 0,
+        'g5_upstream_overlap_kept': 0,
+        'g5_promoted_from_remaining': 0,
+        'g5_remaining_conflict_kept': 0,
+        'g5_remaining_overlap_kept': 0,
+        'g6_emitted': 0, 'g6_skipped': 0,
+        'g6_promoted_from_remaining': 0,
+        'g6_remaining_conflict_kept': 0,
+        'g6_remaining_overlap_kept': 0,
+        'g7_emitted': 0, 'g7_skipped': 0,
+        'g8_emitted': 0, 'g8_skipped': 0,
+        'g8_promoted_from_remaining': 0,
+        'g8_remaining_conflict_kept': 0,
+        'g8_remaining_overlap_kept': 0,
+        'g8_remaining_mtr_kept': 0,
+        'g8_remaining_result_kept': 0,
+        'g8_remaining_myr_kept': 0,
+        'g8_remaining_locked_kept': 0,
+        'g10_emitted': 0, 'g10_skipped': 0,
+        'g10_conflict_fallback': 0,
+        'g10_overlap_fallback': 0,
+        'g11_emitted': 0, 'g11_skipped': 0,
+        'snap_emitted': 0, 'snap_skipped': 0, 'snap_paths': 0,
+        'snap_diff_stat': '', 'snap_diff_paths': [],
+        'removed_base_emitted': 0, 'removed_base_skipped': 0,
+    }
+
+    log("=== REMOVED BASE FILES ===")
+    if emit_base_removed_files(plan):
+        stats['removed_base_emitted'] = 1
+    elif plan['base_removed_files']:
+        stats['removed_base_skipped'] = 1
+
+    # -- Group 1 ------------------------------------------------------------
+    log("=== GROUP 1: Squashes ===")
+    marker_commit(
+        1, 'Squashes',
+        'doc/, internal/, plugin/tokudb-backup-plugin/, storage/tokudb/, '
+        'scripts/ps_tokudb_admin.sh, '
+        'MYSQL_VERSION + VERSION + storage/innobase/include/univ.i, '
+        'tokudb MTR tests')
+    g1_cats = sorted(plan['g1_files'].keys(),
+                     key=lambda c: plan['g1_first_pos'][c])
+    for cat in g1_cats:
+        ok = emit_squash(input_hash, plan['g1_files'][cat],
+                         plan['g1_first_info'][cat], G1_SUBJECTS[cat],
+                         f'g1:{cat}')
+        if ok:
+            stats['g1_emitted'] += 1
+        else:
+            stats['g1_skipped'] += 1
+
+    # -- Group 2 ------------------------------------------------------------
+    log("=== GROUP 2: build-ps ===")
+    marker_commit(2, 'build-ps',
+                  'Commits touching only build-ps/.')
+    e, s = emit_split_bucket(plan['g2_bucket'], 'g2',
+                             plan['removed_commits'])
+    stats['g2_emitted'], stats['g2_skipped'] = e, s
+
+    # -- Group 3 ------------------------------------------------------------
+    log("=== GROUP 3: CI configs ===")
+    marker_commit(3, 'CI configs',
+                  '.travis.yml, .circleci/, azure-pipelines.yml, .cirrus.yml, '
+                  '.clang-tidy')
+    e, s = emit_split_bucket(plan['g3_bucket'], 'g3',
+                             plan['removed_commits'])
+    stats['g3_emitted'], stats['g3_skipped'] = e, s
+
+    # -- Group 4 ------------------------------------------------------------
+    log("=== GROUP 4: MyRocks: storage and MTR ===")
+    marker_commit(4, 'MyRocks: storage and MTR',
+                  'storage/rocksdb and mysql-test/suite/rocksdb*')
+    e, s = emit_split_bucket(plan['g4_bucket'], 'g4',
+                             plan['removed_commits'])
+    stats['g4_emitted'], stats['g4_skipped'] = e, s
+
+    # -- Group 5 ------------------------------------------------------------
+    log("=== GROUP 5: MTR tests ===")
+    marker_commit(5, 'MTR tests',
+                  'Whole commits whose subject starts with "[MTR-only]", plus '
+                  'mysql-test-only Remaining commits that cherry-pick cleanly '
+                  'after existing g5 commits without patch-overlapping later '
+                  'groups; g11 promotions keep their original subjects.')
+    e, s = emit_split_bucket(plan['g5_bucket'], 'g5',
+                             plan['removed_commits'])
+    stats['g5_emitted'], stats['g5_skipped'] = e, s
+    promoted_g5_bucket = []
+    promoted, conflict_kept, overlap_kept = promote_mysql_test_only_to_mtr(
+        plan['g11_bucket'], promoted_g5_bucket, 'g11',
+        plan['g7_bucket'] + plan['g8_bucket'] + plan['g10_bucket'])
+    stats['g5_promoted_from_remaining'] = promoted
+    stats['g5_remaining_conflict_kept'] = conflict_kept
+    stats['g5_remaining_overlap_kept'] = overlap_kept
+    e, s = emit_split_bucket(promoted_g5_bucket, 'g5:promoted',
+                             plan['removed_commits'])
+    stats['g5_emitted'] += e
+    stats['g5_skipped'] += s
+
+    # -- Group 6 ------------------------------------------------------------
+    log("=== GROUP 6: Non-code changes ===")
+    marker_commit(6, 'Non-code changes',
+                  'Remaining commits whose files contain no C/C++ or CMake '
+                  'source (i.e. nothing ending in .h .c .cc .cxx .cpp .hh .hpp '
+                  '.hxx .cmake, and no CMakeLists.txt / *.cmake.in).')
+    promoted, conflict_kept, overlap_kept = drain_noncode_from_remaining(
+        plan['g11_bucket'], plan['g6_bucket'],
+        plan['g7_bucket'] + plan['g8_bucket'] + plan['g10_bucket'])
+    stats['g6_promoted_from_remaining'] = promoted
+    stats['g6_remaining_conflict_kept'] = conflict_kept
+    stats['g6_remaining_overlap_kept'] = overlap_kept
+    e, s = emit_split_bucket(plan['g6_bucket'], 'g6',
+                             plan['removed_commits'])
+    stats['g6_emitted'], stats['g6_skipped'] = e, s
+
+    # -- Group 7 (internal bucket g10) ---------------------------------------
+    log("=== GROUP 7: TokuDB+MyRocks kernel changes ===")
+    marker_commit(7, 'TokuDB+MyRocks kernel changes',
+                  'Whole commits whose subject contains "MYR" or "rocks" '
+                  '(case-insensitive), unless moving would cause a git '
+                  'conflict or a later Remaining commit would overwrite the '
+                  'same patch; mixed g4 commits contribute only their non-g4 '
+                  'portion here.')
+    prepared_g10_bucket, conflict_fallback, overlap_fallback = prepare_g10_bucket(
+        plan['g10_bucket'], plan['g11_bucket'],
+        plan['g7_bucket'] + plan['g8_bucket'] + plan['g11_bucket'])
+    e, s = emit_split_bucket(prepared_g10_bucket, 'g10',
+                             plan['removed_commits'])
+    stats['g10_emitted'], stats['g10_skipped'] = e, s
+    stats['g10_conflict_fallback'] = conflict_fallback
+    stats['g10_overlap_fallback'] = overlap_fallback
+
+    # -- Group 8 (internal bucket g7) ----------------------------------------
+    log("=== GROUP 8: Build/Compilation ===")
+    marker_commit(8, 'Build/Compilation',
+                  'Whole commits whose subject starts with "[compilation]".')
+    e, s = emit_split_bucket(plan['g7_bucket'], 'g7',
+                             plan['removed_commits'])
+    stats['g7_emitted'], stats['g7_skipped'] = e, s
+
+    # -- Group 9 (internal bucket g8) ----------------------------------------
+    log("=== GROUP 9: Upstream bug fixes ===")
+    marker_commit(9, 'Upstream bug fixes',
+                  'Whole commits whose subject starts with "[upstream]", plus '
+                  'Remaining commits that cherry-pick cleanly after existing '
+                  'g8 commits, excluding [MTR-only]/[result-only]/MyRocks-'
+                  'kernel-subject commits; g11 promotions keep their original '
+                  'subjects.')
+    e, s = emit_split_bucket(plan['g8_bucket'], 'g8',
+                             plan['removed_commits'])
+    stats['g8_emitted'], stats['g8_skipped'] = e, s
+    if getattr(args, 'no_g8_promotion', False):
+        log("  [g8<-g11] skipped (--no-g8-promotion)")
+        stats['g8_promoted_from_remaining'] = 0
+        stats['g8_remaining_conflict_kept'] = 0
+        stats['g8_remaining_overlap_kept'] = 0
+        stats['g8_remaining_mtr_kept'] = 0
+        stats['g8_remaining_result_kept'] = 0
+        stats['g8_remaining_myr_kept'] = 0
+        stats['g8_remaining_locked_kept'] = 0
+    else:
+        promoted_g8_bucket = []
+        (promoted, conflict_kept, overlap_kept, mtr_kept, result_kept, myr_kept,
+         locked_kept) = promote_remaining_to_upstream(
+            plan['g11_bucket'], promoted_g8_bucket,
+            [])
+        stats['g8_promoted_from_remaining'] = promoted
+        stats['g8_remaining_conflict_kept'] = conflict_kept
+        stats['g8_remaining_overlap_kept'] = overlap_kept
+        stats['g8_remaining_mtr_kept'] = mtr_kept
+        stats['g8_remaining_result_kept'] = result_kept
+        stats['g8_remaining_myr_kept'] = myr_kept
+        stats['g8_remaining_locked_kept'] = locked_kept
+        e, s = emit_split_bucket(promoted_g8_bucket, 'g8:promoted',
+                                 plan['removed_commits'])
+        stats['g8_emitted'] += e
+        stats['g8_skipped'] += s
+
+    # -- Group 10 (internal bucket g11) --------------------------------------
+    log("=== GROUP 10: Code changes ===")
+    marker_commit(10, 'Code changes',
+                  'Everything not classified into the earlier groups.')
+    plan['g11_bucket'].sort(key=lambda item: item.get('source_pos', -1))
+    myr_prefixed = 0
+    for item in plan['g11_bucket']:
+        if is_myrocks_kernel_group_subject(item['subject']):
+            subject, original_subject = add_subject_prefix_with_original(
+                item['subject'], '[MYR]',
+                original_subject=item.get('original_subject'))
+            if subject != item['subject']:
+                item['subject'] = subject
+                item['original_subject'] = original_subject
+                myr_prefixed += 1
+    if myr_prefixed:
+        log(f"  [g11] added [MYR] prefix to {myr_prefixed} MYR/rocks-subject "
+            f"commit(s) left in Remaining")
+    stats['g11_myr_prefixed'] = myr_prefixed
+    e, s = emit_split_bucket(plan['g11_bucket'], 'g11',
+                             plan['removed_commits'])
+    stats['g11_emitted'], stats['g11_skipped'] = e, s
+
+    snap_ok, snap_paths, snap_diff_stat, snap_diff_paths = emit_snap_reconciliation_commit(
+        input_hash, args.output_branch)
+    stats['snap_paths'] = snap_paths
+    stats['snap_diff_stat'] = snap_diff_stat
+    stats['snap_diff_paths'] = snap_diff_paths
+    if snap_ok:
+        stats['snap_emitted'] = 1
+    elif snap_paths:
+        stats['snap_skipped'] = 1
+
+    # -- Final marker (group 11) ---------------------------------------------
+    log("=== GROUP 11: New commits ===")
+    marker_commit(11, 'New commits',
+                  'Trailing marker; new commits are added after this point.')
+
+    return stats
+
+
+# ---------------------------------------------------------------------------
+# Report
+# ---------------------------------------------------------------------------
+
+
+_INS_RE = re.compile(r'(\d+)\s+insertion')
+_DEL_RE = re.compile(r'(\d+)\s+deletion')
+
+
+def _shortstat_one(ch):
+    """Run shortstat for one commit; returns (hash, ins, del). Rename
+    detection is disabled (matches branch_range_stats.py) for speed."""
+    r = subprocess.run(
+        ['git', '-c', 'diff.renames=false', 'show',
+         '--no-patch', '--format=', '--shortstat', ch],
+        capture_output=True, text=True, encoding='utf-8',
+        errors='replace', check=False,
+    )
+    text = r.stdout
+    ins = int(_INS_RE.search(text).group(1)) if _INS_RE.search(text) else 0
+    dele = int(_DEL_RE.search(text).group(1)) if _DEL_RE.search(text) else 0
+    return ch, ins, dele
+
+
+def scan_commits(start, end, label=None, jobs=32):
+    """Walk every first-parent commit in `start..end` in parallel, summing
+    per-commit insertions/deletions.
+
+    Returns (total_ins, total_del). Uses a thread pool (default 32 workers) to
+    parallelise `git show --shortstat`.
+    """
+    r = run_git(['log', '--first-parent', '--reverse', '--format=%H',
+                 f'{start}..{end}'])
+    hashes = [x for x in r.stdout.strip().split('\n') if x]
+    total = len(hashes)
+    if label:
+        log(f"Scanning {label} for per-commit stats across {total} commits "
+            f"(parallel, {jobs} workers)...")
+    if not hashes:
+        return 0, 0
+
+    total_ins = 0
+    total_del = 0
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs)) as ex:
+        for ch, ins, dele in ex.map(_shortstat_one, hashes, chunksize=32):
+            total_ins += ins
+            total_del += dele
+
+    return total_ins, total_del
+
+
+def grouped_removed_commits(entries):
+    grouped = OrderedDict()
+    for entry in entries:
+        source_hash = entry.get('hash', '')
+        subject = entry.get('subject', '')
+        reason = entry.get('reason', '').strip() or "(no reason recorded)"
+        key = (source_hash, subject)
+        grouped.setdefault(key, [])
+        if reason not in grouped[key]:
+            grouped[key].append(reason)
+    return [(source_hash, subject, reasons)
+            for (source_hash, subject), reasons in grouped.items()]
+
+
+def is_source_marker_removed_reason(reason):
+    return (reason.startswith("source marker for group ") and
+            reason.endswith(" omitted; output markers are regenerated"))
+
+
+def removed_reason_group_header(reason):
+    absent_prefix = (
+        "all modified paths were skipped because they are absent from "
+        "INPUT_BRANCH")
+    if reason.startswith(absent_prefix):
+        return "All modified paths were skipped because they are absent from INPUT_BRANCH"
+    if re.match(r"^all \d+ \.result path\(s\) were squashed into "
+                r"previous in-range commit\(s\)$", reason):
+        return "All .result path(s) were squashed into previous in-range commit(s)"
+    if reason.startswith("all modified paths"):
+        return "All" + reason[len("all"):]
+    if reason.startswith("all "):
+        return "All" + reason[len("all"):]
+    return reason
+
+
+def removed_commits_by_reason(entries):
+    grouped = OrderedDict()
+    seen = defaultdict(set)
+    for source_hash, subject, reasons in grouped_removed_commits(entries):
+        for reason in reasons:
+            if is_source_marker_removed_reason(reason):
+                continue
+            reason = removed_reason_group_header(reason)
+            key = (source_hash, subject)
+            if key in seen[reason]:
+                continue
+            grouped.setdefault(reason, []).append(key)
+            seen[reason].add(key)
+    return grouped
+
+
+def print_removed_commit_line(source_hash, subject):
+    line = format_output_commit_stats_line(source_hash, subject)
+    print(colorize_output_commit_stats_line(line, True),
+          file=sys.stderr, flush=True)
+
+
+def log_removed_commits_by_reason(plan):
+    grouped = removed_commits_by_reason(plan.get('removed_commits', []))
+    log("=== REMOVED COMMITS ===")
+    if not grouped:
+        log("  (none)")
+        return
+    unique_commits = OrderedDict()
+    for commits in grouped.values():
+        for source_hash, subject in commits:
+            unique_commits[(source_hash, subject)] = True
+    total = len(unique_commits)
+    log(f"  {total} source commit(s) removed or elided")
+    for reason, commits in grouped.items():
+        log("")
+        log(f"{reason} ({len(commits)} commit(s))")
+        for source_hash, subject in commits:
+            print_removed_commit_line(source_hash, subject)
+
+
+def log_terminal_summary(args, input_hash, base_hash, plan, stats):
+    in_count = int(run_git(['rev-list', '--first-parent', '--count',
+                            f'{base_hash}..{input_hash}']).stdout.strip())
+    out_count = int(run_git(['rev-list', '--first-parent', '--count',
+                             f'{base_hash}..{args.output_branch}']).stdout.strip())
+
+    in_ins, in_del = scan_commits(base_hash, input_hash,
+                                  label='INPUT_BRANCH')
+    out_ins, out_del = scan_commits(base_hash, args.output_branch,
+                                    label='OUTPUT_BRANCH')
+
+    diff_stat = run_git(['diff', '--stat', input_hash, args.output_branch],
+                        check=False).stdout.strip()
+    diff_content = run_git(['diff', input_hash, args.output_branch],
+                           check=False).stdout
+    null_diff = not diff_content.strip()
+
+    visible_removed = OrderedDict()
+    for commits in removed_commits_by_reason(
+            plan.get('removed_commits', [])).values():
+        for source_hash, subject in commits:
+            visible_removed[(source_hash, subject)] = True
+
+    log("=== FINAL SUMMARY ===")
+    log(f"Input:  {args.input_branch}  ({input_hash[:12]})")
+    log(f"Base:   {args.base_branch}   ({base_hash[:12]})")
+    log(f"Output: {args.output_branch}")
+    log(f"Source commits considered: {plan['n_source_commits']}")
+    log(f"Source commits removed or elided: {len(visible_removed)}")
+    log(f"Commits on INPUT_BRANCH (first-parent):  {in_count}")
+    log(f"Commits on OUTPUT_BRANCH (first-parent): {out_count}")
+    log(f"Per-commit totals on INPUT_BRANCH:  "
+        f"+{in_ins}/-{in_del}  (total {in_ins + in_del})")
+    log(f"Per-commit totals on OUTPUT_BRANCH: "
+        f"+{out_ins}/-{out_del}  (total {out_ins + out_del})")
+    log(f"Base-branch removed files: {len(plan['base_removed_files'])}")
+    log(f"Input-only removed files skipped: "
+        f"{len(plan['transient_removed_files'])}")
+    log(f"Removed-file references skipped while planning: "
+        f"{plan['base_removed_refs_skipped']} base-file, "
+        f"{plan['transient_removed_refs_skipped']} input-only")
+    log(f".result file changes squashed into previous in-range occurrences: "
+        f"{plan.get('result_only_files_squashed', 0)}")
+    log(f".result-only commits fully elided by that squash: "
+        f"{plan.get('result_only_commits_elided', 0)}")
+    log(f".result files kept as [result-only] because their previous "
+        f"occurrence is in BASE_BRANCH: "
+        f"{plan.get('result_only_base_files_kept', 0)}")
+    log(f"[result-only] commits kept separate: "
+        f"{plan.get('result_only_base_commits_kept', 0)}")
+
+    log("")
+    log("Group totals:")
+    log("  Group              Emitted  Skipped")
+    for g in ('g1', 'g2', 'g3', 'g4', 'g5', 'g6',
+              'g7', 'g8', 'g10', 'g11'):
+        log(f"  {g:<18} {stats[f'{g}_emitted']:>7}  "
+            f"{stats[f'{g}_skipped']:>7}")
+    log(f"  {'removed-base-files':<18} "
+        f"{stats['removed_base_emitted']:>7}  "
+        f"{stats['removed_base_skipped']:>7}")
+    log(f"  {'snap-reconcile':<18} {stats.get('snap_emitted', 0):>7}  "
+        f"{stats.get('snap_skipped', 0):>7}")
+
+    log("")
+    log("Promotion and fallback stats:")
+    log(f"g11 mysql-test-only commits promoted to g5 without adding "
+        f"[MTR-only]: {stats.get('g5_promoted_from_remaining', 0)}")
+    log(f"g11 mysql-test-only commits kept for g5 cherry-pick conflicts: "
+        f"{stats.get('g5_remaining_conflict_kept', 0)}")
+    log(f"g11 mysql-test-only commits kept out of g5 for later patch "
+        f"overlaps: {stats.get('g5_remaining_overlap_kept', 0)}")
+    log(f"g11 non-code-only commits promoted to g6: "
+        f"{stats.get('g6_promoted_from_remaining', 0)}")
+    log(f"g11 non-code-only commits kept for g6 cherry-pick conflicts: "
+        f"{stats.get('g6_remaining_conflict_kept', 0)}")
+    log(f"g11 non-code-only commits kept out of g6 for later patch "
+        f"overlaps: {stats.get('g6_remaining_overlap_kept', 0)}")
+    log(f"g10 conflict fallbacks emitted in Remaining: "
+        f"{stats.get('g10_conflict_fallback', 0)}")
+    log(f"g10 later patch-overlap fallbacks emitted in Remaining: "
+        f"{stats.get('g10_overlap_fallback', 0)}")
+    log(f"Final SNAP reconciliation paths applied: "
+        f"{stats.get('snap_paths', 0)}")
+    log(f"g11 commits promoted to g8 without adding [upstream]: "
+        f"{stats.get('g8_promoted_from_remaining', 0)}")
+    log(f"g11 commits kept for g8 cherry-pick conflicts: "
+        f"{stats.get('g8_remaining_conflict_kept', 0)}")
+    log(f"g11 commits kept to avoid later patch overlap: "
+        f"{stats.get('g8_remaining_overlap_kept', 0)}")
+    log(f"g11 [MTR-only] commits kept out of g8: "
+        f"{stats.get('g8_remaining_mtr_kept', 0)}")
+    log(f"g11 [result-only] commits kept out of g8: "
+        f"{stats.get('g8_remaining_result_kept', 0)}")
+    log(f"g11 MyRocks/kernel-subject commits kept out of g8: "
+        f"{stats.get('g8_remaining_myr_kept', 0)}")
+    log(f"g11 commits kept out of g8 because subject contains '===': "
+        f"{stats.get('g8_remaining_locked_kept', 0)}")
+
+    log("")
+    log(f"Null diff vs INPUT_BRANCH: {'YES' if null_diff else 'NO'}")
+    if not null_diff:
+        log("Remaining diff stat:")
+        for line in (diff_stat or "(no stat available)").splitlines():
+            log(f"  {line}")
+        log("Remaining diff (truncated to 20000 chars):")
+        for line in diff_content[:20000].splitlines():
+            log(line)
+
+    if stats.get('snap_paths', 0):
+        log("")
+        log("Final SNAP reconciliation:")
+        log("The grouped replay left a residual diff, so a final "
+            "`SNAP: reconcile remaining diff to INPUT_BRANCH` commit was "
+            "added before null-diff verification.")
+        log(f"Paths reconciled: {stats.get('snap_paths', 0)}")
+        log("SNAP diff stat:")
+        for line in (stats.get('snap_diff_stat') or
+                     "(no stat available)").splitlines():
+            log(f"  {line}")
+        log("SNAP paths:")
+        for path in stats.get('snap_diff_paths') or []:
+            log(f"  {styled_path(path)}")
+
+    return null_diff
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Reorder a Percona Server branch into logical commit groups.'
+    )
+    parser.add_argument('--base',   required=True, dest='base_branch',
+                        metavar='BASE',
+                        help='Base branch of INPUT and OUTPUT.')
+    parser.add_argument('--input',  required=True, dest='input_branch',
+                        metavar='INPUT',
+                        help='Branch name or commit hash to reorder.')
+    parser.add_argument('--output', required=True, dest='output_branch',
+                        metavar='OUTPUT',
+                        help='New branch name to create.')
+    parser.add_argument('--report',        help=argparse.SUPPRESS)
+    parser.add_argument('--force-output',  action='store_true',
+                        help='Delete OUTPUT_BRANCH if it already exists.')
+    parser.add_argument('--allow-dirty',   action='store_true',
+                        help='Skip the clean-worktree check.')
+    parser.add_argument('--no-g8-promotion', action='store_true',
+                        help='Disable promotion of Remaining (g11) commits '
+                             'into Group 8 (Upstream bug fixes); only commits '
+                             'whose subject already starts with "[upstream]" '
+                             'land in g8.')
+    parser.add_argument(
+        '--color',
+        choices=('auto', 'always', 'never'),
+        default='auto',
+        help='Colorize stderr output (default: auto; respects NO_COLOR / FORCE_COLOR).')
+    args = parser.parse_args()
+    configure_style(args.color)
+
+    # Inside a git repo?
+    if run_git(['rev-parse', '--show-toplevel'], check=False).returncode != 0:
+        log_error("not inside a git repository")
+        return 1
+
+    if not args.allow_dirty:
+        ensure_clean_worktree()
+
+    input_hash = git_rev_parse(args.input_branch)
+    base_hash  = git_rev_parse(args.base_branch)
+
+    if run_git(['merge-base', '--is-ancestor', base_hash, input_hash],
+               check=False).returncode != 0:
+        raise RuntimeError(
+            f"{args.base_branch!r} ({base_hash[:12]}) is not an ancestor "
+            f"of {args.input_branch!r} ({input_hash[:12]}).")
+
+    if input_hash == base_hash:
+        raise RuntimeError("INPUT_BRANCH and BASE_BRANCH point to the same "
+                           "commit — nothing to reorder.")
+
+    if branch_exists(args.output_branch) and not args.force_output:
+        raise RuntimeError(
+            f"Output branch {args.output_branch!r} already exists; pass "
+            f"--force-output to overwrite.")
+
+    log(f"{STYLE.bold('Input:')}  {args.input_branch}  ({short_sha(input_hash)})")
+    log(f"{STYLE.bold('Base:')}   {args.base_branch}   ({short_sha(base_hash)})")
+    log(f"{STYLE.bold('Output:')} {args.output_branch}")
+
+    commits = get_commit_list(base_hash, input_hash)
+    log(f"{STYLE.bold('Analyzing removed paths')} across "
+        f"{len(commits)} source commits...")
+    removed_paths = analyze_removed_paths(commits, base_hash, input_hash)
+    log(f"  base-branch removed files: {len(removed_paths['base_removed'])}")
+    log(f"  input-only removed files to skip: "
+        f"{len(removed_paths['transient_removed'])}")
+    log_removed_paths(removed_paths)
+    log(f"{STYLE.bold('Planning')} {len(commits)} source commits...")
+    plan = plan_commits(commits, base_hash, removed_paths)
+
+    log(f"{STYLE.bold('Building')} output branch...")
+    stats = build_output_branch(args, input_hash, base_hash, plan)
+    log_removed_commits_by_reason(plan)
+
+    null_ok = log_terminal_summary(args, input_hash, base_hash, plan, stats)
+
+    status = STYLE.green('OK') if null_ok else STYLE.red('MISMATCH')
+    log(f"{STYLE.bold('Done.')} Null diff to INPUT_BRANCH: {status}")
+    return 0 if null_ok else 2
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except RuntimeError as e:
+        log_error(str(e))
+        sys.exit(1)

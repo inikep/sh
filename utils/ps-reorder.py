@@ -69,7 +69,6 @@ Rules implemented (letters match the task):
      bucket would be clobbered by a preserved later group.
   G) Squashes keep the position of their first source commit (ordering within
      g1 follows first-seen position)
-  H) A Markdown report is written
   I) The reorder script no longer rewrites commits to absorb removals.
   J) Source commits whose subject starts with "[compilation]" are moved to the
      g7 build/compilation group after any g1 paths are extracted for squash.
@@ -167,7 +166,6 @@ from collections import OrderedDict, defaultdict
 
 MAX_TITLE_LEN = 91
 BATCH_SIZE = 500            # max paths per git invocation
-PROGRESS_EVERY = 25         # print a progress line every N split commits
 OUTPUT_STAT_LINE_LEN = 104
 
 
@@ -233,6 +231,14 @@ def colorize_conflicts(text):
     return CONFLICT_LINE_RE.sub(lambda m: STYLE.red(m.group(1)), text)
 
 
+def colorize_decision_tag(tag):
+    if tag == '[keep]':
+        return STYLE.green(tag)
+    if tag == '[skip]':
+        return STYLE.red(tag)
+    return STYLE.cyan(tag)
+
+
 def colorize_log_message(msg):
     if not STYLE.enabled or not msg:
         return msg
@@ -244,7 +250,8 @@ def colorize_log_message(msg):
     msg = SHORTSTAT_DELETIONS_RE.sub(
         lambda m: m.group(1) + STYLE.red(m.group(2)), msg)
     msg = SHORT_HASH_RE.sub(lambda m: STYLE.yellow(m.group(0)), msg)
-    msg = TAG_RE.sub(lambda m: m.group(1) + STYLE.cyan(m.group(2)), msg)
+    msg = TAG_RE.sub(
+        lambda m: m.group(1) + colorize_decision_tag(m.group(2)), msg)
     msg = RED_STATUS_RE.sub(lambda m: STYLE.red(m.group(0)), msg)
     msg = YELLOW_STATUS_RE.sub(lambda m: STYLE.yellow(m.group(0)), msg)
     msg = GREEN_STATUS_RE.sub(lambda m: STYLE.green(m.group(0)), msg)
@@ -530,17 +537,30 @@ def subject_style(text, magenta=False):
 def colorize_output_commit_stats_line(line, magenta_subject=False):
     if not STYLE.enabled:
         return line
-    m = re.match(r"^([0-9a-f]{12})(\s?)(.*)$", line)
+    m = re.match(r"^(\[\w+\])?( ?)([0-9a-f]{12})(\s?)(.*)$", line)
     if not m:
         return colorize_log_message(line)
+    prefix = colorize_decision_tag(m.group(1)) if m.group(1) else ''
     return (
-        STYLE.yellow(m.group(1)) + m.group(2) +
-        subject_style(m.group(3), magenta_subject))
+        prefix + m.group(2) + STYLE.yellow(m.group(3)) + m.group(4) +
+        subject_style(m.group(5), magenta_subject))
 
 
-def log_output_commit_stats(ch):
+def log_output_commit_stats(ch, decision_prefix=None):
     subject = get_commit_subject(ch)
     line = format_output_commit_stats_line(ch, subject)
+    if decision_prefix:
+        line = truncate_line(f"{decision_prefix} {line}",
+                             OUTPUT_STAT_LINE_LEN)
+    print(colorize_output_commit_stats_line(line),
+          file=sys.stderr, flush=True)
+
+
+def log_skipped_output_commit(item):
+    line = truncate_line(
+        '[skip] ' + format_output_commit_stats_line(
+            item['source_hash'], item['subject']),
+        OUTPUT_STAT_LINE_LEN)
     print(colorize_output_commit_stats_line(line),
           file=sys.stderr, flush=True)
 
@@ -675,7 +695,7 @@ def split_preserved_subject_suffix(subject):
 
 
 def do_commit(info, subject, body_rest='', allow_empty=False,
-              original_subject=None):
+              original_subject=None, decision_prefix=None):
     """Commit the staged index with author/committer info. Returns True on
     success, False if there was nothing to commit."""
     message = build_full_message(subject, body_rest, original_subject)
@@ -703,7 +723,7 @@ def do_commit(info, subject, body_rest='', allow_empty=False,
             return False
         raise RuntimeError(
             f"git commit failed:\nSTDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}")
-    log_output_commit_stats(git_rev_parse('HEAD'))
+    log_output_commit_stats(git_rev_parse('HEAD'), decision_prefix)
     return True
 
 
@@ -1078,8 +1098,6 @@ def plan_commits(commits, base_hash, removed_paths):
         'removed_commits': [],
     }
 
-    total = len(commits)
-    t0 = time.monotonic()
     source_group = None
     result_file_last_item = {}
     base_existence = PathExistenceCache(base_hash)
@@ -1091,11 +1109,6 @@ def plan_commits(commits, base_hash, removed_paths):
             prior_remaining_paths.update(item['files'])
 
     for idx, ch in enumerate(commits):
-        done = idx + 1
-        if done % 200 == 0 or done == total:
-            elapsed = time.monotonic() - t0
-            rate = done / elapsed if elapsed > 0 else 0.0
-            log(f"  planning {done}/{total} commits  ({rate:5.1f}/s)")
         info = get_commit_info(ch)
         marker_group = marker_group_number(info['subject'])
         if marker_group is not None:
@@ -1160,6 +1173,7 @@ def plan_commits(commits, base_hash, removed_paths):
                     'source_hash': ch,
                     'source_pos': idx,
                     'source_group': source_group,
+                    'promoted': True,
                 })
 
             if files:
@@ -1237,6 +1251,7 @@ def plan_commits(commits, base_hash, removed_paths):
                     'body_rest': info['body_rest'],
                     'source_hash': ch,
                     'source_group': source_group,
+                    'promoted': True,
                 })
             if not files:
                 continue
@@ -1369,6 +1384,7 @@ def plan_commits(commits, base_hash, removed_paths):
                     'body_rest': info['body_rest'],
                     'source_hash': ch,
                     'source_group': source_group,
+                    'promoted': True,
                 })
             if g3_part:
                 append_bucket_item('g3_bucket', {
@@ -1378,6 +1394,7 @@ def plan_commits(commits, base_hash, removed_paths):
                     'body_rest': info['body_rest'],
                     'source_hash': ch,
                     'source_group': source_group,
+                    'promoted': True,
                 })
             if g4_part:
                 append_bucket_item('g4_bucket', {
@@ -1387,6 +1404,7 @@ def plan_commits(commits, base_hash, removed_paths):
                     'body_rest': info['body_rest'],
                     'source_hash': ch,
                     'source_group': source_group,
+                    'promoted': True,
                 })
             if g11_part:
                 target_bucket = 'g10_bucket' if myrocks_kernel_subject else 'g11_bucket'
@@ -1887,21 +1905,12 @@ def filter_with_drift_guard(*,
     `preserved`, and `skips` (label -> count)."""
     if direction == 'promote':
         log_tag = f"[{other_tag}<-{source_tag}]"
-        reject_verb = 'keeping'
-        reject_location = source_tag
     elif direction == 'keep_in_place':
         log_tag = f"[{source_tag}]"
-        reject_verb = 'leaving'
-        reject_location = other_tag
     else:
         raise ValueError(f"unknown direction: {direction!r}")
 
-    if overlap_strategy == 'per-candidate':
-        overlap_phrase = ("because moving it before Remaining would overlap "
-                          "an earlier protected change")
-    elif overlap_strategy == 'global-unsafe':
-        overlap_phrase = "because a later patch overlaps"
-    else:
+    if overlap_strategy not in ('per-candidate', 'global-unsafe'):
         raise ValueError(f"unknown overlap_strategy: {overlap_strategy!r}")
 
     external_protected_items = list(external_protected_items or ())
@@ -1963,27 +1972,17 @@ def filter_with_drift_guard(*,
         for dest_item in list(other_bucket):
             probe_apply_item_state(dest_item)
     ordered_candidates = sorted(candidates, key=item_source_pos)
-    start = time.monotonic()
     clean_candidates = []
     conflict_ids = set()
-    probed = 0
-    for i, item in enumerate(ordered_candidates, 1):
+    for item in ordered_candidates:
         iid = id(item)
         if iid in preserve_ids:
             probe_apply_item_state(item)
             clean_candidates.append(item)
+        elif try_cumulative_cherry_pick(item['source_hash']):
+            clean_candidates.append(item)
         else:
-            probed += 1
-            if try_cumulative_cherry_pick(item['source_hash']):
-                clean_candidates.append(item)
-            else:
-                conflict_ids.add(iid)
-        if probed and (i % PROGRESS_EVERY == 0 or i == len(ordered_candidates)):
-            elapsed = time.monotonic() - start
-            rate = i / elapsed if elapsed > 0 else 0.0
-            log(f"  {log_tag} probed {i}/{len(ordered_candidates)} commits  "
-                f"({len(clean_candidates)} clean, {len(conflict_ids)} "
-                f"conflict)  {rate:5.1f} commits/s")
+            conflict_ids.add(iid)
     run_git(['reset', '--hard', probe_baseline_head])
 
     candidate_ids = {id(item) for item in candidates}
@@ -2013,12 +2012,18 @@ def filter_with_drift_guard(*,
     preserved = 0
     skip_counts = defaultdict(int)
 
+    def log_decision(decision, item):
+        line = truncate_line(
+            f"{decision} {item['source_hash'][:12]} {item['subject']}",
+            OUTPUT_STAT_LINE_LEN)
+        print(colorize_output_commit_stats_line(line),
+              file=sys.stderr, flush=True)
+
     for item in source_bucket:
         iid = id(item)
         if iid in skip_lookup:
-            skip_label, log_phrase = skip_lookup[iid]
-            log(f"  {log_tag} {reject_verb} {item['source_hash'][:12]} in "
-                f"{reject_location} {log_phrase}")
+            skip_label, _log_phrase = skip_lookup[iid]
+            log_decision('[skip]', item)
             skip_counts[skip_label] += 1
             rejected_items.append(_with_subject_prefix(
                 item, reject_subject_prefix,
@@ -2028,16 +2033,13 @@ def filter_with_drift_guard(*,
             pass_through_items.append(item)
             continue
         if iid in conflict_ids:
-            log(f"  {log_tag} {reject_verb} {item['source_hash'][:12]} in "
-                f"{reject_location} because cherry-pick probe reported a "
-                "conflict")
+            log_decision('[skip]', item)
             conflict_rejected += 1
             rejected_items.append(_with_subject_prefix(
                 item, reject_subject_prefix,
                 subject_prefix_space_before_plain))
         elif iid in overlap_ids:
-            log(f"  {log_tag} {reject_verb} {item['source_hash'][:12]} in "
-                f"{reject_location} {overlap_phrase}")
+            log_decision('[skip]', item)
             overlap_rejected += 1
             rejected_items.append(_with_subject_prefix(
                 item, reject_subject_prefix,
@@ -2047,9 +2049,13 @@ def filter_with_drift_guard(*,
                 preserved += 1
             else:
                 accepted += 1
-            accepted_items.append(_with_subject_prefix(
+            log_decision('[keep]', item)
+            accepted_item = _with_subject_prefix(
                 item, accept_subject_prefix,
-                subject_prefix_space_before_plain))
+                subject_prefix_space_before_plain)
+            if direction == 'promote':
+                accepted_item['promoted'] = True
+            accepted_items.append(accepted_item)
 
     if sort_accepted_by_source_pos:
         accepted_items.sort(key=lambda it: it.get('source_pos', -1))
@@ -2245,24 +2251,21 @@ def emit_split_bucket(bucket, tag, removed_commits=None):
         return 0, 0
     total_files = sum(len(it['files']) for it in bucket)
     log(f"  [{tag}] {total} commits, {total_files} file-modifications")
-    start = time.monotonic()
-    for i, item in enumerate(bucket, 1):
+    for item in bucket:
         apply_item_file_states(item)
+        promoted = item.get('promoted', False)
         if do_commit(item['info'], item['subject'], item['body_rest'],
-                     original_subject=item.get('original_subject')):
+                     original_subject=item.get('original_subject'),
+                     decision_prefix='[keep]' if promoted else None):
             emitted += 1
         else:
             skipped_empty += 1
+            if promoted:
+                log_skipped_output_commit(item)
             if removed_commits is not None:
                 record_removed_item(
                     removed_commits, item,
                     f"planned {tag} output commit produced no staged changes")
-        if i % PROGRESS_EVERY == 0 or i == total:
-            elapsed = time.monotonic() - start
-            rate = i / elapsed if elapsed > 0 else 0.0
-            log(f"  [{tag}] {i}/{total} commits  "
-                f"({emitted} emitted, {skipped_empty} skipped)  "
-                f"{rate:5.1f} commits/s")
     return emitted, skipped_empty
 
 
@@ -2277,31 +2280,29 @@ def emit_conflict_aware_split_bucket(bucket, tag, fallback_bucket,
         return 0, 0, 0
     total_files = sum(len(it['files']) for it in bucket)
     log(f"  [{tag}] {total} commits, {total_files} file-modifications")
-    start = time.monotonic()
-    for i, item in enumerate(bucket, 1):
+    for item in bucket:
+        promoted = item.get('promoted', False)
         if not can_move_without_git_conflict(item['source_hash']):
-            log(f"  [{tag}] leaving {item['source_hash'][:12]} in remaining "
-                "because cherry-pick probe reported a conflict")
+            if promoted:
+                log_skipped_output_commit(item)
+            log(f"  [{tag}] {item['source_hash'][:12]} falls back to "
+                "remaining because cherry-pick probe reported a conflict")
             fallback_bucket.append(item)
             conflict_fallback += 1
         else:
             apply_item_file_states(item)
             if do_commit(item['info'], item['subject'], item['body_rest'],
-                         original_subject=item.get('original_subject')):
+                         original_subject=item.get('original_subject'),
+                         decision_prefix='[keep]' if promoted else None):
                 emitted += 1
             else:
                 skipped_empty += 1
+                if promoted:
+                    log_skipped_output_commit(item)
                 if removed_commits is not None:
                     record_removed_item(
                         removed_commits, item,
                         f"planned {tag} output commit produced no staged changes")
-        if i % PROGRESS_EVERY == 0 or i == total:
-            elapsed = time.monotonic() - start
-            rate = i / elapsed if elapsed > 0 else 0.0
-            log(f"  [{tag}] {i}/{total} commits  "
-                f"({emitted} emitted, {skipped_empty} skipped, "
-                f"{conflict_fallback} conflict fallback)  "
-                f"{rate:5.1f} commits/s")
     return emitted, skipped_empty, conflict_fallback
 
 
@@ -2674,19 +2675,11 @@ def scan_commits(start, end, label=None, jobs=32):
 
     total_ins = 0
     total_del = 0
-    t0 = time.monotonic()
-    done = 0
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs)) as ex:
         for ch, ins, dele in ex.map(_shortstat_one, hashes, chunksize=32):
             total_ins += ins
             total_del += dele
-            done += 1
-            if label and (done % 500 == 0 or done == total):
-                elapsed = time.monotonic() - t0
-                rate = done / elapsed if elapsed > 0 else 0.0
-                log(f"  {label}: scanned {done}/{total}  "
-                    f"({rate:5.1f}/s)")
 
     return total_ins, total_del
 

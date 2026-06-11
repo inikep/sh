@@ -70,9 +70,7 @@ Rules implemented (letters match the task):
   G) Squashes keep the position of their first source commit (ordering within
      g1 follows first-seen position)
   H) A Markdown report is written
-  I) Deletion-heavy output commits (more deletions than insertions) have their
-     subjects highlighted on the CLI. The reorder script no longer rewrites
-     commits to absorb removals.
+  I) The reorder script no longer rewrites commits to absorb removals.
   J) Source commits whose subject starts with "[compilation]" are moved to the
      g7 build/compilation group after any g1 paths are extracted for squash.
   K) Source commits whose subject starts with "[MTR-only]" are moved to the g5
@@ -168,12 +166,9 @@ from collections import OrderedDict, defaultdict
 # ---------------------------------------------------------------------------
 
 MAX_TITLE_LEN = 91
-LARGE_COMMIT_THRESHOLD = 10000
 BATCH_SIZE = 500            # max paths per git invocation
 PROGRESS_EVERY = 25         # print a progress line every N split commits
 OUTPUT_STAT_LINE_LEN = 104
-OUTPUT_STAT_FILES_WIDTH = 5
-OUTPUT_STAT_COUNT_WIDTH = 5
 
 
 class Style:
@@ -196,9 +191,6 @@ class Style:
     def magenta(self, t): return self._wrap("35", t)
     def cyan(self, t): return self._wrap("36", t)
     def default(self, t): return self._wrap("39", t)
-    def bold_default(self, t): return self._wrap("1;39", t)
-    def bold_red(self, t): return self._wrap("1;31", t)
-    def bold_magenta(self, t): return self._wrap("1;35", t)
 
 
 STYLE = Style(False)
@@ -522,88 +514,34 @@ def get_commit_shortstat(ch):
     return ins, dele
 
 
-def get_commit_shortstat_text(ch):
-    r = run_git(['show', '--format=', '--shortstat', '--no-renames', ch])
-    text = ' '.join(r.stdout.split())
-    return text if text else '0 files changed'
-
-
-def get_commit_shortstat_details(ch):
-    text = get_commit_shortstat_text(ch)
-    files = 0
-    ins = 0
-    dele = 0
-    m = re.search(r'(\d+) files? changed', text)
-    if m:
-        files = int(m.group(1))
-    m = re.search(r'(\d+) insertion', text)
-    if m:
-        ins = int(m.group(1))
-    m = re.search(r'(\d+) deletion', text)
-    if m:
-        dele = int(m.group(1))
-    return files, ins, dele
-
-
-def compact_count(n):
-    if n >= 1000000:
-        return f"{n // 1000000}M"
-    if n >= 10000:
-        return f"{n // 1000}K"
-    return str(n)
-
-
 def truncate_line(line, max_len=MAX_TITLE_LEN):
     return line[:max_len]
 
 
-def format_output_commit_stats_line(files, ins, dele, ch, subject):
-    files_field = f"{compact_count(files)}f".ljust(OUTPUT_STAT_FILES_WIDTH)
-    ins_field = f"{compact_count(ins)}+".rjust(OUTPUT_STAT_COUNT_WIDTH)
-    del_field = f"{compact_count(dele)}-".rjust(OUTPUT_STAT_COUNT_WIDTH)
-    line = f"{files_field}{ins_field} {del_field} {ch[:12]} {subject}"
+def format_output_commit_stats_line(ch, subject):
+    line = f"{ch[:12]} {subject}"
     return truncate_line(line, OUTPUT_STAT_LINE_LEN)
 
 
-def subject_style(text, bold=False, red=False, blue=False, magenta=False):
-    if magenta and bold:
-        return STYLE.bold_magenta(text)
-    if magenta:
-        return STYLE.magenta(text)
-    if blue:
-        return STYLE.blue(text)
-    if red and bold:
-        return STYLE.bold_red(text)
-    if red:
-        return STYLE.red(text)
-    return STYLE.bold_default(text) if bold else STYLE.default(text)
+def subject_style(text, magenta=False):
+    return STYLE.magenta(text) if magenta else STYLE.default(text)
 
 
-def colorize_output_commit_stats_line(line, bold_subject=False,
-                                      red_subject=False, blue_subject=False,
-                                      magenta_subject=False):
+def colorize_output_commit_stats_line(line, magenta_subject=False):
     if not STYLE.enabled:
         return line
-    m = re.match(r"^(\S+)(\s+)(\S+)(\s+)(\S+)(\s+)"
-                 r"([0-9a-f]{12})(\s?)(.*)$", line)
+    m = re.match(r"^([0-9a-f]{12})(\s?)(.*)$", line)
     if not m:
         return colorize_log_message(line)
     return (
-        m.group(1) + m.group(2) +
-        STYLE.green(m.group(3)) + m.group(4) +
-        STYLE.red(m.group(5)) + m.group(6) +
-        STYLE.yellow(m.group(7)) + m.group(8) +
-        subject_style(m.group(9), bold_subject, red_subject, blue_subject,
-                      magenta_subject))
+        STYLE.yellow(m.group(1)) + m.group(2) +
+        subject_style(m.group(3), magenta_subject))
 
 
 def log_output_commit_stats(ch):
-    files, ins, dele = get_commit_shortstat_details(ch)
     subject = get_commit_subject(ch)
-    line = format_output_commit_stats_line(files, ins, dele, ch, subject)
-    print(colorize_output_commit_stats_line(
-        line, ins + dele <= 8, dele > ins,
-        ins + dele > LARGE_COMMIT_THRESHOLD),
+    line = format_output_commit_stats_line(ch, subject)
+    print(colorize_output_commit_stats_line(line),
           file=sys.stderr, flush=True)
 
 
@@ -2805,13 +2743,9 @@ def removed_commits_by_reason(entries):
 
 
 def print_removed_commit_line(source_hash, subject):
-    files, ins, dele = get_commit_shortstat_details(source_hash)
-    line = format_output_commit_stats_line(files, ins, dele, source_hash,
-                                           subject)
-    print(colorize_output_commit_stats_line(
-        line, ins + dele <= 8, dele > ins,
-        ins + dele > LARGE_COMMIT_THRESHOLD, True),
-        file=sys.stderr, flush=True)
+    line = format_output_commit_stats_line(source_hash, subject)
+    print(colorize_output_commit_stats_line(line, True),
+          file=sys.stderr, flush=True)
 
 
 def log_removed_commits_by_reason(plan):

@@ -38,7 +38,7 @@ The source list may include task-specified filters, for example `--first-parent`
 
 ## Hard Rules
 
-- **HR-1:** Use plain `git cherry-pick <sha>` only. No `-X ours`, `-X theirs`, `git checkout --ours/--theirs`, merge-strategy shortcuts, or bulk conflict resolution.
+- **HR-1:** Use plain `git cherry-pick <sha>` only. No `-X ours`, `-X theirs`, `git checkout --ours/--theirs`, merge-strategy shortcuts, or bulk conflict resolution. A ledgered `rewrite-replacement` may plain-cherry-pick one matching 8.0 rewrite commit instead of the current 5.7 source commit when all Rewrite-Replacement Bounds hold.
 - **HR-2:** Never snap to `$REFERENCE_BRANCH`: no checkout/restore/read-tree/copy/redirect of whole files or directories from reference. `git show $REFERENCE_BRANCH:<path>` is inspection-only, except for manually copying small conflict-region text.
 - **HR-3:** Do not consult prior chats, memory, old reports, rerere decisions, or out-of-session notes. Allowed sources are the current conversation, Git history, the worktree, run logs, and reference-tree inspection.
 - **HR-4:** Do not add LLM/tool attribution trailers to commits.
@@ -189,6 +189,7 @@ For each source commit from the Group 9 marker onward:
    - If the feature itself is absent from `$REFERENCE_BRANCH`, do not cherry-pick the commit. Ledger `reference-feature-absent-skip` with the diff/new-path identifiers searched, reference evidence, source index/SHA/subject, and the no-output exception. No build is owed for this skipped non-marker commit, even if its locked bucket is source/build-system.
    - Do not classify a feature as absent merely because a file moved, an API shape changed, or the commit message mentions absent side features. Absence means the reference lacks the feature behavior, user-visible variable/command/plugin, or equivalent implementation represented by the actual patch hunks.
    - If the current diff hunks are present in the reference but subject/body identifiers are absent, apply the commit or let it become an `empty-skip-equivalent`; do not use `reference-feature-absent-skip` for the whole commit. Ledger this as `applied-equivalent` or `message-only-absent-apply` when it affects the decision.
+   - If targeted inspection shows the same feature was rewritten as one separate 8.0 port commit on the reference/percona 8.0 side, try `rewrite-replacement` before spending time manually porting obsolete 5.7 hunks. This is especially applicable when the 5.7 cherry-pick conflicts because the destination API shape changed, but the 8.0 commit has the same feature/bug identifiers and implements the same behavior directly against the 8.0 API. If a source cherry-pick is already in conflict, abort that cherry-pick first; then plain cherry-pick the rewrite commit and resolve any remaining conflicts hunk by hunk.
 
 3. If marker: `git commit --allow-empty` with the original marker subject; no build, except the Group 9 marker, where the Group 8 end checkpoint build runs first and the marker is preserved after it passes.
 4. Otherwise run plain `git cherry-pick <sha>`.
@@ -266,8 +267,25 @@ Use only when needed for conflict, buildability, or reference-feature absence, a
 - `message-only-absent-apply`: apply a commit whose actual diff/new-path hunks are reference-present even though absent identifiers appear only in the subject/body.
 - `reference-feature-absent-skip`: skip a non-marker before cherry-pick when the applicable range gate (pre-Group-9 or post-Group-8) plus targeted inspection proves the feature behavior represented by the actual diff/new-path hunks is absent from the reference.
 - `reference-feature-absent-hunk-drop`: while applying a commit, drop only the hunks/paths whose feature is reference-absent and commit the rest under the original message. Requires range-gate plus targeted inspection evidence per dropped hunk group. Never use it to avoid a conflict, a required build, or an HP-8 explanation.
+- `rewrite-replacement`: replace the current 5.7 source commit with one separate 8.0 rewrite/port commit for the same feature. The replacement commit must be plain-cherry-picked, not copied from a tree, and every path/build obligation from both commits remains auditable.
 
 Never use these mechanisms for convenience, batching, or hiding missing builds.
+
+### Rewrite-Replacement Bounds
+
+Use `rewrite-replacement` when a 5.7 feature commit has an independently authored 8.0 port/rewrite commit that is a better semantic unit than manual conflict resolution.
+
+Every bound must hold:
+
+- Find exactly one rewrite commit that represents the current source commit's feature, using commit message tokens, bug/PS IDs, diff identifiers, and changed paths. A merge commit alone is not enough; identify the concrete non-merge commit when the rewrite arrived through a PR merge.
+- The rewrite must implement the same feature behavior as the 5.7 source commit. It may adapt storage, parser, DD, tests, or API wiring to 8.0, but it must not bundle unrelated features that would have required separate source-list positions.
+- Prefer local evidence first: `$REFERENCE_BRANCH`, an available `percona/8.0` or `8.0` branch, and targeted `git log -S/-G/--grep` searches. Do not treat a later maintenance fix for the feature as the rewrite unless it is the only commit needed for the current source feature.
+- If the source cherry-pick is already in progress, abort only that current cherry-pick and preserve all prior output commits. Then run plain `git cherry-pick <rewrite-sha>`.
+- Resolve rewrite conflicts hunk by hunk under the normal conflict rules. The rewrite does not authorize whole-file reference replacement or a final snap.
+- The output commit message may be the rewrite commit's original message. Ledger the current source index/SHA/subject, rewrite SHA/subject, evidence that it is the same feature, output SHA, and any conflict/build resolution.
+- The locked bucket is the union of the source commit and rewrite commit path lists. If either side is source/plugin/build-system, the replacement output commit is build-required and needs a PASS build at its resulting SHA.
+- The HP-8 staged-path check uses the union of source and rewrite path lists. Every absent source/plugin/build-system path still needs a ledgered explanation such as destination/reference-equivalent semantic, obsolete 5.7 API, or rewrite-covered path.
+- Do not use `rewrite-replacement` when the 8.0 feature is split across multiple commits. In that case use normal hunk resolution, forward-fold, defer-commit, squash, or squash-cluster bounds as applicable.
 
 ### Defer-commit Bounds
 
@@ -366,7 +384,7 @@ Disabled helper behavior:
 Before final parity:
 
 - Audit every post-Group-8 build-required source commit: each must have its own PASS build log at its resulting SHA, unless it was an empty skip, closed defer-commit entry, ledgered squash component, or approved squash-cluster member.
-- Audit the ledger: every deferred-hunk, defer-commit, forward-fold, squash, squash-cluster, and applied-equivalent row must point to a landing/target/combined SHA or explicit no-output exception.
+- Audit the ledger: every deferred-hunk, defer-commit, forward-fold, squash, squash-cluster, rewrite-replacement, and applied-equivalent row must point to a landing/target/combined/replacement SHA or explicit no-output exception.
 
 Then:
 
@@ -396,7 +414,7 @@ Write `$REPORT_FILE` incrementally. Required sections:
 - Both range feature-gate commands (pre-Group-9 and post-Group-8), summary counts, and every `needs-review` entry that led to targeted inspection, apply-equivalent, `reference-feature-absent-skip`, or `reference-feature-absent-hunk-drop`.
 - Group 8 end boundary (Group 9 marker index), checkpoint build, `[compilation]` fixes, and marker preservation.
 - Per source commit: index, source SHA, output SHA or skip, bucket, path list, conflicts, HP-8 staged-path result, build result or no-build reason.
-- Ledger summary: feature-absent skips and hunk drops, deferred hunks, defer-commits, forward-folds, squashes, squash-clusters, applied-equivalents, waivers.
+- Ledger summary: feature-absent skips and hunk drops, deferred hunks, defer-commits, forward-folds, squashes, squash-clusters, rewrite-replacements, applied-equivalents, waivers.
 - Build-driven fixes (BDF): failed log, error, fix paths, PASS log.
 - Final parity reconciliation commits.
 - Final null-diff SHA and final build log.

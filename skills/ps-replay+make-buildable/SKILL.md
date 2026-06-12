@@ -14,7 +14,7 @@ Success requires all of:
 - `$OUTPUT_BRANCH` is rooted at `$DESTINATION_BASE_BRANCH`.
 - The selected source commits are processed in order, one at a time.
 - Empty marker commits are preserved; other empty cherry-picks are skipped.
-- The Group 8 checkpoint and every later build-required commit has its own PASS build record.
+- The Group 8 end checkpoint (immediately before the Group 9 marker) and every later build-required commit has its own PASS build record.
 - Final tree diff to `$REFERENCE_BRANCH` is empty and the null-diff tip builds.
 - `$REPORT_FILE` records inputs, replay decisions, build logs, final parity, and `violations encountered: none` or the violations found.
 
@@ -74,24 +74,25 @@ The source list may include task-specified filters, for example `--first-parent`
 
    Record whether reference has source-list-missing commits, merge-up resolutions, delete-only areas, rename-only areas, missing reference files, MTR fixture drift, support/build/client/plugin drift, SQL drift, or storage drift. This is diagnostic only; it does not authorize pre-dropping hunks or snapping.
 
-4. Locate the exact marker subject:
+4. Locate the exact marker subjects:
 
    ```text
+   ==================== MARKER: GROUP 8 — Build/Compilation ====================
    ==================== MARKER: GROUP 9 — Upstream bug fixes ====================
    ```
 
-   Record its 1-based source index. Stop if absent.
+   Record their 1-based source indexes. Stop if either is absent. Set `GROUP9_INDEX` to the Group 9 marker's index. The build checkpoint is at the end of Group 8: Group 8's own commits are no-build, and per-commit builds start only after the last Group 8 commit, immediately before the Group 9 marker is preserved. Throughout this skill, "post-Group-8" means from the Group 9 marker onward.
 
 5. Create `$OUTPUT_BRANCH` from `$DESTINATION_BASE_BRANCH`.
 6. Start `$RUN_DIR/ledger.tsv`. Record only non-routine events: conflict resolutions, empty skips, deferred hunks, forward-folds, squashes, build fixes, waivers, reconciliation commits, final parity, and final build. Routine clean cherry-picks need not be ledgered.
-7. Pre-Group-8: skip feature-evidence gating entirely. Cherry-pick and resolve conflicts only.
+7. Pre-checkpoint (every commit before the Group 9 marker, including all Group 8 commits): skip feature-evidence gating entirely. Cherry-pick and resolve conflicts only.
 8. Before post-Group-8 replay, run the feature gate exactly once: build one range-level feature evidence file for the selected source commits against the target reference range:
 
    ```sh
    scripts/ps_replay_range_feature_gate.py \
      --worktree . \
      --source-list $RUN_DIR/source-list.txt \
-     --start $((GROUP8_INDEX + 1)) \
+     --start $((GROUP9_INDEX + 1)) \
      --first-parent \
      --reference-base $DESTINATION_BASE_BRANCH \
      --reference $REFERENCE_BRANCH \
@@ -124,17 +125,17 @@ Pass task-requested build flags through `$EXTRA_CMAKE_FLAGS` or equivalent CMake
 
 ## Bucket Rules
 
-Before Group 8:
+Before the checkpoint (every commit up to the end of Group 8, i.e., before the Group 9 marker):
 
-- Non-marker commits are no-build.
-- Marker commits are preserved empty.
+- Non-marker commits are no-build. This includes all of Group 8's own commits.
+- Marker commits are preserved empty, including the Group 8 marker, with no build.
 
-At Group 8:
+At the Group 8 end checkpoint (immediately before the Group 9 marker):
 
-- Run the first build before preserving the Group 8 marker.
-- If it fails, commit minimal `[compilation]` fixes before the marker, rebuild, then preserve the marker empty.
+- Run the first build after the last Group 8 commit, before preserving the Group 9 marker.
+- If it fails, commit minimal `[compilation]` fixes before the marker, rebuild, then preserve the Group 9 marker empty.
 
-After Group 8:
+After Group 8 (from the Group 9 marker onward):
 
 - Classify each non-marker source commit from `git diff-tree --no-commit-id --name-only -r <source-sha>`.
 - Source bucket if any path is source/build-system-like: `sql/`, `storage/`, `client/`, `mysys/`, `mysys_ssl/`, `vio/`, `include/`, `extra/`, `sql-common/`, `plugin/`, `cmake/`, `scripts/`, `CMakeLists.txt`, `configure.cmake`, `config.h.cmake`, or extensions `.c .cc .cpp .cxx .h .hh .hpp .hxx .cmake`.
@@ -143,9 +144,9 @@ After Group 8:
 
 ## Replay Loop
 
-### Pre-Group-8 (fast path)
+### Pre-checkpoint (fast path) — through the end of Group 8
 
-Before the Group 8 checkpoint, no build is owed for any commit. Use the minimum loop:
+Before the Group 8 end checkpoint (every commit before the Group 9 marker, including all Group 8 commits), no build is owed for any commit. Use the minimum loop:
 
 1. If marker: `git commit --allow-empty -m "$subject"`. Continue.
 2. Otherwise `git cherry-pick <sha>`.
@@ -155,9 +156,9 @@ Before the Group 8 checkpoint, no build is owed for any commit. Use the minimum 
 
 Do not run any feature gate per commit, and do not write a ledger row for every clean apply.
 
-### Post-Group-8 (full path)
+### Post-Group-8 (full path) — from the Group 9 marker onward
 
-For each source commit after the Group 8 marker:
+For each source commit from the Group 9 marker onward:
 
 1. Record source index, SHA, subject, path list, and locked bucket.
 2. Before cherry-picking a non-marker commit, consult `$RUN_DIR/feature-evidence/range-gate.json`:
@@ -170,7 +171,7 @@ For each source commit after the Group 8 marker:
    - Do not classify a feature as absent merely because a file moved, an API shape changed, or the commit message mentions absent side features. Absence means the reference lacks the feature behavior, user-visible variable/command/plugin, or equivalent implementation represented by the actual patch hunks.
    - If the current diff hunks are present in the reference but subject/body identifiers are absent, apply the commit or let it become an `empty-skip-equivalent`; do not use `reference-feature-absent-skip` for the whole commit. Ledger this as `applied-equivalent` or `message-only-absent-apply` when it affects the decision.
 
-3. If marker: `git commit --allow-empty` with the original marker subject; no build unless it is the Group 8 checkpoint position.
+3. If marker: `git commit --allow-empty` with the original marker subject; no build, except the Group 9 marker, where the Group 8 end checkpoint build runs first and the marker is preserved after it passes.
 4. Otherwise run plain `git cherry-pick <sha>`.
 5. Resolve conflicts hunk by hunk. Use `$REFERENCE_BRANCH` only for local inspection and semantic guidance. Prefer the destination/reference-shaped 5.7 API when the 5.6 hunk is obsolete, moved, split, or reference-absent; ledger the mapping.
    If `git diff --check` or `git diff --cached --check` reports trailing whitespace, space-before-tab, or similar whitespace warnings, compare the exact warned line to `$REFERENCE_BRANCH` before editing it. If the same whitespace is present in the reference, keep it and ledger/report it as reference-matching whitespace; do not clean it just to satisfy `diff --check`. Only remove whitespace that is absent from the reference or that you introduced while resolving a conflict.
@@ -203,7 +204,7 @@ Default cap: 4 attempts per build-required commit. Ask for a current-conversatio
 
 Commit-shape rule:
 
-- `[compilation]` commits are allowed only for the Group 8 checkpoint first build before the marker, where no source commit exists yet to amend.
+- `[compilation]` commits are allowed only for the Group 8 end checkpoint first build before the Group 9 marker, where no build-required source commit exists yet to amend.
 - For every post-Group-8 source/plugin/build-system commit, do not create a separate `[compilation]` commit for an independent build failure.
 - If the failing source commit has already been committed, apply the build fix and `git commit --amend` the current output commit, preserving the source commit message unless a ledgered squash/cluster message format applies.
 - If the failing source commit has not yet been committed, include the build fix before `git cherry-pick --continue`.
@@ -373,7 +374,7 @@ Write `$REPORT_FILE` incrementally. Required sections:
 - Pre-flight/readback summary and `violations encountered: none` or violations.
 - Reference-shape audit and final-reconciliation forecast.
 - Range feature-gate command, summary counts, and every `needs-review` entry that led to targeted inspection, apply-equivalent, or `reference-feature-absent-skip`.
-- Group 8 boundary, checkpoint build, `[compilation]` fixes, and marker preservation.
+- Group 8 end boundary (Group 9 marker index), checkpoint build, `[compilation]` fixes, and marker preservation.
 - Per source commit: index, source SHA, output SHA or skip, bucket, path list, conflicts, HP-8 staged-path result, build result or no-build reason.
 - Ledger summary: deferred hunks, defer-commits, forward-folds, squashes, squash-clusters, applied-equivalents, waivers.
 - Build-driven fixes (BDF): failed log, error, fix paths, PASS log.
@@ -385,7 +386,7 @@ Write `$REPORT_FILE` incrementally. Required sections:
 Stop and ask when:
 
 - HR-1 through HR-11 would be violated.
-- Group 8 marker is missing.
+- The Group 8 or Group 9 marker is missing.
 - A required build was skipped and later commits were applied.
 - HP-8 staged-path cross-check has an unledgered missing source/plugin/build-system path.
 - A build-required commit exceeds the attempt cap without waiver.

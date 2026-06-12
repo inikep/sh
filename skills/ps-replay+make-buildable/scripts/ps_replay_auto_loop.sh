@@ -20,6 +20,7 @@ SCRIPTS=${PS_REPLAY_SCRIPTS:-$(dirname "$0")}
 REPORT_ARGS=()
 GROUP8_ARGS=()
 CMAKE_ARGS=()
+GATE_ARGS=()
 
 if [ -n "${PS_REPLAY_REPORT_FILE:-}" ]; then
     REPORT_ARGS=(--report-file "$PS_REPLAY_REPORT_FILE")
@@ -27,6 +28,24 @@ fi
 
 if [ -n "${PS_REPLAY_GROUP8_MARKER:-}" ]; then
     GROUP8_ARGS=(--group8-marker "$PS_REPLAY_GROUP8_MARKER")
+fi
+
+if [ -n "${PS_REPLAY_FEATURE_GATES:-}" ]; then
+    # Whitespace-separated range-gate evidence JSON paths
+    # (pre-group9-gate.json and/or range-gate.json).
+    read -r -a _PS_REPLAY_FEATURE_GATES <<< "$PS_REPLAY_FEATURE_GATES"
+    for gate in "${_PS_REPLAY_FEATURE_GATES[@]}"; do
+        GATE_ARGS+=(--feature-gate "$gate")
+    done
+fi
+
+if [ -n "${PS_REPLAY_GATE_DECIDED_APPLY:-}" ]; then
+    # Whitespace-separated 1-based source indexes already inspected and
+    # decided to apply.
+    read -r -a _PS_REPLAY_GATE_DECIDED <<< "$PS_REPLAY_GATE_DECIDED_APPLY"
+    for idx in "${_PS_REPLAY_GATE_DECIDED[@]}"; do
+        GATE_ARGS+=(--gate-decided-apply "$idx")
+    done
 fi
 
 if [ -n "${PS_REPLAY_CMAKE_FLAGS:-}" ]; then
@@ -49,4 +68,5 @@ exec python3 "$SCRIPTS/ps_replay_batch.py" \
     --build-policy bucketed \
     "${REPORT_ARGS[@]}" \
     "${GROUP8_ARGS[@]}" \
+    "${GATE_ARGS[@]}" \
     "${CMAKE_ARGS[@]}"

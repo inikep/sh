@@ -270,5 +270,67 @@ class ClassifyPathsTests(unittest.TestCase):
         )
 
 
+class FeatureGateTests(unittest.TestCase):
+    def test_no_record_never_stops(self):
+        self.assertIsNone(ps_replay_batch.gate_stop_hint(None, 5, 100, set()))
+
+    def test_pre_checkpoint_stops_on_needs_review_and_partial_match(self):
+        for hint in ("needs-review", "partial-match-review"):
+            record = {"decision_hint": hint}
+            self.assertEqual(
+                ps_replay_batch.gate_stop_hint(record, 5, 100, set()), hint
+            )
+
+    def test_pre_checkpoint_clean_hints_proceed(self):
+        for hint in ("reference-present", "message-only-review", "no-diff-identifiers"):
+            record = {"decision_hint": hint}
+            self.assertIsNone(ps_replay_batch.gate_stop_hint(record, 5, 100, set()))
+
+    def test_post_checkpoint_stops_only_on_needs_review(self):
+        self.assertEqual(
+            ps_replay_batch.gate_stop_hint({"decision_hint": "needs-review"}, 150, 100, set()),
+            "needs-review",
+        )
+        self.assertIsNone(
+            ps_replay_batch.gate_stop_hint(
+                {"decision_hint": "partial-match-review"}, 150, 100, set()
+            )
+        )
+
+    def test_missing_marker_is_treated_as_pre_checkpoint(self):
+        record = {"decision_hint": "partial-match-review"}
+        self.assertEqual(
+            ps_replay_batch.gate_stop_hint(record, 5, None, set()),
+            "partial-match-review",
+        )
+
+    def test_decided_apply_index_proceeds(self):
+        record = {"decision_hint": "needs-review"}
+        self.assertIsNone(ps_replay_batch.gate_stop_hint(record, 5, 100, {5}))
+
+    def test_load_gate_records_merges_files_by_index(self):
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pre = Path(tmp) / "pre-group9-gate.json"
+            post = Path(tmp) / "range-gate.json"
+            pre.write_text(json.dumps({"records": [{"index": 3, "decision_hint": "needs-review"}]}))
+            post.write_text(json.dumps({"records": [{"index": 120, "decision_hint": "reference-present"}]}))
+
+            records = ps_replay_batch.load_gate_records([pre, post])
+
+        self.assertEqual(set(records), {3, 120})
+        self.assertEqual(records[3]["decision_hint"], "needs-review")
+
+    def test_gate_args_default_empty(self):
+        argv = ["ps_replay_batch.py", "--source-list", "list.txt", "--start", "1", "--end", "1"]
+        with patch("sys.argv", argv):
+            args = ps_replay_batch.parse_args()
+
+        self.assertEqual(args.feature_gate, [])
+        self.assertEqual(args.gate_decided_apply, [])
+
+
 if __name__ == "__main__":
     unittest.main()

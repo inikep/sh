@@ -1,17 +1,28 @@
 #!/usr/bin/env python3
 """Cherry-pick a bounded source range under ps-replay+make-buildable rules.
 
-Every non-marker source-range commit before the Group 8 marker is forced into
-the no-build bucket. The Group 8 marker is a checkpoint: build before
-preserving it as an empty marker commit. All non-marker commits are applied
-with plain `git cherry-pick <sha>`. After Group 8, source/plugin commits are
+Every non-marker source-range commit before the boundary marker (the Group 9
+marker, i.e. the end of Group 8) is forced into the no-build bucket. The
+boundary marker is the Group 8 end checkpoint: build before preserving it as
+an empty marker commit. All non-marker commits are applied with plain
+`git cherry-pick <sha>`. After the checkpoint, source/plugin commits are
 HP-8 checked against the resulting output commit and built immediately.
 Post-Group-8 no-build batches are build-checked at batch boundaries.
+
+With `--feature-gate`, range-gate evidence JSON files (pre-Group-9 and/or
+post-Group-8) are consulted before each non-marker cherry-pick. The driver
+stops before applying a commit whose decision hint requires manual review
+(pre-Group-9: needs-review and partial-match-review; post-Group-8:
+needs-review) so the engineer can decide apply, whole-commit
+reference-feature-absent-skip, or partial reference-feature-absent-hunk-drop.
+It never auto-skips. Pass `--gate-decided-apply IDX` for indexes already
+inspected and decided to apply.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -34,6 +45,8 @@ DEFAULT_CMAKE_FLAGS = [
 ]
 GROUP8_MARKER_SUBJECT = "==================== MARKER: GROUP 9 — Upstream bug fixes ===================="
 MARKER_RE = re.compile(r"^\s*=+\sMARKER:")
+GATE_STOP_HINTS_PRE = frozenset({"needs-review", "partial-match-review"})
+GATE_STOP_HINTS_POST = frozenset({"needs-review"})
 
 
 def parse_args() -> argparse.Namespace:
@@ -81,6 +94,31 @@ def parse_args() -> argparse.Namespace:
         dest="allow_missing_group8_marker",
         action="store_true",
         help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--feature-gate",
+        dest="feature_gate",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "Range-gate evidence JSON from ps_replay_range_feature_gate.py "
+            "(pre-Group-9 and/or post-Group-8 file). May be passed multiple times; "
+            "records are merged by source index. The driver stops before "
+            "cherry-picking any commit whose decision hint requires manual review."
+        ),
+    )
+    parser.add_argument(
+        "--gate-decided-apply",
+        dest="gate_decided_apply",
+        type=int,
+        action="append",
+        default=[],
+        help=(
+            "1-based source index already inspected against the range gate and "
+            "decided to apply; the driver proceeds through it without stopping. "
+            "May be passed multiple times."
+        ),
     )
     parser.add_argument(
         "--build-policy",
@@ -239,6 +277,34 @@ def changed_paths(worktree: Path, sha: str) -> list[str]:
 
 def is_marker_subject(subject: str) -> bool:
     return bool(MARKER_RE.match(subject))
+
+
+def load_gate_records(paths: list[Path]) -> dict[int, dict]:
+    records: dict[int, dict] = {}
+    for path in paths:
+        evidence = json.loads(path.read_text())
+        for record in evidence.get("records", []):
+            records[int(record["index"])] = record
+    return records
+
+
+def gate_stop_hint(
+    record: dict | None,
+    idx: int,
+    group8_index: int | None,
+    decided_apply: set[int],
+) -> str | None:
+    """Return the decision hint that requires stopping before cherry-pick, if any.
+
+    Pre-checkpoint commits stop on partial matches too because unmatched diff
+    identifiers there are reference-feature-absent-hunk-drop candidates.
+    """
+    if record is None or idx in decided_apply:
+        return None
+    pre_checkpoint = group8_index is None or idx < group8_index
+    stop_hints = GATE_STOP_HINTS_PRE if pre_checkpoint else GATE_STOP_HINTS_POST
+    hint = record.get("decision_hint")
+    return hint if hint in stop_hints else None
 
 
 def has_source_extension(path: str) -> bool:
@@ -505,10 +571,19 @@ def main() -> int:
 
     append(args.report_file, f"\n## Replay batch {args.start}-{args.end}")
     if group8_index is not None:
-        append(args.report_file, f"- Group 8 marker found at source index {group8_index}: `{args.group8_marker}`.")
-        append(args.report_file, "- All non-marker commits before Group 8 are forced into the no-build bucket.")
+        append(args.report_file, f"- Boundary marker found at source index {group8_index}: `{args.group8_marker}`.")
+        append(args.report_file, "- All non-marker commits before the Group 8 end checkpoint are forced into the no-build bucket.")
     else:
-        append(args.report_file, "- Group 8 marker not found; missing marker allowed for this diagnostic run.")
+        append(args.report_file, "- Boundary marker not found; missing marker allowed for this diagnostic run.")
+
+    gate_records = load_gate_records(args.feature_gate)
+    decided_apply = set(args.gate_decided_apply)
+    if args.feature_gate:
+        names = ", ".join(f"`{path}`" for path in args.feature_gate)
+        append(args.report_file, f"- Feature-gate evidence loaded from {names}; {len(gate_records)} records.")
+        if decided_apply:
+            decided = ", ".join(str(idx) for idx in sorted(decided_apply))
+            append(args.report_file, f"- Gate-decided apply indexes: {decided}.")
 
     consecutive_nobuild = 0
     for idx in range(args.start, args.end + 1):
@@ -518,6 +593,27 @@ def main() -> int:
         at_group8 = group8_index is not None and idx == group8_index and subject == args.group8_marker
         post_group8 = group8_index is not None and idx > group8_index and not is_marker_subject(subject)
         print(f"[{idx}/{len(commits)}] cherry-pick {sha[:12]} [{bucket}] {subject}", flush=True)
+
+        if not is_marker_subject(subject):
+            stop_hint = gate_stop_hint(gate_records.get(idx), idx, group8_index, decided_apply)
+            if stop_hint is not None:
+                record = gate_records[idx]
+                unmatched = record.get("unmatched_diff_identifiers", [])
+                append(
+                    args.report_file,
+                    f"- Commit {idx}: `{sha}` stopped on feature-gate hint `{stop_hint}` (`{subject}`); "
+                    f"unmatched diff identifiers: `{', '.join(unmatched) or 'none'}`.",
+                )
+                print(f"feature-gate stop: decision hint {stop_hint}", flush=True)
+                print(f"  unmatched diff identifiers: {', '.join(unmatched) or 'none'}", flush=True)
+                print(
+                    "Inspect the source patch against the reference, then either restart with "
+                    f"--gate-decided-apply {idx} to apply it, or handle it manually "
+                    "(reference-feature-absent-skip, or cherry-pick with "
+                    "reference-feature-absent-hunk-drop) and restart the batch after this index.",
+                    flush=True,
+                )
+                return 6
 
         if at_group8:
             print(f"[{idx}/{len(commits)}] Group 8 checkpoint build before marker", flush=True)

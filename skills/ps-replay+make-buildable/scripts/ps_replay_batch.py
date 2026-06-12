@@ -17,11 +17,17 @@ needs-review) so the engineer can decide apply, whole-commit
 reference-feature-absent-skip, or partial reference-feature-absent-hunk-drop.
 It never auto-skips. Pass `--gate-decided-apply IDX` for indexes already
 inspected and decided to apply.
+
+For repeated, audited path-shape decisions, opt-in acceleration flags can
+auto-apply selected gate stops and auto-drop reference-absent conflict paths.
+These modes require explicit path globs and never use reference tree
+replacement or merge-strategy shortcuts.
 """
 
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import re
@@ -119,6 +125,44 @@ def parse_args() -> argparse.Namespace:
             "decided to apply; the driver proceeds through it without stopping. "
             "May be passed multiple times."
         ),
+    )
+    parser.add_argument(
+        "--gate-auto-apply-path-glob",
+        dest="gate_auto_apply_path_glob",
+        action="append",
+        default=[],
+        help=(
+            "Opt-in acceleration for feature-gate stops: if every gate-unmatched "
+            "path matches one of these globs and every unmatched identifier is "
+            "allowed, proceed as gate-decided-apply. May be passed multiple times."
+        ),
+    )
+    parser.add_argument(
+        "--gate-auto-apply-unmatched-identifier",
+        dest="gate_auto_apply_unmatched_identifier",
+        action="append",
+        default=[],
+        help=(
+            "Identifier allowed for --gate-auto-apply-path-glob decisions. "
+            "Every unmatched_diff_identifier must be listed here unless there "
+            "are no unmatched identifiers. May be passed multiple times."
+        ),
+    )
+    parser.add_argument(
+        "--auto-drop-reference-absent-conflict-glob",
+        dest="auto_drop_reference_absent_conflict_glob",
+        action="append",
+        default=[],
+        help=(
+            "Opt-in conflict acceleration: when every conflicted path matches "
+            "one of these globs and is absent from --reference, git rm those "
+            "paths and continue/skip the cherry-pick. May be passed multiple times."
+        ),
+    )
+    parser.add_argument(
+        "--ledger-file",
+        type=Path,
+        help="Append TSV ledger rows for automated skips/hunk drops.",
     )
     parser.add_argument(
         "--build-policy",
@@ -237,6 +281,14 @@ def append(report: Path | None, line: str) -> None:
         fh.write(line + "\n")
 
 
+def append_ledger(ledger: Path | None, fields: list[str]) -> None:
+    if ledger is None:
+        return
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    with ledger.open("a") as fh:
+        fh.write("\t".join(fields) + "\n")
+
+
 def commit_subject(worktree: Path, sha: str) -> str:
     return out(worktree, ["show", "-s", "--format=%s", sha])
 
@@ -307,6 +359,42 @@ def gate_stop_hint(
     return hint if hint in stop_hints else None
 
 
+def matches_any_glob(path: str, globs: list[str]) -> bool:
+    return any(fnmatch.fnmatchcase(path, glob) for glob in globs)
+
+
+def gate_unmatched_paths(record: dict) -> list[str]:
+    changed = set(record.get("changed_paths") or [])
+    added = set(record.get("added_paths") or [])
+    matched_changed = set(record.get("matched_changed_paths") or [])
+    matched_added = set(record.get("matched_added_paths") or [])
+    return sorted((changed | added) - matched_changed - matched_added)
+
+
+def gate_auto_apply_reason(
+    record: dict,
+    path_globs: list[str],
+    allowed_unmatched_identifiers: set[str],
+) -> str | None:
+    if not path_globs:
+        return None
+
+    unmatched_paths = gate_unmatched_paths(record)
+    if not unmatched_paths:
+        return None
+    if any(not matches_any_glob(path, path_globs) for path in unmatched_paths):
+        return None
+
+    unmatched_identifiers = set(record.get("unmatched_diff_identifiers") or [])
+    if unmatched_identifiers - allowed_unmatched_identifiers:
+        return None
+
+    return (
+        "all gate-unmatched paths match configured globs "
+        f"({', '.join(path_globs)}) and unmatched identifiers are allowed"
+    )
+
+
 def has_source_extension(path: str) -> bool:
     """SKILL HP-8 extension-based Source override: any C/C++/CMake file forces Source bucket."""
     lowered = path.lower()
@@ -364,6 +452,33 @@ def path_exists_on_reference(worktree: Path, reference: str, path: Path) -> bool
         stderr=subprocess.DEVNULL,
     )
     return proc.returncode == 0
+
+
+def auto_droppable_conflicts(
+    worktree: Path,
+    reference: str,
+    conflicts: list[Path],
+    globs: list[str],
+) -> tuple[bool, list[Path], list[str]]:
+    if not globs or not conflicts:
+        return False, [], []
+
+    reasons: list[str] = []
+    for path in conflicts:
+        path_text = path.as_posix()
+        if not matches_any_glob(path_text, globs):
+            reasons.append(f"{path_text} does not match configured globs")
+            continue
+        if path_exists_on_reference(worktree, reference, path):
+            reasons.append(f"{path_text} exists on reference")
+
+    if reasons:
+        return False, [], reasons
+    return True, conflicts, []
+
+
+def staged_paths(worktree: Path) -> list[str]:
+    return [line for line in out(worktree, ["diff", "--cached", "--name-only"]).splitlines() if line]
 
 
 def describe_conflicts(worktree: Path, reference: str) -> list[Path]:
@@ -584,8 +699,22 @@ def main() -> int:
         if decided_apply:
             decided = ", ".join(str(idx) for idx in sorted(decided_apply))
             append(args.report_file, f"- Gate-decided apply indexes: {decided}.")
+        if args.gate_auto_apply_path_glob:
+            append(
+                args.report_file,
+                "- Gate auto-apply path globs: "
+                f"`{', '.join(args.gate_auto_apply_path_glob)}`; allowed unmatched identifiers: "
+                f"`{', '.join(args.gate_auto_apply_unmatched_identifier) or 'none'}`.",
+            )
+    if args.auto_drop_reference_absent_conflict_glob:
+        append(
+            args.report_file,
+            "- Auto-drop reference-absent conflict globs: "
+            f"`{', '.join(args.auto_drop_reference_absent_conflict_glob)}`.",
+        )
 
     consecutive_nobuild = 0
+    auto_gate_allowed_ids = set(args.gate_auto_apply_unmatched_identifier)
     for idx in range(args.start, args.end + 1):
         sha = commits[idx - 1]
         subject = subjects[idx]
@@ -599,21 +728,34 @@ def main() -> int:
             if stop_hint is not None:
                 record = gate_records[idx]
                 unmatched = record.get("unmatched_diff_identifiers", [])
-                append(
-                    args.report_file,
-                    f"- Commit {idx}: `{sha}` stopped on feature-gate hint `{stop_hint}` (`{subject}`); "
-                    f"unmatched diff identifiers: `{', '.join(unmatched) or 'none'}`.",
+                auto_reason = gate_auto_apply_reason(
+                    record,
+                    args.gate_auto_apply_path_glob,
+                    auto_gate_allowed_ids,
                 )
-                print(f"feature-gate stop: decision hint {stop_hint}", flush=True)
-                print(f"  unmatched diff identifiers: {', '.join(unmatched) or 'none'}", flush=True)
-                print(
-                    "Inspect the source patch against the reference, then either restart with "
-                    f"--gate-decided-apply {idx} to apply it, or handle it manually "
-                    "(reference-feature-absent-skip, or cherry-pick with "
-                    "reference-feature-absent-hunk-drop) and restart the batch after this index.",
-                    flush=True,
-                )
-                return 6
+                if auto_reason is not None:
+                    append(
+                        args.report_file,
+                        f"- Commit {idx}: `{sha}` auto-applied feature-gate hint `{stop_hint}` (`{subject}`); "
+                        f"unmatched diff identifiers: `{', '.join(unmatched) or 'none'}`; {auto_reason}.",
+                    )
+                    print(f"feature-gate auto-apply: {auto_reason}", flush=True)
+                else:
+                    append(
+                        args.report_file,
+                        f"- Commit {idx}: `{sha}` stopped on feature-gate hint `{stop_hint}` (`{subject}`); "
+                        f"unmatched diff identifiers: `{', '.join(unmatched) or 'none'}`.",
+                    )
+                    print(f"feature-gate stop: decision hint {stop_hint}", flush=True)
+                    print(f"  unmatched diff identifiers: {', '.join(unmatched) or 'none'}", flush=True)
+                    print(
+                        "Inspect the source patch against the reference, then either restart with "
+                        f"--gate-decided-apply {idx} to apply it, or handle it manually "
+                        "(reference-feature-absent-skip, or cherry-pick with "
+                        "reference-feature-absent-hunk-drop) and restart the batch after this index.",
+                        flush=True,
+                    )
+                    return 6
 
         if at_group8:
             print(f"[{idx}/{len(commits)}] Group 8 checkpoint build before marker", flush=True)
@@ -648,16 +790,104 @@ def main() -> int:
                     append(args.report_file, f"- Commit {idx}: `{sha}` stopped on unresolved cherry-pick result (`{subject}`).")
                     return 3
 
-                names = ", ".join(path.as_posix() for path in conflicts)
-                append(
-                    args.report_file,
-                    f"- Commit {idx}: `{sha}` stopped on conflicts in `{names}` (`{subject}`); resolve hunks manually using `{args.reference}` as guidance.",
+                auto_ok, drop_paths, auto_reasons = auto_droppable_conflicts(
+                    args.worktree,
+                    args.reference,
+                    conflicts,
+                    args.auto_drop_reference_absent_conflict_glob,
                 )
-                print(
-                    "Stopped before modifying conflicted files. Resolve hunks manually, run the HP-8 staged-path check before git cherry-pick --continue, build this commit if required, then restart the batch after this index.",
-                    flush=True,
-                )
-                return 3
+                if auto_ok:
+                    git(args.worktree, ["rm", "--", *(path.as_posix() for path in drop_paths)])
+                    dropped = ", ".join(path.as_posix() for path in drop_paths)
+                    remaining_conflicts = conflicted_paths(args.worktree)
+                    if remaining_conflicts:
+                        remaining = ", ".join(path.as_posix() for path in remaining_conflicts)
+                        append(
+                            args.report_file,
+                            f"- Commit {idx}: `{sha}` auto-dropped reference-absent conflict paths `{dropped}`, "
+                            f"but remaining conflicts require manual resolution: `{remaining}`.",
+                        )
+                        return 3
+
+                    staged = staged_paths(args.worktree)
+                    if not staged:
+                        git(args.worktree, ["cherry-pick", "--skip"])
+                        append(
+                            args.report_file,
+                            f"- Commit {idx}: `{sha}` skipped after auto-dropping only reference-absent conflict paths "
+                            f"`{dropped}` (`{subject}`).",
+                        )
+                        append_ledger(
+                            args.ledger_file,
+                            [
+                                "reference-feature-absent-skip",
+                                str(idx),
+                                sha[:12],
+                                f"auto-dropped only reference-absent conflict paths matching configured globs: {dropped}; no output commit",
+                            ],
+                        )
+                        print(f"[{idx}/{len(commits)}] skipped after auto-drop of reference-absent conflicts", flush=True)
+                        continue
+
+                    if post_group8 and bucket in {"source", "plugin"}:
+                        if not hp8_check_staged_paths(args.worktree, source_paths, idx, sha, args.report_file):
+                            return 5
+
+                    continued = git(args.worktree, ["cherry-pick", "--continue", "--no-edit"], check=False)
+                    if continued.returncode != 0:
+                        if "previous cherry-pick is now empty" in continued.stdout or "nothing to commit" in continued.stdout:
+                            git(args.worktree, ["cherry-pick", "--skip"])
+                            append(
+                                args.report_file,
+                                f"- Commit {idx}: `{sha}` skipped as empty after auto-dropping reference-absent "
+                                f"conflict paths `{dropped}` (`{subject}`).",
+                            )
+                            append_ledger(
+                                args.ledger_file,
+                                [
+                                    "reference-feature-absent-skip",
+                                    str(idx),
+                                    sha[:12],
+                                    f"auto-dropped reference-absent conflict paths matching configured globs: {dropped}; cherry-pick became empty",
+                                ],
+                            )
+                            print(f"[{idx}/{len(commits)}] skipped empty after auto-drop", flush=True)
+                            continue
+                        print(continued.stdout, end="")
+                        append(
+                            args.report_file,
+                            f"- Commit {idx}: `{sha}` auto-dropped reference-absent conflict paths `{dropped}`, "
+                            "but cherry-pick --continue failed.",
+                        )
+                        return 3
+
+                    append(
+                        args.report_file,
+                        f"- Commit {idx}: `{sha}` auto-dropped reference-absent conflict paths `{dropped}` "
+                        f"using configured globs and continued with staged paths `{', '.join(staged)}`.",
+                    )
+                    append_ledger(
+                        args.ledger_file,
+                        [
+                            "reference-feature-absent-hunk-drop",
+                            str(idx),
+                            sha[:12],
+                            f"auto-dropped reference-absent conflict paths matching configured globs: {dropped}; kept staged paths: {', '.join(staged)}",
+                        ],
+                    )
+                    apply_status = "auto-reference-absent-conflict-drop"
+                else:
+                    names = ", ".join(path.as_posix() for path in conflicts)
+                    reason_suffix = f" Auto-drop not used: {'; '.join(auto_reasons)}." if auto_reasons else ""
+                    append(
+                        args.report_file,
+                        f"- Commit {idx}: `{sha}` stopped on conflicts in `{names}` (`{subject}`); resolve hunks manually using `{args.reference}` as guidance.{reason_suffix}",
+                    )
+                    print(
+                        "Stopped before modifying conflicted files. Resolve hunks manually, run the HP-8 staged-path check before git cherry-pick --continue, build this commit if required, then restart the batch after this index.",
+                        flush=True,
+                    )
+                    return 3
 
         new_full_sha = out(args.worktree, ["rev-parse", "HEAD"])
         new_sha = new_full_sha[:12]

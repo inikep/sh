@@ -330,6 +330,86 @@ class FeatureGateTests(unittest.TestCase):
 
         self.assertEqual(args.feature_gate, [])
         self.assertEqual(args.gate_decided_apply, [])
+        self.assertEqual(args.gate_auto_apply_path_glob, [])
+        self.assertEqual(args.gate_auto_apply_unmatched_identifier, [])
+        self.assertEqual(args.auto_drop_reference_absent_conflict_glob, [])
+        self.assertIsNone(args.ledger_file)
+
+    def test_gate_auto_apply_requires_configured_path_globs(self):
+        record = {
+            "changed_paths": ["build-ps/ubuntu/control"],
+            "matched_changed_paths": [],
+            "unmatched_diff_identifiers": [],
+        }
+
+        self.assertIsNone(ps_replay_batch.gate_auto_apply_reason(record, [], set()))
+
+    def test_gate_auto_apply_accepts_only_unmatched_paths_matching_globs(self):
+        record = {
+            "changed_paths": ["build-ps/debian/control", "build-ps/ubuntu/control"],
+            "matched_changed_paths": ["build-ps/debian/control"],
+            "unmatched_diff_identifiers": [],
+        }
+
+        reason = ps_replay_batch.gate_auto_apply_reason(
+            record,
+            ["build-ps/ubuntu/**"],
+            set(),
+        )
+
+        self.assertIsNotNone(reason)
+
+    def test_gate_auto_apply_rejects_unallowed_unmatched_identifier(self):
+        record = {
+            "changed_paths": ["build-ps/ubuntu/control"],
+            "matched_changed_paths": [],
+            "unmatched_diff_identifiers": ["key_buffer"],
+        }
+
+        self.assertIsNone(
+            ps_replay_batch.gate_auto_apply_reason(
+                record,
+                ["build-ps/ubuntu/**"],
+                set(),
+            )
+        )
+        self.assertIsNotNone(
+            ps_replay_batch.gate_auto_apply_reason(
+                record,
+                ["build-ps/ubuntu/**"],
+                {"key_buffer"},
+            )
+        )
+
+    def test_auto_droppable_conflicts_requires_absent_reference_and_matching_glob(self):
+        conflicts = [Path("build-ps/ubuntu/control"), Path("build-ps/debian/control.notokudb")]
+
+        with patch("ps_replay_batch.path_exists_on_reference", return_value=False):
+            ok, paths, reasons = ps_replay_batch.auto_droppable_conflicts(
+                Path("."),
+                "reference",
+                conflicts,
+                ["build-ps/ubuntu/**", "build-ps/debian/*.notokudb"],
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(paths, conflicts)
+        self.assertEqual(reasons, [])
+
+    def test_auto_droppable_conflicts_rejects_reference_present_path(self):
+        conflicts = [Path("build-ps/ubuntu/control")]
+
+        with patch("ps_replay_batch.path_exists_on_reference", return_value=True):
+            ok, paths, reasons = ps_replay_batch.auto_droppable_conflicts(
+                Path("."),
+                "reference",
+                conflicts,
+                ["build-ps/ubuntu/**"],
+            )
+
+        self.assertFalse(ok)
+        self.assertEqual(paths, [])
+        self.assertEqual(reasons, ["build-ps/ubuntu/control exists on reference"])
 
 
 if __name__ == "__main__":

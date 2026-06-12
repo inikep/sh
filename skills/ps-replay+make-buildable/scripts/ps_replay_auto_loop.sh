@@ -21,6 +21,7 @@ REPORT_ARGS=()
 GROUP8_ARGS=()
 CMAKE_ARGS=()
 GATE_ARGS=()
+AUTO_ARGS=()
 
 if [ -n "${PS_REPLAY_REPORT_FILE:-}" ]; then
     REPORT_ARGS=(--report-file "$PS_REPLAY_REPORT_FILE")
@@ -48,6 +49,34 @@ if [ -n "${PS_REPLAY_GATE_DECIDED_APPLY:-}" ]; then
     done
 fi
 
+if [ -n "${PS_REPLAY_GATE_AUTO_APPLY_PATH_GLOBS:-}" ]; then
+    # Whitespace-separated path globs. Quote the env assignment in the caller
+    # so shell expansion does not happen before this wrapper receives them.
+    read -r -a _PS_REPLAY_GATE_AUTO_GLOBS <<< "$PS_REPLAY_GATE_AUTO_APPLY_PATH_GLOBS"
+    for glob in "${_PS_REPLAY_GATE_AUTO_GLOBS[@]}"; do
+        AUTO_ARGS+=(--gate-auto-apply-path-glob "$glob")
+    done
+fi
+
+if [ -n "${PS_REPLAY_GATE_AUTO_APPLY_UNMATCHED_IDENTIFIERS:-}" ]; then
+    read -r -a _PS_REPLAY_GATE_AUTO_IDS <<< "$PS_REPLAY_GATE_AUTO_APPLY_UNMATCHED_IDENTIFIERS"
+    for ident in "${_PS_REPLAY_GATE_AUTO_IDS[@]}"; do
+        AUTO_ARGS+=(--gate-auto-apply-unmatched-identifier "$ident")
+    done
+fi
+
+if [ -n "${PS_REPLAY_AUTO_DROP_CONFLICT_GLOBS:-}" ]; then
+    # Whitespace-separated path globs for reference-absent conflict drops.
+    read -r -a _PS_REPLAY_AUTO_DROP_GLOBS <<< "$PS_REPLAY_AUTO_DROP_CONFLICT_GLOBS"
+    for glob in "${_PS_REPLAY_AUTO_DROP_GLOBS[@]}"; do
+        AUTO_ARGS+=(--auto-drop-reference-absent-conflict-glob "$glob")
+    done
+fi
+
+if [ -n "${PS_REPLAY_LEDGER_FILE:-}" ]; then
+    AUTO_ARGS+=(--ledger-file "$PS_REPLAY_LEDGER_FILE")
+fi
+
 if [ -n "${PS_REPLAY_CMAKE_FLAGS:-}" ]; then
     # Whitespace-separated compatibility hook for simple flags such as
     # -DCMAKE_CXX_FLAGS=-fpermissive.
@@ -69,4 +98,5 @@ exec python3 "$SCRIPTS/ps_replay_batch.py" \
     "${REPORT_ARGS[@]}" \
     "${GROUP8_ARGS[@]}" \
     "${GATE_ARGS[@]}" \
+    "${AUTO_ARGS[@]}" \
     "${CMAKE_ARGS[@]}"

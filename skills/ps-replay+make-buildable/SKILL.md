@@ -186,6 +186,24 @@ Use only after targeted inspection in the current run has established a recurrin
 - Pass `--ledger-file $RUN_DIR/ledger.tsv` so automated `reference-feature-absent-skip` and `reference-feature-absent-hunk-drop` decisions are recorded.
 - Do not use this fast path for source/plugin/build-system semantic hunks, SQL/storage behavior, moved APIs, or any path that exists in the reference.
 
+#### Batch-Reviewed Gate Decisions
+
+For repeated `partial-match-review` stops that are not eligible for automatic
+path-shape acceleration, inspect a contiguous block in one pass and record the
+source indexes that are decided to apply in a reviewed decision file:
+
+```text
+# one reviewed decision per line; notes after the index are allowed
+58 reference has the MyRocks checksum/direct-IO behavior; unmatched ids are test/sysvar drift
+59 reference has ROCKSDB_COMPACTION_STATS; unmatched ids are naming/API drift
+```
+
+Then restart the driver with `--gate-decided-apply-file <file>` instead of
+passing many `--gate-decided-apply <idx>` flags. This is not an auto-apply
+mechanism: every listed index must already have current-run targeted
+inspection evidence, and skips or hunk drops must still be handled manually
+and ledgered before advancing past that source index.
+
 ### Post-Group-8 (full path) — from the Group 9 marker onward
 
 For each source commit from the Group 9 marker onward:
@@ -371,8 +389,8 @@ Allowed helpers:
 
 - `ps_replay_scan_range.py`: preflight scan of source/reference ranges for markers, squash/snap-like commits, and reference-only commits. Use during the reference-shape audit.
 - `ps_replay_range_feature_gate.py`: range-level feature audit comparing selected source commits against `$DESTINATION_BASE_BRANCH..$REFERENCE_BRANCH`. Use exactly twice: once before replay starts for the pre-Group-9 range (`--start 1 --end $((GROUP9_INDEX - 1))`) and once before post-Group-8 replay for the rest; consult `decision_hint` before each non-marker commit in the corresponding range. This is the only allowed feature-gate helper in this skill.
-- `ps_replay_batch.py`: bounded replay driver. It must use plain `git cherry-pick <sha>` for every non-marker commit, preserve marker commits with `git commit --allow-empty`, stop on conflicts/build failures/missing build records, and HP-8 check post-Group-8 source/plugin commits. For clean plain cherry-picks it checks the resulting output commit's changed paths; for conflicts, do the staged-path HP-8 check manually before `git cherry-pick --continue` unless the optional fast path above resolved only configured reference-absent conflicts. Use `--classify-only` before trusting bucket decisions. Pass the range-gate evidence files with `--feature-gate` (repeatable: pre-Group-9 and post-Group-8 files); the driver then stops before cherry-picking any commit whose decision hint requires manual review (pre-Group-9: `needs-review` and `partial-match-review`; post-Group-8: `needs-review`) unless explicitly accelerated with `--gate-auto-apply-path-glob` and `--gate-auto-apply-unmatched-identifier`. After inspecting a stopped commit, restart with `--gate-decided-apply <idx>` to apply it, or handle the skip/hunk-drop manually and restart after that index. For repeated audited absent packaging paths, pass `--auto-drop-reference-absent-conflict-glob <glob>` and `--ledger-file $RUN_DIR/ledger.tsv`; the driver may auto-`git rm` only conflicted paths that match the globs and are absent from `$REFERENCE_BRANCH`.
-- `ps_replay_auto_loop.sh`: compatibility wrapper around `ps_replay_batch.py`; it must inherit the same stop/build/cross-check behavior. Set `PS_REPLAY_CMAKE_FLAGS='-DCMAKE_CXX_FLAGS=-fpermissive'` or pass `--cmake-flag` to the Python helper for task-specific build flags. Set `PS_REPLAY_FEATURE_GATES` (whitespace-separated gate JSON paths) and `PS_REPLAY_GATE_DECIDED_APPLY` (whitespace-separated indexes) to forward the feature-gate options. Optional acceleration env vars: `PS_REPLAY_GATE_AUTO_APPLY_PATH_GLOBS`, `PS_REPLAY_GATE_AUTO_APPLY_UNMATCHED_IDENTIFIERS`, `PS_REPLAY_AUTO_DROP_CONFLICT_GLOBS`, and `PS_REPLAY_LEDGER_FILE`.
+- `ps_replay_batch.py`: bounded replay driver. It must use plain `git cherry-pick <sha>` for every non-marker commit, preserve marker commits with `git commit --allow-empty`, stop on conflicts/build failures/missing build records, and HP-8 check post-Group-8 source/plugin commits. For clean plain cherry-picks it checks the resulting output commit's changed paths; for conflicts, do the staged-path HP-8 check manually before `git cherry-pick --continue` unless the optional fast path above resolved only configured reference-absent conflicts. Use `--classify-only` before trusting bucket decisions. Pass the range-gate evidence files with `--feature-gate` (repeatable: pre-Group-9 and post-Group-8 files); the driver then stops before cherry-picking any commit whose decision hint requires manual review (pre-Group-9: `needs-review` and `partial-match-review`; post-Group-8: `needs-review`) unless explicitly accelerated with `--gate-auto-apply-path-glob` and `--gate-auto-apply-unmatched-identifier`, or already reviewed with `--gate-decided-apply <idx>` / `--gate-decided-apply-file <file>`. After inspecting a stopped commit, restart with a decided-apply option to apply it, or handle the skip/hunk-drop manually and restart after that index. For repeated audited absent packaging paths, pass `--auto-drop-reference-absent-conflict-glob <glob>` and `--ledger-file $RUN_DIR/ledger.tsv`; the driver may auto-`git rm` only conflicted paths that match the globs and are absent from `$REFERENCE_BRANCH`.
+- `ps_replay_auto_loop.sh`: compatibility wrapper around `ps_replay_batch.py`; it must inherit the same stop/build/cross-check behavior. Set `PS_REPLAY_CMAKE_FLAGS='-DCMAKE_CXX_FLAGS=-fpermissive'` or pass `--cmake-flag` to the Python helper for task-specific build flags. Set `PS_REPLAY_FEATURE_GATES` (whitespace-separated gate JSON paths), `PS_REPLAY_GATE_DECIDED_APPLY` (whitespace-separated indexes), and/or `PS_REPLAY_GATE_DECIDED_APPLY_FILE` to forward the feature-gate options. Optional acceleration env vars: `PS_REPLAY_GATE_AUTO_APPLY_PATH_GLOBS`, `PS_REPLAY_GATE_AUTO_APPLY_UNMATCHED_IDENTIFIERS`, `PS_REPLAY_AUTO_DROP_CONFLICT_GLOBS`, and `PS_REPLAY_LEDGER_FILE`.
 - `ps_replay_build.py`: standard CMake/build runner that writes logs.
 - `ps_replay_errors.py`: extracts likely root-cause diagnostics from large build logs.
 - `ps_replay_conflict_triage.py`: prints conflict status and may stage only files whose conflict regions already match safely; remaining files require manual hunk review.

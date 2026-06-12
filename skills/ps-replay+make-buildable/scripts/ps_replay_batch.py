@@ -16,7 +16,8 @@ stops before applying a commit whose decision hint requires manual review
 needs-review) so the engineer can decide apply, whole-commit
 reference-feature-absent-skip, or partial reference-feature-absent-hunk-drop.
 It never auto-skips. Pass `--gate-decided-apply IDX` for indexes already
-inspected and decided to apply.
+inspected and decided to apply, or `--gate-decided-apply-file PATH` for a
+reviewed batch of indexes.
 
 For repeated, audited path-shape decisions, opt-in acceleration flags can
 auto-apply selected gate stops and auto-drop reference-absent conflict paths.
@@ -124,6 +125,19 @@ def parse_args() -> argparse.Namespace:
             "1-based source index already inspected against the range gate and "
             "decided to apply; the driver proceeds through it without stopping. "
             "May be passed multiple times."
+        ),
+    )
+    parser.add_argument(
+        "--gate-decided-apply-file",
+        dest="gate_decided_apply_file",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "File containing 1-based source indexes already inspected and "
+            "decided to apply. Blank lines and # comments are ignored; each "
+            "non-comment line may be an integer or start with an integer "
+            "followed by whitespace and review notes. May be passed multiple times."
         ),
     )
     parser.add_argument(
@@ -338,6 +352,24 @@ def load_gate_records(paths: list[Path]) -> dict[int, dict]:
         for record in evidence.get("records", []):
             records[int(record["index"])] = record
     return records
+
+
+def load_decided_apply_indexes(paths: list[Path]) -> set[int]:
+    indexes: set[int] = set()
+    for path in paths:
+        for lineno, raw_line in enumerate(path.read_text().splitlines(), start=1):
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            token = line.split(None, 1)[0]
+            try:
+                idx = int(token)
+            except ValueError as exc:
+                raise SystemExit(f"{path}:{lineno}: expected source index, got {token!r}") from exc
+            if idx <= 0:
+                raise SystemExit(f"{path}:{lineno}: source index must be positive, got {idx}")
+            indexes.add(idx)
+    return indexes
 
 
 def gate_stop_hint(
@@ -692,7 +724,7 @@ def main() -> int:
         append(args.report_file, "- Boundary marker not found; missing marker allowed for this diagnostic run.")
 
     gate_records = load_gate_records(args.feature_gate)
-    decided_apply = set(args.gate_decided_apply)
+    decided_apply = set(args.gate_decided_apply) | load_decided_apply_indexes(args.gate_decided_apply_file)
     if args.feature_gate:
         names = ", ".join(f"`{path}`" for path in args.feature_gate)
         append(args.report_file, f"- Feature-gate evidence loaded from {names}; {len(gate_records)} records.")

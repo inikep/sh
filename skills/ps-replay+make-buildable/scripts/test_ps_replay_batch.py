@@ -308,6 +308,32 @@ class FeatureGateTests(unittest.TestCase):
         record = {"decision_hint": "needs-review"}
         self.assertIsNone(ps_replay_batch.gate_stop_hint(record, 5, 100, {5}))
 
+    def test_load_decided_apply_indexes_accepts_notes_and_comments(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decided.txt"
+            path.write_text(
+                "\n"
+                "# reviewed MyRocks block\n"
+                "58 reference-present after targeted grep\n"
+                "59\tapplied-equivalent naming drift\n"
+            )
+
+            indexes = ps_replay_batch.load_decided_apply_indexes([path])
+
+        self.assertEqual(indexes, {58, 59})
+
+    def test_load_decided_apply_indexes_rejects_bad_index(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decided.txt"
+            path.write_text("not-an-index reviewed\n")
+
+            with self.assertRaises(SystemExit):
+                ps_replay_batch.load_decided_apply_indexes([path])
+
     def test_load_gate_records_merges_files_by_index(self):
         import json
         import tempfile
@@ -330,6 +356,7 @@ class FeatureGateTests(unittest.TestCase):
 
         self.assertEqual(args.feature_gate, [])
         self.assertEqual(args.gate_decided_apply, [])
+        self.assertEqual(args.gate_decided_apply_file, [])
         self.assertEqual(args.gate_auto_apply_path_glob, [])
         self.assertEqual(args.gate_auto_apply_unmatched_identifier, [])
         self.assertEqual(args.auto_drop_reference_absent_conflict_glob, [])

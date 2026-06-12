@@ -49,6 +49,10 @@ if [ -n "${PS_REPLAY_GATE_DECIDED_APPLY:-}" ]; then
     done
 fi
 
+if [ -n "${PS_REPLAY_GATE_DECIDED_APPLY_FILE:-}" ]; then
+    GATE_ARGS+=(--gate-decided-apply-file "$PS_REPLAY_GATE_DECIDED_APPLY_FILE")
+fi
+
 if [ -n "${PS_REPLAY_GATE_AUTO_APPLY_PATH_GLOBS:-}" ]; then
     # Whitespace-separated path globs. Quote the env assignment in the caller
     # so shell expansion does not happen before this wrapper receives them.

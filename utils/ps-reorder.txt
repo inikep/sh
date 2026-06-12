@@ -16,8 +16,9 @@ Source group:
 
 Plan item:
   A pending unit to emit. It records source SHA, source position, subject,
-  author metadata, touched paths, consumed paths, remaining paths, source group,
-  target group, and whether it is synthetic, split, promoted, skipped, or kept.
+  body, author metadata, touched paths, source group, target group, and the
+  placement kind such as split, source-group, remaining, result-only, promoted,
+  or failed-promotion-to-g10.
 
 g11 queue:
   The mutable ordered list of remaining commits. Pass 2 removes items from this
@@ -34,14 +35,14 @@ code_changes:
 
 mtr_only_changes:
   Items whose changed paths all satisfy the MTR path rule: each path is under
-  mysql-test/ or ends with .test, .results, or .opt.
+  mysql-test/ or ends with .test, .result, .results, or .opt.
 
 g1_paths:
   Paths extracted first and squashed into group 1 categories:
   doc/, man/, internal/, plugin/tokudb-backup-plugin/, storage/tokudb/,
   scripts/ps_tokudb_admin.sh, scripts/fill_help_tables.sql, MYSQL_VERSION, VERSION,
   storage/innobase/include/univ.i, mysql-test/suite/tokudb*, and MTR test
-  files under mysql-test/ whose filename contains "toku".
+  files under mysql-test/ whose filename contains "toku", and .travis.yml.
   scripts/fill_help_tables.sql is squashed with scripts/ps_tokudb_admin.sh in
   the same group 1 commit.
 
@@ -61,8 +62,9 @@ transient_removed_files:
   the path on OUTPUT.
 
 ci_config_paths:
-  Paths split into group 3: .travis.yml, .circleci/, azure-pipelines.yml,
-  .cirrus.yml, .clang-tidy, and .github/workflows/.
+  Paths split into group 3: .circleci/, azure-pipelines.yml, .cirrus.yml,
+  .clang-tidy, and .github/workflows/. .travis.yml is extracted earlier as a
+  group 1 squash category.
 
 Recognized Markers
 ------------------
@@ -86,12 +88,12 @@ The expected current marker subjects are:
   ==================== MARKER: GROUP 1 — Squashes ====================
   ==================== MARKER: GROUP 2 — build-ps ====================
   ==================== MARKER: GROUP 3 — CI configs ====================
-  ==================== MARKER: GROUP 4 — MyRocks: storage and MTR ====================
+  ==================== MARKER: GROUP 4 — MyRocks: storage and MTR ==========
   ==================== MARKER: GROUP 5 — MTR tests ====================
-  ==================== MARKER: GROUP 6 — Non-code changes ====================
-  ==================== MARKER: GROUP 7 — TokuDB+MyRocks kernel changes ====================
-  ==================== MARKER: GROUP 8 — Build/Compilation ====================
-  ==================== MARKER: GROUP 9 — Upstream bug fixes ====================
+  ==================== MARKER: GROUP 6 — Non-code changes ==================
+  ==================== MARKER: GROUP 7 — TokuDB+MyRocks kernel changes =====
+  ==================== MARKER: GROUP 8 — Build/Compilation =================
+  ==================== MARKER: GROUP 9 — Upstream bug fixes ================
   ==================== MARKER: GROUP 10 — Code changes ====================
   ==================== MARKER: GROUP 11 — New commits ====================
 
@@ -135,7 +137,13 @@ Initialize buckets g1 through g11. Then process source commits in source order:
    - Preserve first-seen source position for category ordering.
    - Remove those paths from the commit remainder.
 
-2. Split dedicated early paths from the remainder.
+2. For .result-only remainders, squash repeat touches into the previous
+   in-range item for that .result file. If no previous item exists and the
+   .result file exists in BASE, keep it as a separate g11 item with a
+   [result-only] subject prefix. If all .result paths are consumed this way,
+   record the source commit as elided.
+
+3. Split dedicated early paths from the remainder.
    - build-ps/ and scripts/systemd/ paths go to g2.
    - ci_config_paths go to g3.
    - storage/rocksdb, mysql-test/suite/rocksdb*,
@@ -144,12 +152,12 @@ Initialize buckets g1 through g11. Then process source commits in source order:
    - Split items keep the original source subject and metadata unless the tool
      has an explicit synthetic-subject rule.
 
-3. Route the post-split remainder.
+4. Route the post-split remainder.
    - If empty, record the source commit as fully consumed.
    - If the input source group is g5-g10, append the remainder to that group.
    - Otherwise append it to g11.
 
-4. Preserve source order within every bucket, except g1 squash categories which
+5. Preserve source order within every bucket, except g1 squash categories which
    are ordered by first contribution.
 
 Output pass 1:
@@ -169,11 +177,17 @@ Output pass 1:
 Pass 2: Existing Group Replay plus g11 Promotion
 ------------------------------------------------
 
-For each target group from g5 through g10, run:
+For each target group from g5 through g9, run:
 
   emit_marker(target_group)
   emit_existing_items(target_group)
   promote_from_g11(target_group)
+
+For g10, run:
+
+  emit_marker(g10)
+  drain_g10_candidates()
+  emit_existing_items(g10)
 
 Promotion candidates are evaluated in current g11 source order. Use a real
 cherry-pick against the current output HEAD:
@@ -212,8 +226,8 @@ Candidate handling:
     Abort the cherry-pick and reset to the pre-probe HEAD. Add a [gX] prefix to
     the subject, where X is the failed target group number, and move the item
     to g10 Code changes instead of leaving it in g11. Failed g5-g9 promotions
-    are queued for g10 before the g10 marker; failed g10 promotions are emitted
-    immediately in g10. Do not try to resolve the conflict during promotion.
+    are queued for g10 before the g10 marker. Do not try to resolve the
+    conflict during promotion.
 
   unexpected git failure:
     Abort, reset to the pre-probe HEAD, and fail the run with the command output.
@@ -235,20 +249,22 @@ g8 Build/Compilation:
   Promote g11 build_only_changes.
 
 g9 Upstream bug fixes:
-  Promote ordinary code_changes from g11 that are not better classified into
-  g5-g8 and that cleanly cherry-pick after those groups.
+  Promote g11 items whose subject starts with [upstream] and that cleanly
+  cherry-pick after earlier groups.
 
 g10 Code changes:
-  Promote ordinary code_changes from g11 that are not better classified into
-  g5-g9 and that cleanly cherry-pick after those groups.
-  Before emitting g10, drain all remaining g10 candidates into the g10 bucket,
-  then emit the whole g10 bucket in source order. This keeps normal g10 commits
-  and failed [gX] promotions ordered together so later full-file-state emission
-  does not invert their source dependencies.
+  Place remaining ordinary code_changes from g11 that are not better classified
+  into g5-g9 into the g10 bucket without another cherry-pick probe. Before
+  emitting g10, drain all remaining g10 candidates into the g10 bucket, then
+  emit the whole g10 bucket in source order. This keeps normal g10 commits and
+  failed [gX] promotions ordered together so later full-file-state emission does
+  not invert their source dependencies.
 
 An implementation may apply stricter predicates or overlap guards, but not
-looser ones: a promoted commit must always satisfy the target predicate and
-must always have a clean cherry-pick probe.
+looser ones: a promoted g5-g9 commit must always satisfy the target predicate
+and must always have a clean cherry-pick probe. A g10 code-placement commit
+must satisfy the g10 predicate and is emitted in source order with the rest of
+the g10 bucket.
 
 Final g11 Emission
 ------------------
@@ -264,8 +280,9 @@ Safety Checks
 -------------
 
 Before starting:
-  - require a clean worktree;
-  - verify BASE, INPUT, and OUTPUT refs;
+  - require a clean worktree unless --allow-dirty is set;
+  - resolve BASE and INPUT refs;
+  - check OUTPUT branch overwrite policy;
   - refuse to overwrite OUTPUT unless forced.
 
 During promotion:
@@ -285,6 +302,7 @@ Core Invariant
 --------------
 
 Pass 1 may split or squash only into g1-g4. Pass 2 may move a g11 commit into
-g5-g10 only by proving that it cleanly cherry-picks at that exact output point.
-Everything else stays in g11. This keeps the algorithm deterministic while
-letting clean late commits move earlier when Git proves the move is safe.
+g5-g9 only by proving that it cleanly cherry-picks at that exact output point,
+then drains remaining ordinary code changes into g10 in source order. Everything
+else stays in g11. This keeps the algorithm deterministic while letting clean
+late commits move earlier when Git proves the move is safe.

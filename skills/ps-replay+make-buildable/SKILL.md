@@ -49,7 +49,7 @@ The source list may include task-specified filters, for example `--first-parent`
 - **HR-9:** Do not strip source/plugin/build-system hunks to avoid a required build.
 - **HR-10:** Build-driven fixes update the side that lags `$REFERENCE_BRANCH`; do not revert a region that already matches reference.
 - **HR-11:** If a rule violation happens, the run is invalid from that point. Stop and report it; do not repair it by later null diff or final build.
-- **HR-12:** Feature gating is upfront and range-only: run `ps_replay_range_feature_gate.py` once before post-Group-8 replay, then consult that result. Do not run per-commit feature-gate helpers.
+- **HR-12:** Feature gating is upfront and range-only: run `ps_replay_range_feature_gate.py` exactly twice — once for the pre-Group-9 range before replay starts, once for the post-Group-8 range before post-Group-8 replay — then consult those results. Do not run per-commit feature-gate helpers.
 
 ## Prepare
 
@@ -84,8 +84,22 @@ The source list may include task-specified filters, for example `--first-parent`
    Record their 1-based source indexes. Stop if either is absent. Set `GROUP9_INDEX` to the Group 9 marker's index. The build checkpoint is at the end of Group 8: Group 8's own commits are no-build, and per-commit builds start only after the last Group 8 commit, immediately before the Group 9 marker is preserved. Throughout this skill, "post-Group-8" means from the Group 9 marker onward.
 
 5. Create `$OUTPUT_BRANCH` from `$DESTINATION_BASE_BRANCH`.
-6. Start `$RUN_DIR/ledger.tsv`. Record only non-routine events: conflict resolutions, empty skips, deferred hunks, forward-folds, squashes, build fixes, waivers, reconciliation commits, final parity, and final build. Routine clean cherry-picks need not be ledgered.
-7. Pre-checkpoint (every commit before the Group 9 marker, including all Group 8 commits): skip feature-evidence gating entirely. Cherry-pick and resolve conflicts only.
+6. Start `$RUN_DIR/ledger.tsv`. Record only non-routine events: conflict resolutions, empty skips, feature-absent skips and hunk drops, deferred hunks, forward-folds, squashes, build fixes, waivers, reconciliation commits, final parity, and final build. Routine clean cherry-picks need not be ledgered.
+7. Before starting replay, run the feature gate once for the pre-checkpoint range (every commit before the Group 9 marker, including all Group 8 commits):
+
+   ```sh
+   scripts/ps_replay_range_feature_gate.py \
+     --worktree . \
+     --source-list $RUN_DIR/source-list.txt \
+     --start 1 \
+     --end $((GROUP9_INDEX - 1)) \
+     --first-parent \
+     --reference-base $DESTINATION_BASE_BRANCH \
+     --reference $REFERENCE_BRANCH \
+     --output $RUN_DIR/feature-evidence/pre-group9-gate.json
+   ```
+
+   Record the command and summary counts. Pre-checkpoint commits owe no builds, but they are gated: consult this file before each pre-checkpoint non-marker cherry-pick to decide plain apply, whole-commit `reference-feature-absent-skip`, or partial `reference-feature-absent-hunk-drop`.
 8. Before post-Group-8 replay, run the feature gate exactly once: build one range-level feature evidence file for the selected source commits against the target reference range:
 
    ```sh
@@ -99,7 +113,7 @@ The source list may include task-specified filters, for example `--first-parent`
      --output $RUN_DIR/feature-evidence/range-gate.json
    ```
 
-   This compares `$BASE_BRANCH..$TIP_BRANCH` after task filters (for example `^mysql-5.7.44`) to `$DESTINATION_BASE_BRANCH..$REFERENCE_BRANCH`, not every commit to the whole reference tree. Record the command and summary counts. This range gate is the only feature-gate run for the replay.
+   This compares `$BASE_BRANCH..$TIP_BRANCH` after task filters (for example `^mysql-5.7.44`) to `$DESTINATION_BASE_BRANCH..$REFERENCE_BRANCH`, not every commit to the whole reference tree. Record the command and summary counts. These two range gates (pre-Group-9 and post-Group-8) are the only feature-gate runs for the replay.
 
 ## Build Setup
 
@@ -149,12 +163,17 @@ After Group 8 (from the Group 9 marker onward):
 Before the Group 8 end checkpoint (every commit before the Group 9 marker, including all Group 8 commits), no build is owed for any commit. Use the minimum loop:
 
 1. If marker: `git commit --allow-empty -m "$subject"`. Continue.
-2. Otherwise `git cherry-pick <sha>`.
-3. If the cherry-pick is empty: `git cherry-pick --skip`. Ledger one `empty-skip-equivalent` row. Continue.
-4. If there are conflicts: resolve hunk by hunk using the rules below, `git add`, `git cherry-pick --continue --no-edit`. Ledger one row per resolved file (or one summary row per commit). Continue.
-5. If the cherry-pick succeeded cleanly with no conflicts: no ledger row needed.
+2. Consult `$RUN_DIR/feature-evidence/pre-group9-gate.json` for the commit:
+   - `reference-present`, `message-only-review`, or `no-diff-identifiers` entries proceed to plain cherry-pick.
+   - For `needs-review` or `partial-match-review` entries, inspect the source patch, `diff_identifiers`, `unmatched_diff_identifiers`, path matches, and nearby `$REFERENCE_BRANCH` code with targeted `git grep`/`git ls-tree`/`git cat-file`, the same way as in the post-Group-8 rules. The same absence criteria apply: absence means the reference lacks the feature behavior represented by the actual patch hunks, not a moved file, changed API shape, or message-only identifiers.
+   - If the whole feature represented by the patch hunks is absent from `$REFERENCE_BRANCH`: do not cherry-pick the commit. Ledger `reference-feature-absent-skip` with the identifiers searched, reference evidence, source index/SHA/subject, and the no-output exception.
+   - If only part of the commit is reference-absent: cherry-pick, then rewrite the commit before finalizing it — drop only the reference-absent hunks/paths (unstage and revert whole-file drops; edit absent hunks out of mixed files) and keep the rest under the original commit message. Ledger one `reference-feature-absent-hunk-drop` row per dropped path/hunk group with the evidence. If dropping the absent parts leaves nothing, treat the commit as a whole-commit `reference-feature-absent-skip` instead.
+3. Otherwise `git cherry-pick <sha>`.
+4. If the cherry-pick is empty: `git cherry-pick --skip`. Ledger one `empty-skip-equivalent` row. Continue.
+5. If there are conflicts: resolve hunk by hunk using the rules below, `git add`, `git cherry-pick --continue --no-edit`. Ledger one row per resolved file (or one summary row per commit). Continue.
+6. If the cherry-pick succeeded cleanly with no conflicts: no ledger row needed.
 
-Do not run any feature gate per commit, and do not write a ledger row for every clean apply.
+Do not run any per-commit feature-gate helper; the upfront pre-Group-9 range gate plus targeted manual inspection is the only gating input. Do not write a ledger row for every clean apply.
 
 ### Post-Group-8 (full path) — from the Group 9 marker onward
 
@@ -236,7 +255,7 @@ The helper is binary-safe and decodes non-UTF-8 diff bytes with replacement char
 
 ## Allowed Content Movement
 
-Use only when needed for conflict or buildability, and ledger every row:
+Use only when needed for conflict, buildability, or reference-feature absence, and ledger every row:
 
 - `deferred-hunk`: remove a hunk now and apply it at a named later source commit.
 - `defer-commit`: postpone the entire current commit to one specific later source-list position.
@@ -245,7 +264,8 @@ Use only when needed for conflict or buildability, and ledger every row:
 - `squash-cluster`: only with current-conversation engineer approval naming the members.
 - `applied-equivalent`: old source hunk is already present, moved/split/renamed, obsolete, or intentionally absent in the 5.7 reference.
 - `message-only-absent-apply`: apply a commit whose actual diff/new-path hunks are reference-present even though absent identifiers appear only in the subject/body.
-- `reference-feature-absent-skip`: skip a non-marker before cherry-pick when the pre-cherry-pick gate proves the feature behavior represented by the actual diff/new-path hunks is absent from the reference.
+- `reference-feature-absent-skip`: skip a non-marker before cherry-pick when the applicable range gate (pre-Group-9 or post-Group-8) plus targeted inspection proves the feature behavior represented by the actual diff/new-path hunks is absent from the reference.
+- `reference-feature-absent-hunk-drop`: while applying a commit, drop only the hunks/paths whose feature is reference-absent and commit the rest under the original message. Requires range-gate plus targeted inspection evidence per dropped hunk group. Never use it to avoid a conflict, a required build, or an HP-8 explanation.
 
 Never use these mechanisms for convenience, batching, or hiding missing builds.
 
@@ -321,7 +341,7 @@ Direct Git and build commands are the default. Helper scripts are optional and m
 Allowed helpers:
 
 - `ps_replay_scan_range.py`: preflight scan of source/reference ranges for markers, squash/snap-like commits, and reference-only commits. Use during the reference-shape audit.
-- `ps_replay_range_feature_gate.py`: range-level feature audit. Use once before post-Group-8 replay to compare selected source commits against `$DESTINATION_BASE_BRANCH..$REFERENCE_BRANCH`; consult `decision_hint` before each post-Group-8 non-marker commit. This is the only allowed feature-gate helper in this skill.
+- `ps_replay_range_feature_gate.py`: range-level feature audit comparing selected source commits against `$DESTINATION_BASE_BRANCH..$REFERENCE_BRANCH`. Use exactly twice: once before replay starts for the pre-Group-9 range (`--start 1 --end $((GROUP9_INDEX - 1))`) and once before post-Group-8 replay for the rest; consult `decision_hint` before each non-marker commit in the corresponding range. This is the only allowed feature-gate helper in this skill.
 - `ps_replay_batch.py`: bounded replay driver. It must use plain `git cherry-pick <sha>` for every non-marker commit, preserve marker commits with `git commit --allow-empty`, stop on conflicts/build failures/missing build records, and HP-8 check post-Group-8 source/plugin commits. For clean plain cherry-picks it checks the resulting output commit's changed paths; for conflicts, do the staged-path HP-8 check manually before `git cherry-pick --continue`. Use `--classify-only` before trusting bucket decisions.
 - `ps_replay_auto_loop.sh`: compatibility wrapper around `ps_replay_batch.py`; it must inherit the same stop/build/cross-check behavior. Set `PS_REPLAY_CMAKE_FLAGS='-DCMAKE_CXX_FLAGS=-fpermissive'` or pass `--cmake-flag` to the Python helper for task-specific build flags.
 - `ps_replay_build.py`: standard CMake/build runner that writes logs.
@@ -373,10 +393,10 @@ Write `$REPORT_FILE` incrementally. Required sections:
 - Inputs, exact source-list command, build flags, run directories.
 - Pre-flight/readback summary and `violations encountered: none` or violations.
 - Reference-shape audit and final-reconciliation forecast.
-- Range feature-gate command, summary counts, and every `needs-review` entry that led to targeted inspection, apply-equivalent, or `reference-feature-absent-skip`.
+- Both range feature-gate commands (pre-Group-9 and post-Group-8), summary counts, and every `needs-review` entry that led to targeted inspection, apply-equivalent, `reference-feature-absent-skip`, or `reference-feature-absent-hunk-drop`.
 - Group 8 end boundary (Group 9 marker index), checkpoint build, `[compilation]` fixes, and marker preservation.
 - Per source commit: index, source SHA, output SHA or skip, bucket, path list, conflicts, HP-8 staged-path result, build result or no-build reason.
-- Ledger summary: deferred hunks, defer-commits, forward-folds, squashes, squash-clusters, applied-equivalents, waivers.
+- Ledger summary: feature-absent skips and hunk drops, deferred hunks, defer-commits, forward-folds, squashes, squash-clusters, applied-equivalents, waivers.
 - Build-driven fixes (BDF): failed log, error, fix paths, PASS log.
 - Final parity reconciliation commits.
 - Final null-diff SHA and final build log.

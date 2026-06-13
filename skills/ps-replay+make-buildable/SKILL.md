@@ -51,6 +51,19 @@ The source list may include task-specified filters, for example `--first-parent`
 - **HR-11:** If a rule violation happens, the run is invalid from that point. Stop and report it; do not repair it by later null diff or final build.
 - **HR-12:** Feature gating is upfront and range-only: run `ps_replay_range_feature_gate.py` exactly twice — once for the pre-Group-9 range before replay starts, once for the post-Group-8 range before post-Group-8 replay — then consult those results. Do not run per-commit feature-gate helpers.
 
+## Runtime And Token Efficiency
+
+Default to the low-token replay mode unless the user asks for detailed narration:
+
+- Before restarting the driver after a feature-gate stop, scan the next contiguous gate-stopped block from the existing range-gate JSON and review the whole block in one pass. Write the apply decisions to one `--gate-decided-apply-file` and handle true skips or hunk drops manually before advancing past their source indexes.
+- Keep evidence in durable artifacts: `$RUN_DIR/ledger.tsv`, `$REPORT_FILE`, gate decision files, and build logs. Chat/status output should normally be limited to source index, stop reason, decision type, output SHA, and build result.
+- Do not paste large diffs, full gate records, or build logs into chat. Inspect them locally, record the command/evidence summary in the report or ledger, and quote only the minimal line needed to identify a blocker.
+- Maintain a current-run path/API mapping note in the report when the same 8.0 move recurs across conflicts. Reuse that note for later hunk decisions, but still ledger any source/plugin/build-system source path that is absent from the staged output.
+- Prefer an allowed `rewrite-replacement` as soon as exactly one matching 8.0 rewrite commit is proven, especially when the 5.7 patch conflicts only because the destination API shape changed.
+- After conflict helpers or broad rewrite replacements, run the post-conflict audit before the first build. This catches duplicate old structs/functions, stale labels, and obsolete 5.7 APIs cheaply.
+- For InnoDB/storage-heavy source commits, run changed-object compilation before the full build when an existing build tree is available. Full builds still remain the only PASS record.
+- Do not weaken HR-1 through HR-12 for speed. Faster replay comes from batching review, compact reporting, cached current-run evidence, and fewer driver restarts, not from strategy shortcuts or whole-file reference replacement.
+
 ## Prepare
 
 1. Confirm inputs, clean worktree, run directories, report path, and build command.
@@ -137,6 +150,19 @@ make -j$(( $(nproc) * 3 / 4 ))
 
 Pass task-requested build flags through `$EXTRA_CMAKE_FLAGS` or equivalent CMake variables, and record them. Store each build log under `$RUN_DIR/logs/` with source index, source SHA, output SHA, and attempt number.
 
+For build-required commits with changed `.c/.cc/.cpp/.cxx` files and an existing build tree, run a changed-object preflight before the full build:
+
+```sh
+scripts/ps_replay_changed_object_build.py \
+  --worktree . \
+  --build-dir $BUILD_DIR \
+  --log $RUN_DIR/logs/objects-<idx>-<sha>-attempt<N>.log \
+  --base HEAD^ \
+  --allow-missing
+```
+
+Use this to find compile errors faster; it is not a substitute for the required full build PASS.
+
 ## Bucket Rules
 
 Before the checkpoint (every commit up to the end of Group 8, i.e., before the Group 9 marker):
@@ -175,6 +201,8 @@ Before the Group 8 end checkpoint (every commit before the Group 9 marker, inclu
 
 Do not run any per-commit feature-gate helper; the upfront pre-Group-9 range gate plus targeted manual inspection is the only gating input. Do not write a ledger row for every clean apply.
 
+When the driver stops on `needs-review` or `partial-match-review`, do not immediately restart for a single index unless the next source commit is already known to be unsafe. Inspect the next contiguous pre-checkpoint review block from the same gate JSON, create one reviewed decision file for all indexes proven to apply, and restart once with `--gate-decided-apply-file <file>`. This is the preferred fast path for pre-checkpoint feature-gate churn.
+
 #### Optional Fast Path For Repeated Reference-Absent Packaging
 
 Use only after targeted inspection in the current run has established a recurring path-shape decision, for example old `build-ps/ubuntu/**`, `build-ps/debian/*-5.7*`, or `build-ps/debian/*.notokudb` paths that are absent from the reference while equivalent packaging lives in reference-present paths.
@@ -188,9 +216,10 @@ Use only after targeted inspection in the current run has established a recurrin
 
 #### Batch-Reviewed Gate Decisions
 
-For repeated `partial-match-review` stops that are not eligible for automatic
-path-shape acceleration, inspect a contiguous block in one pass and record the
-source indexes that are decided to apply in a reviewed decision file:
+For repeated `needs-review` or `partial-match-review` stops that are not
+eligible for automatic path-shape acceleration, inspect a contiguous block in
+one pass and record the source indexes that are decided to apply in a reviewed
+decision file:
 
 ```text
 # one reviewed decision per line; notes after the index are allowed
@@ -203,6 +232,10 @@ passing many `--gate-decided-apply <idx>` flags. This is not an auto-apply
 mechanism: every listed index must already have current-run targeted
 inspection evidence, and skips or hunk drops must still be handled manually
 and ledgered before advancing past that source index.
+
+Keep the review file compact. Put detailed commands and evidence in the report
+only when the decision is non-obvious or affects a later conflict. For routine
+apply-equivalent decisions, one line naming the feature/API mapping is enough.
 
 ### Post-Group-8 (full path) — from the Group 9 marker onward
 
@@ -231,6 +264,13 @@ For each source commit from the Group 9 marker onward:
    ```
 
    Do not hand-create a replacement commit until this recovery helper has failed or proven inapplicable. The helper restores `CHERRY_PICK_HEAD` and `MERGE_MSG` only; it does not resolve files.
+   After any hunk helper, broad rewrite-replacement conflict, or large storage/SQL conflict, run:
+
+   ```sh
+   scripts/ps_replay_post_conflict_audit.py --worktree . --cached
+   ```
+
+   Treat findings as review blockers, not automatic failures: inspect and fix duplicate old structs/functions, stale labels such as `exit_loop:` outside their function, obsolete 5.7 APIs, or large added old-code blocks before continuing or building. Record material findings/fixes in the ledger/report.
 6. Before `git cherry-pick --continue` for every post-Group-8 source/plugin/build-system commit, compare source paths to staged paths:
 
    ```sh
@@ -262,6 +302,8 @@ Commit-shape rule:
 For each failure:
 
 - Extract the first actionable compiler/linker/CMake error.
+- If the first errors are parse cascades or many unrelated missing symbols after a conflict helper/rewrite, rerun `ps_replay_post_conflict_audit.py` and inspect the reported regions before another full build.
+- If only changed C/C++ sources are involved and the build tree exists, run `ps_replay_changed_object_build.py` after the fix and before spending the next full build attempt. Ledger object preflight failures only when they change the fix decision.
 - Compare both sides of mismatched APIs against `$REFERENCE_BRANCH`.
 - Edit only the lagging side; do not undo reference-matching code.
 - Prefer targeted forward-fold from a named later source commit when known; otherwise use the smallest reference-shaped fix needed for the current commit.
@@ -309,6 +351,7 @@ Every bound must hold:
 - Find exactly one rewrite commit that represents the current source commit's feature, using commit message tokens, bug/PS IDs, diff identifiers, and changed paths. A merge commit alone is not enough; identify the concrete non-merge commit when the rewrite arrived through a PR merge.
 - The rewrite must implement the same feature behavior as the 5.7 source commit. It may adapt storage, parser, DD, tests, or API wiring to 8.0, but it must not bundle unrelated features that would have required separate source-list positions.
 - Prefer local evidence first: `$REFERENCE_BRANCH`, an available `percona/8.0` or `8.0` branch, and targeted `git log -S/-G/--grep` searches. Do not treat a later maintenance fix for the feature as the rewrite unless it is the only commit needed for the current source feature.
+- If the only candidate rewrite is outside `$REFERENCE_BRANCH` ancestry or conflicts in many source files, classify it as high-risk: inspect the staged diff with `ps_replay_post_conflict_audit.py --cached` before committing, and reject the rewrite if it imported broad unrelated later-state APIs or old whole-function/struct chunks.
 - If the source cherry-pick is already in progress, abort only that current cherry-pick and preserve all prior output commits. Then run plain `git cherry-pick <rewrite-sha>`.
 - Resolve rewrite conflicts hunk by hunk under the normal conflict rules. The rewrite does not authorize whole-file reference replacement or a final snap.
 - The output commit message may be the rewrite commit's original message. Ledger the current source index/SHA/subject, rewrite SHA/subject, evidence that it is the same feature, output SHA, and any conflict/build resolution.
@@ -392,9 +435,11 @@ Allowed helpers:
 - `ps_replay_batch.py`: bounded replay driver. It must use plain `git cherry-pick <sha>` for every non-marker commit, preserve marker commits with `git commit --allow-empty`, stop on conflicts/build failures/missing build records, and HP-8 check post-Group-8 source/plugin commits. For clean plain cherry-picks it checks the resulting output commit's changed paths; for conflicts, do the staged-path HP-8 check manually before `git cherry-pick --continue` unless the optional fast path above resolved only configured reference-absent conflicts. Use `--classify-only` before trusting bucket decisions. Pass the range-gate evidence files with `--feature-gate` (repeatable: pre-Group-9 and post-Group-8 files); the driver then stops before cherry-picking any commit whose decision hint requires manual review (pre-Group-9: `needs-review` and `partial-match-review`; post-Group-8: `needs-review`) unless explicitly accelerated with `--gate-auto-apply-path-glob` and `--gate-auto-apply-unmatched-identifier`, or already reviewed with `--gate-decided-apply <idx>` / `--gate-decided-apply-file <file>`. After inspecting a stopped commit, restart with a decided-apply option to apply it, or handle the skip/hunk-drop manually and restart after that index. For repeated audited absent packaging paths, pass `--auto-drop-reference-absent-conflict-glob <glob>` and `--ledger-file $RUN_DIR/ledger.tsv`; the driver may auto-`git rm` only conflicted paths that match the globs and are absent from `$REFERENCE_BRANCH`.
 - `ps_replay_auto_loop.sh`: compatibility wrapper around `ps_replay_batch.py`; it must inherit the same stop/build/cross-check behavior. Set `PS_REPLAY_CMAKE_FLAGS='-DCMAKE_CXX_FLAGS=-fpermissive'` or pass `--cmake-flag` to the Python helper for task-specific build flags. Set `PS_REPLAY_FEATURE_GATES` (whitespace-separated gate JSON paths), `PS_REPLAY_GATE_DECIDED_APPLY` (whitespace-separated indexes), and/or `PS_REPLAY_GATE_DECIDED_APPLY_FILE` to forward the feature-gate options. Optional acceleration env vars: `PS_REPLAY_GATE_AUTO_APPLY_PATH_GLOBS`, `PS_REPLAY_GATE_AUTO_APPLY_UNMATCHED_IDENTIFIERS`, `PS_REPLAY_AUTO_DROP_CONFLICT_GLOBS`, and `PS_REPLAY_LEDGER_FILE`.
 - `ps_replay_build.py`: standard CMake/build runner that writes logs.
+- `ps_replay_changed_object_build.py`: cheap preflight that finds CMake object targets for changed C/C++ files and runs `make` on those objects. Use before full builds to shorten compile-error loops; full build PASS is still required.
 - `ps_replay_errors.py`: extracts likely root-cause diagnostics from large build logs.
 - `ps_replay_conflict_triage.py`: prints conflict status and may stage only files whose conflict regions already match safely; remaining files require manual hunk review.
 - `ps_replay_diff_check.py`: runs `git diff --check` or `git diff --cached --check`, compares warning lines to `$REFERENCE_BRANCH`, and exits success when every warning is reference-matching whitespace that should be preserved.
+- `ps_replay_post_conflict_audit.py`: scans staged or working-tree source diffs for common conflict artifacts: duplicate old structs/fields, obsolete 5.7 APIs, stale labels, and large added blocks. Use after hunk helpers/rewrite conflicts and before build attempts.
 - `ps_replay_resolve_conflicts.py`: inspection-only conflict display with nearby reference context.
 - `ps_replay_resolve_hunks.py`: best-effort conflict-block resolver; it may replace only conflict blocks, never whole files. Review its output before continuing.
 - `ps_replay_residual_audit.py`: classifies final residual diff hunks before reconciliation.
@@ -447,6 +492,11 @@ Write `$REPORT_FILE` incrementally. Required sections:
 - Build-driven fixes (BDF): failed log, error, fix paths, PASS log.
 - Final parity reconciliation commits.
 - Final null-diff SHA and final build log.
+
+For long runs, the report is the primary detail sink. User-facing progress can
+stay compact: `idx`, source SHA, decision (`applied`, `skip`, `hunk-drop`,
+`rewrite-replacement`, `conflict`, `build-pass`, `build-fail`), output SHA or
+no-output exception, and log path.
 
 ## Stop Conditions
 

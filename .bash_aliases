@@ -221,3 +221,10 @@ function check_errors() {
     # return to original directory
     cd "$orig_dir" || { echo "Cannot return to $orig_dir"; return 1; }
 }
+
+alias jcli='sudo docker run --rm -t \
+  -e JENKINS_INSTANCE=ps80 \
+  -e JENKINS_URL=https://ps80.cd.percona.com \
+  -e JENKINS_USER=$JENKINS_USER \
+  -e JENKINS_TOKEN=$JENKINS_TOKEN \
+  -v "$PWD:/out" public.ecr.aws/e7j3v3n0/jenkins-cli'

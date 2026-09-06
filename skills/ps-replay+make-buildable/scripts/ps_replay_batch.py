@@ -42,13 +42,15 @@ DEFAULT_CMAKE_FLAGS = [
     "-DCMAKE_BUILD_TYPE=Debug",
     "-DMYSQL_MAINTAINER_MODE=OFF",
     "-DDOWNLOAD_BOOST=1",
-    "-DWITH_BOOST=/tmp/boost",
+    "-DWITH_BOOST=/data/mysql-sever/_deps",
     "-DWITHOUT_TOKUDB=1",
     "-DWITH_ROCKSDB=OFF",
+    "-DWITH_PAM=ON",
     "-DENABLE_DOWNLOADS=1",
     "-DWITH_READLINE=system",
     "-DCMAKE_C_COMPILER_LAUNCHER=ccache",
     "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache",
+    "-DCMAKE_CXX_FLAGS=-fpermissive",
 ]
 GROUP8_MARKER_SUBJECT = "==================== MARKER: GROUP 9 — Upstream bug fixes ===================="
 MARKER_RE = re.compile(r"^\s*=+\sMARKER:")

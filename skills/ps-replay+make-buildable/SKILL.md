@@ -139,11 +139,13 @@ CC=gcc-9 CXX=g++-9 cmake .. \
   -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
   -DMYSQL_MAINTAINER_MODE=OFF \
   -DDOWNLOAD_BOOST=1 \
-  -DWITH_BOOST=/tmp/boost \
+  -DWITH_BOOST=/data/mysql-sever/_deps \
   -DWITHOUT_TOKUDB=1 \
   -DWITH_ROCKSDB=OFF \
+  -DWITH_PAM=ON \
   -DENABLE_DOWNLOADS=1 \
   -DWITH_READLINE=system \
+  -DCMAKE_CXX_FLAGS=-fpermissive \
   $EXTRA_CMAKE_FLAGS
 make -j$(( $(nproc) * 3 / 4 ))
 ```

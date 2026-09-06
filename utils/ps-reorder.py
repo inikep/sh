@@ -100,6 +100,13 @@ G1_SUBJECTS = {
 }
 
 
+# Emitted at the head of g1: paths the input branch deletes outright relative to
+# BASE that no g1-g4 section owns. Without it these deletions ride along in
+# whichever g5 commit happened to carry them, so every g1-g4 commit still holds
+# files the input branch does not have.
+HEAD_DELETION_SUBJECT = "Remove files deleted by input branch"
+
+
 class Style:
     def __init__(self):
         self.enabled = False
@@ -451,6 +458,69 @@ def split_paths(paths):
     return g1, g2, g3, g4, rest
 
 
+def plan_head_deletions(base_hash, input_hash, parsed):
+    """Paths present in BASE, absent from INPUT and owned by no g1-g4 section.
+
+    Returns (paths, info) where info is the commit identity to reuse. Prefer an
+    input commit that is itself a pure deletion of exactly these paths, so a
+    branch that already carries such a commit keeps its author and date.
+    """
+    r = run_git(["diff", "--name-only", "--no-renames", "--diff-filter=D",
+                 base_hash, input_hash], check=False)
+    paths = sorted(
+        line for line in r.stdout.splitlines()
+        if line and path_group(line) is None
+    )
+    if not paths:
+        return [], None
+
+    wanted = set(paths)
+    for src in parsed:
+        files = src["files"]
+        if files and set(files) <= wanted and commit_is_pure_deletion(src["hash"]):
+            return paths, src["info"]
+    return paths, parsed[0]["info"] if parsed else None
+
+
+def commit_is_pure_deletion(commit):
+    r = run_git(["show", "--no-renames", "--diff-filter=D", "--name-only",
+                 "--format=", commit], check=False)
+    deleted = {line for line in r.stdout.splitlines() if line}
+    all_files = set(get_commit_files(commit))
+    return bool(all_files) and deleted == all_files
+
+
+def emit_head_deletions(paths, info, report):
+    if not paths:
+        return
+    remove_paths(paths)
+    body = (
+        f"Deleted {len(paths)} path(s) that exist in the base tree but not in "
+        "the input branch and that no g1-g4 section owns.\n\n"
+        "Emitted at the head of group 1 so the rest of the history does not "
+        "carry files the input branch has removed."
+    )
+    if commit_with_info(info, HEAD_DELETION_SUBJECT, body):
+        new_hash = git_rev_parse("HEAD")
+        report["emitted"].append({
+            "hash": info["hash"],
+            "subject": HEAD_DELETION_SUBJECT,
+            "group": 1,
+            "label": "head-deletions",
+            "new_hash": new_hash,
+        })
+        log_emit(1, info["hash"], new_hash, HEAD_DELETION_SUBJECT)
+    else:
+        report["skipped"].append({
+            "hash": info["hash"],
+            "subject": HEAD_DELETION_SUBJECT,
+            "group": 1,
+            "label": "head-deletions",
+            "reason": "no staged changes",
+        })
+        log_skip(1, info["hash"], HEAD_DELETION_SUBJECT)
+
+
 def make_item(src, files, target_group, kind):
     info = src["info"]
     return {
@@ -521,8 +591,13 @@ def plan_kept_commit(plan, src, group):
     plan["kept_foreign_paths"][group] += foreign_path_count(stay, group)
 
 
-def plan_commits(parsed, removed_markers, keep_in_place=True):
+def plan_commits(parsed, removed_markers, base_hash, input_hash,
+                 keep_in_place=True):
+    head_deletion_paths, head_deletion_info = plan_head_deletions(
+        base_hash, input_hash, parsed)
     plan = {
+        "head_deletion_paths": head_deletion_paths,
+        "head_deletion_info": head_deletion_info,
         "g1_files": defaultdict(set),
         "g1_first_info": {},
         "g1_first_pos": {},
@@ -803,6 +878,8 @@ def build_output(args, input_hash, base_hash, plan, report):
 
     log_section("pass 1: emit g1-g4")
     emit_marker(1)
+    emit_head_deletions(plan["head_deletion_paths"], plan["head_deletion_info"],
+                        report)
     for cat in sorted(plan["g1_files"], key=lambda key: plan["g1_first_pos"][key]):
         emit_squash(input_hash, cat, plan["g1_files"][cat],
                     plan["g1_first_info"][cat], report)
@@ -957,7 +1034,7 @@ def main(argv=None):
             f"{STYLE.dim('earlier group are extracted')}"
         )
 
-    plan = plan_commits(parsed, removed_markers,
+    plan = plan_commits(parsed, removed_markers, base_hash, input_hash,
                         keep_in_place=not args.reclassify_groups)
     report = {
         "emitted": [],

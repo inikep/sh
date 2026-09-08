@@ -45,6 +45,20 @@ from pathlib import Path
 NULL_OID = "0" * 40
 PR_RE = re.compile(r"\bMerge pull request #(\d+)\b")
 
+# Repo-plumbing commits: they are the first in-range toucher of files whose
+# Percona content arrived later, so attributing a path to them buys a huge
+# whole-file insertion under a subject that explains nothing.
+DEFAULT_SKIP_DONORS = (
+    r"^initial import\b",
+    r"^initial revision\b",
+    r"^import mysql-[0-9]",
+    r"^remove \.bzrignore\b",
+    r"^move Percona-Server to be the top level directory",
+    r"^Merge from 5\.5 the move Percona-Server",
+    r"^merge libperconaserverclient replacing libmysqlclient",
+    r"^copy Docs/INFO_",
+)
+
 
 class SnapshotError(RuntimeError):
     pass
@@ -209,6 +223,26 @@ def commit_to_unit(parents_map, units):
     return owner
 
 
+def path_toucher_lists(repo, base, tip, wanted, merges=False):
+    """path -> [shas newest-first] for `wanted` paths only."""
+    proc = subprocess.Popen(
+        ["git", "-C", str(repo), "log", "--name-only",
+         *(["--diff-merges=first-parent"] if merges else ["--no-merges"]),
+         "--format=@@%H", f"{base}..{tip}"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    lists, cur = {}, None
+    for line in proc.stdout:
+        line = line.rstrip("\n")
+        if line.startswith("@@"):
+            cur = line[2:]
+        elif line and line in wanted:
+            lists.setdefault(line, []).append(cur)
+    proc.stdout.close()
+    if proc.wait() != 0:
+        raise SnapshotError(f"git log --name-only failed:\n{proc.stderr.read()}")
+    return lists
+
+
 def path_touchers(repo, base, tip, merges=False):
     """(last_toucher, first_toucher) per path over the whole DAG."""
     proc = subprocess.Popen(
@@ -231,7 +265,8 @@ def path_touchers(repo, base, tip, merges=False):
     return last, first
 
 
-def assign_by_toucher(repo, dag, units, paths, renames, base, tip, rule):
+def assign_by_toucher(repo, dag, units, paths, renames, base, tip, rule,
+                      skip_res=()):
     """Own each path via the unit containing the commit `rule` picks for it.
 
     'introducer' (default): the OLDEST non-merge commit that touched the path,
@@ -242,18 +277,34 @@ def assign_by_toucher(repo, dag, units, paths, renames, base, tip, rule):
     Paths no non-merge commit touched fall through to merge deltas, then to
     the delta-scope rule.
     """
-    parents_map, _ = dag
+    parents_map, subjects = dag
     log("mapping commits to units")
     member = commit_to_unit(parents_map, units)
     log(f"  {len(member)} commit(s) mapped")
     log(f"finding {rule} per path")
-    last_n, first_n = path_touchers(repo, base, tip, merges=False)
-    picked = first_n if rule == "introducer" else last_n
+    lists = path_toucher_lists(repo, base, tip, set(paths), merges=False)
     owner: dict[str, int] = {}
+    skipped = 0
     for p in paths:
-        idx = member.get(picked.get(p, ""))
+        seq = lists.get(p)
+        if not seq:
+            continue
+        order = list(reversed(seq)) if rule == "introducer" else seq
+        pick = None
+        for cand in order:
+            if skip_res and any(r.search(subjects.get(cand, "")) for r in skip_res):
+                continue
+            pick = cand
+            break
+        if pick is None:                  # every toucher is plumbing
+            pick = order[0]
+        elif pick is not order[0]:
+            skipped += 1
+        idx = member.get(pick)
         if idx is not None:
             owner[p] = idx
+    if skipped:
+        log(f"  {skipped} path(s) skipped a repo-plumbing donor")
     missing = [p for p in paths if p not in owner]
     if missing:
         last_m, first_m = path_touchers(repo, base, tip, merges=True)
@@ -280,14 +331,29 @@ def assign_by_toucher(repo, dag, units, paths, renames, base, tip, rule):
         units[idx].owned.append(p)
     return [p for p in paths if p not in owner]
 
-def resolve_donors(repo, units):
-    """Fill in donors for collapsed trains: earliest non-merge in side_base..side_tip."""
+def resolve_donors(repo, units, subjects=None, skip_res=()):
+    """Fill in donors for collapsed trains: earliest non-merge in the train.
+
+    Repo-plumbing commits are skipped here too. Skipping them only at
+    attribution time is not enough: a path can legitimately land on a unit
+    whose earliest commit is `initial import`, and then the commit is titled
+    after the import even though it carries someone's feature work.
+    """
     pending = [u for u in units if u.donor is None]
     for n, unit in enumerate(pending, 1):
         side_base, side_tip = unit.train
         out = git_text(repo, "rev-list", "--no-merges", "--reverse",
                        f"{side_base}..{side_tip}")
-        first = out.split("\n", 1)[0].strip()
+        candidates = [c for c in out.split("\n") if c.strip()]
+        first = ""
+        for cand in candidates:
+            subj = (subjects or {}).get(cand, "")
+            if skip_res and any(r.search(subj) for r in skip_res):
+                continue
+            first = cand
+            break
+        if not first and candidates:
+            first = candidates[0]
         if first:
             unit.donor = first
         else:
@@ -429,6 +495,13 @@ def main(argv=None):
                          "claiming hundreds of files it merely carried. "
                          "'delta': to the last unit whose merge delta scopes "
                          "it -- fewer, larger commits")
+    ap.add_argument("--skip-donor-subject", action="append", default=[],
+                    metavar="REGEX",
+                    help="additional subject patterns whose commits must not "
+                         "own a path (attribution falls through to the next "
+                         "toucher); adds to the built-in plumbing list")
+    ap.add_argument("--no-skip-donors", action="store_true",
+                    help="let repo-plumbing commits own paths after all")
     ap.add_argument("--dry-run", action="store_true",
                     help="report unit/ownership counts and stop before emitting")
     ap.add_argument("--report", default=None)
@@ -459,9 +532,12 @@ def main(argv=None):
     log(f"  units={len(units)} merges={stats['merges']} "
         f"recursed={stats['recursed']} collapsed={stats['collapsed']}")
 
+    pats = () if args.no_skip_donors else (
+        tuple(DEFAULT_SKIP_DONORS) + tuple(args.skip_donor_subject))
+    skip_res = tuple(re.compile(x, re.IGNORECASE) for x in pats)
     if args.ownership in ("introducer", "toucher"):
         unclaimed = assign_by_toucher(repo, dag, units, paths, renames,
-                                      base, tip, args.ownership)
+                                      base, tip, args.ownership, skip_res)
     else:
         unclaimed = assign(units, paths, renames)
     owning = sum(1 for u in units if u.owned)
@@ -478,7 +554,7 @@ def main(argv=None):
         return 0
 
     to_emit = [u for u in units if u.owned or args.keep_empty]
-    n = resolve_donors(repo, to_emit)
+    n = resolve_donors(repo, to_emit, dag[1], skip_res)
     log(f"resolved {n} train donor(s) for {len(to_emit)} unit(s) to emit")
 
     parent, tree, emitted, rows = base, base_tree, 0, []

@@ -209,38 +209,62 @@ def commit_to_unit(parents_map, units):
     return owner
 
 
-def path_last_toucher(repo, base, tip):
-    """path -> last commit in the range that touched it (whole DAG, not fp)."""
+def path_touchers(repo, base, tip, merges=False):
+    """(last_toucher, first_toucher) per path over the whole DAG."""
     proc = subprocess.Popen(
-        ["git", "-C", str(repo), "log", "--name-only", "--no-merges",
+        ["git", "-C", str(repo), "log", "--name-only",
+         *(["--diff-merges=first-parent"] if merges else ["--no-merges"]),
          "--format=@@%H", f"{base}..{tip}"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    last, cur = {}, None
+    last, first, cur = {}, {}, None
     for line in proc.stdout:                      # newest first
         line = line.rstrip("\n")
         if line.startswith("@@"):
             cur = line[2:]
-        elif line and line not in last:
-            last[line] = cur
+        elif line:
+            if line not in last:
+                last[line] = cur                  # first seen == newest touch
+            first[line] = cur                     # overwritten down to oldest
     proc.stdout.close()
     if proc.wait() != 0:
         raise SnapshotError(f"git log --name-only failed:\n{proc.stderr.read()}")
-    return last
+    return last, first
 
 
-def assign_by_toucher(repo, dag, units, paths, renames, base, tip):
-    """Own each path via the unit containing its last real toucher."""
+def assign_by_toucher(repo, dag, units, paths, renames, base, tip, rule):
+    """Own each path via the unit containing the commit `rule` picks for it.
+
+    'introducer' (default): the OLDEST non-merge commit that touched the path,
+    so a sweeping late change (a tree-wide warning fix, a clang-format pass, a
+    version bump) cannot claim files it merely edited -- with final content
+    those would arrive as whole-file insertions under a misleading subject.
+    'toucher': the newest non-merge commit instead.
+    Paths no non-merge commit touched fall through to merge deltas, then to
+    the delta-scope rule.
+    """
     parents_map, _ = dag
     log("mapping commits to units")
     member = commit_to_unit(parents_map, units)
     log(f"  {len(member)} commit(s) mapped")
-    log("finding last toucher per path")
-    last = path_last_toucher(repo, base, tip)
+    log(f"finding {rule} per path")
+    last_n, first_n = path_touchers(repo, base, tip, merges=False)
+    picked = first_n if rule == "introducer" else last_n
     owner: dict[str, int] = {}
     for p in paths:
-        idx = member.get(last.get(p, ""))
+        idx = member.get(picked.get(p, ""))
         if idx is not None:
             owner[p] = idx
+    missing = [p for p in paths if p not in owner]
+    if missing:
+        last_m, first_m = path_touchers(repo, base, tip, merges=True)
+        pick_m = first_m if rule == "introducer" else last_m
+        n = 0
+        for p in missing:
+            idx = member.get(pick_m.get(p, ""))
+            if idx is not None:
+                owner[p] = idx
+                n += 1
+        log(f"  {n} path(s) attributed via a merge delta")
     # Paths no non-merge commit ever touched (deletions performed at merge
     # points, evil merges) fall back to the last unit whose delta scopes them.
     wanted = {p for p in paths if p not in owner}
@@ -396,8 +420,8 @@ def main(argv=None):
                     default="[snapshot] remaining paths with no owning unit",
                     help="subject for the final sink commit")
     ap.add_argument("--force-output", action="store_true")
-    ap.add_argument("--ownership", choices=("toucher", "delta"),
-                    default="toucher",
+    ap.add_argument("--ownership", choices=("introducer", "toucher", "delta"),
+                    default="introducer",
                     help="'toucher' (default): a path goes to the unit "
                          "containing its last non-merge toucher, with a delta "
                          "fallback for paths only a merge ever touched. This "
@@ -435,9 +459,9 @@ def main(argv=None):
     log(f"  units={len(units)} merges={stats['merges']} "
         f"recursed={stats['recursed']} collapsed={stats['collapsed']}")
 
-    if args.ownership == "toucher":
+    if args.ownership in ("introducer", "toucher"):
         unclaimed = assign_by_toucher(repo, dag, units, paths, renames,
-                                      base, tip)
+                                      base, tip, args.ownership)
     else:
         unclaimed = assign(units, paths, renames)
     owning = sum(1 for u in units if u.owned)

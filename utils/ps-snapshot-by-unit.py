@@ -488,13 +488,23 @@ def main(argv=None):
     ap.add_argument("--force-output", action="store_true")
     ap.add_argument("--ownership", choices=("introducer", "toucher", "delta"),
                     default="introducer",
-                    help="'toucher' (default): a path goes to the unit "
-                         "containing its last non-merge toucher, with a delta "
-                         "fallback for paths only a merge ever touched. This "
-                         "is what keeps an upstream release merge from "
-                         "claiming hundreds of files it merely carried. "
-                         "'delta': to the last unit whose merge delta scopes "
-                         "it -- fewer, larger commits")
+                    help=(
+                        "which commit gets credit for a path. "
+                        "'introducer' (default): the OLDEST non-merge commit "
+                        "that touched it, so a tree-wide sweep (warning fix, "
+                        "clang-format, version bump) cannot claim files it "
+                        "merely edited -- with final content those arrive as "
+                        "whole-file insertions under a subject that explains "
+                        "nothing. "
+                        "'toucher': the NEWEST non-merge commit instead; "
+                        "keeps a release merge from claiming files it carried, "
+                        "but hands sweeps everything they grazed. "
+                        "'delta': the last unit whose merge delta scopes the "
+                        "path -- fewest, largest commits, and an upstream "
+                        "release merge claims hundreds of carried files. "
+                        "'introducer' and 'toucher' fall back to merge deltas, "
+                        "then to 'delta', for paths no non-merge ever touched"),
+                    )
     ap.add_argument("--skip-donor-subject", action="append", default=[],
                     metavar="REGEX",
                     help="additional subject patterns whose commits must not "

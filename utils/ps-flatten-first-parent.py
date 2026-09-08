@@ -807,6 +807,29 @@ def touched_paths(repo: str | Path, meta: CommitMeta) -> set[str]:
     return {line for line in out.splitlines() if line}
 
 
+NULL_OID = "0" * 40
+
+
+def tree_entries(
+    repo: str | Path,
+    tree: str,
+    paths: list[str],
+    chunk: int = 800,
+) -> dict[str, tuple[str, str]]:
+    """Batched tree_entry(): one ls-tree per chunk instead of one per path."""
+    found: dict[str, tuple[str, str]] = {}
+    for start in range(0, len(paths), chunk):
+        batch = paths[start:start + chunk]
+        out = git_text(repo, "ls-tree", "-z", tree, "--", *batch)
+        for record in out.split("\0"):
+            if not record:
+                continue
+            meta, path = record.split("\t", 1)
+            mode, _kind, oid = meta.split()
+            found[path] = (mode, oid)
+    return found
+
+
 def overlay_tree_paths(
     repo: str | Path,
     base_tree: str,
@@ -815,16 +838,21 @@ def overlay_tree_paths(
 ) -> str:
     if not paths:
         return base_tree
+    wanted = sorted(set(paths))
+    entries = tree_entries(repo, source_tree, wanted)
+    lines = []
+    for path in wanted:
+        source = entries.get(path)
+        if source is None:
+            lines.append(f"0 {NULL_OID}\t{path}")
+        else:
+            mode, oid = source
+            lines.append(f"{mode} {oid}\t{path}")
     with tempfile.TemporaryDirectory(prefix="ps-flatten-side-overlay-index-") as tmp:
         env = {"GIT_INDEX_FILE": str(Path(tmp) / "index")}
         git(repo, "read-tree", base_tree, env=env)
-        for path in sorted(set(paths)):
-            source = tree_entry(repo, source_tree, path)
-            if source is None:
-                git(repo, "update-index", "--force-remove", "--", path, env=env)
-                continue
-            mode, oid = source
-            git(repo, "update-index", "--add", "--cacheinfo", mode, oid, path, env=env)
+        git(repo, "update-index", "--index-info",
+            input_text="\n".join(lines) + "\n", env=env)
         return git(repo, "write-tree", env=env).stdout.strip()
 
 
@@ -1094,15 +1122,23 @@ def reconcile_side_to_merge_tree(
         adjusted_trees = [emitted.tree for emitted in side_emitted]
         folded_paths_by_index: dict[int, int] = {}
         for index, paths in sorted(paths_by_index.items()):
-            for tree_index in range(index, len(adjusted_trees)):
+            stats.merge_reconciled_paths += len(paths)
+            folded_paths_by_index[index] = len(paths)
+        # One overlay per tree with the accumulated path set: tree t must end
+        # up carrying every path whose owner index is <= t, and all overlays
+        # read from the same merge_meta.tree, so this is order-independent and
+        # identical to the per-owner sweep it replaces -- but O(trees) calls
+        # instead of O(owners x trees).
+        pending: list[str] = []
+        for tree_index in range(min(paths_by_index), len(adjusted_trees)):
+            pending.extend(paths_by_index.get(tree_index, []))
+            if pending:
                 adjusted_trees[tree_index] = overlay_tree_paths(
                     repo,
                     adjusted_trees[tree_index],
                     merge_meta.tree,
-                    paths,
+                    pending,
                 )
-            stats.merge_reconciled_paths += len(paths)
-            folded_paths_by_index[index] = len(paths)
         emitted_parent = rebuild_side_suffix(
             repo,
             side_base_parent,

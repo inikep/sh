@@ -57,6 +57,15 @@ DEFAULT_SKIP_DONORS = (
     r"^Merge from 5\.5 the move Percona-Server",
     r"^merge libperconaserverclient replacing libmysqlclient",
     r"^copy Docs/INFO_",
+    # Upstream release merges. In this history they often appear as
+    # single-parent commits (the 5.6->5.7 merge process rebased them), so a
+    # parent-count test does not catch them: match the subject instead.
+    r"^merge mysql[- ][0-9]",
+    r"^merged '?mysql-[0-9]",
+    r"^merge percona server [0-9.]+ to mysql",
+    r"^merge branch ",
+    r"^merge remote-tracking branch ",
+    r"^null-merge ",
 )
 
 
@@ -278,6 +287,7 @@ def assign_by_toucher(repo, dag, units, paths, renames, base, tip, rule,
     the delta-scope rule.
     """
     parents_map, subjects = dag
+    pick_of: dict[str, str] = {}
     log("mapping commits to units")
     member = commit_to_unit(parents_map, units)
     log(f"  {len(member)} commit(s) mapped")
@@ -303,6 +313,7 @@ def assign_by_toucher(repo, dag, units, paths, renames, base, tip, rule,
         idx = member.get(pick)
         if idx is not None:
             owner[p] = idx
+            pick_of[p] = pick
     if skipped:
         log(f"  {skipped} path(s) skipped a repo-plumbing donor")
     missing = [p for p in paths if p not in owner]
@@ -311,9 +322,11 @@ def assign_by_toucher(repo, dag, units, paths, renames, base, tip, rule,
         pick_m = first_m if rule == "introducer" else last_m
         n = 0
         for p in missing:
-            idx = member.get(pick_m.get(p, ""))
+            cand = pick_m.get(p, "")
+            idx = member.get(cand)
             if idx is not None:
                 owner[p] = idx
+                pick_of[p] = cand
                 n += 1
         log(f"  {n} path(s) attributed via a merge delta")
     # Paths no non-merge commit ever touched (deletions performed at merge
@@ -323,13 +336,18 @@ def assign_by_toucher(repo, dag, units, paths, renames, base, tip, rule,
         for idx, unit in enumerate(units):
             for p in unit.scope & wanted:
                 owner[p] = idx
+                if unit.merge_sha or unit.donor:
+                    pick_of[p] = unit.merge_sha or unit.donor
         log(f"  {len(wanted)} merge-only path(s) fell back to delta scope")
     for src, dest in renames.items():
         if src not in owner and dest in owner:
             owner[src] = owner[dest]
+        if src not in pick_of and dest in pick_of:
+            pick_of[src] = pick_of[dest]
     for p, idx in owner.items():
         units[idx].owned.append(p)
-    return [p for p in paths if p not in owner]
+    return [p for p in paths if p not in owner], pick_of
+
 
 def resolve_donors(repo, units, subjects=None, skip_res=()):
     """Fill in donors for collapsed trains: earliest non-merge in the train.
@@ -505,6 +523,12 @@ def main(argv=None):
                         "'introducer' and 'toucher' fall back to merge deltas, "
                         "then to 'delta', for paths no non-merge ever touched"),
                     )
+    ap.add_argument("--group", choices=("commit", "unit"), default="commit",
+                    help="'commit' (default): one output commit per real "
+                         "owning commit, so a long-lived train cannot be "
+                         "named after its earliest commit. 'unit': one per "
+                         "logical unit (train), fewer and larger commits. "
+                         "--ownership delta always groups by unit")
     ap.add_argument("--skip-donor-subject", action="append", default=[],
                     metavar="REGEX",
                     help="additional subject patterns whose commits must not "
@@ -545,9 +569,11 @@ def main(argv=None):
     pats = () if args.no_skip_donors else (
         tuple(DEFAULT_SKIP_DONORS) + tuple(args.skip_donor_subject))
     skip_res = tuple(re.compile(x, re.IGNORECASE) for x in pats)
+    pick_of: dict[str, str] = {}
     if args.ownership in ("introducer", "toucher"):
-        unclaimed = assign_by_toucher(repo, dag, units, paths, renames,
-                                      base, tip, args.ownership, skip_res)
+        unclaimed, pick_of = assign_by_toucher(repo, dag, units, paths,
+                                               renames, base, tip,
+                                               args.ownership, skip_res)
     else:
         unclaimed = assign(units, paths, renames)
     owning = sum(1 for u in units if u.owned)
@@ -563,9 +589,35 @@ def main(argv=None):
               f"max_owned={sizes[0] if sizes else 0}")
         return 0
 
-    to_emit = [u for u in units if u.owned or args.keep_empty]
-    n = resolve_donors(repo, to_emit, dag[1], skip_res)
-    log(f"resolved {n} train donor(s) for {len(to_emit)} unit(s) to emit")
+    if pick_of and args.group == "commit":
+        # One output commit per real owning commit, not per train. A train can
+        # span years; naming it after its earliest commit makes that commit
+        # own work from long after it (`added mysql_dump_ignore_ct.patch`
+        # owning 2014 changes to sql/sql_show.cc), and rolls a release merge
+        # up to 70 files where the reference branch has 4.
+        marker_of: dict[str, str | None] = {}
+        member = commit_to_unit(dag[0], units)
+        for sha, idx in member.items():
+            marker_of[sha] = units[idx].marker
+        by_commit: dict[str, list[str]] = {}
+        for path, sha in pick_of.items():
+            by_commit.setdefault(sha, []).append(path)
+        order = {}
+        for i, sha in enumerate(git_text(repo, "rev-list", "--reverse",
+                                         "--topo-order",
+                                         f"{base}..{tip}").split("\n")):
+            if sha:
+                order[sha] = i
+        to_emit = [Unit(donor=sha, owned=sorted(ps),
+                        marker=marker_of.get(sha))
+                   for sha, ps in sorted(by_commit.items(),
+                                         key=lambda kv: order.get(kv[0], 0))]
+        log(f"grouping by owning commit: {len(to_emit)} commit(s) "
+            f"(units would have given {sum(1 for u in units if u.owned)})")
+    else:
+        to_emit = [u for u in units if u.owned or args.keep_empty]
+        n = resolve_donors(repo, to_emit, dag[1], skip_res)
+        log(f"resolved {n} train donor(s) for {len(to_emit)} unit(s) to emit")
 
     parent, tree, emitted, rows = base, base_tree, 0, []
     for unit in to_emit:

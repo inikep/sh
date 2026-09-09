@@ -48,6 +48,14 @@ PR_RE = re.compile(r"\bMerge pull request #(\d+)\b")
 # Repo-plumbing commits: they are the first in-range toucher of files whose
 # Percona content arrived later, so attributing a path to them buys a huge
 # whole-file insertion under a subject that explains nothing.
+# Upstream MySQL authors. Percona's tree imported MySQL history from bzr, so
+# these commits carry different SHAs than Oracle's git history and are NOT
+# reachable from any mysql-* tag -- reachability cannot identify them, the
+# author domain can. Attributing a surviving path to one of them titles the
+# output commit after upstream work ("WL#14194 step 2.1: System variables")
+# instead of the Percona change that kept the file alive.
+DEFAULT_UPSTREAM_DOMAINS = ("oracle.com", "sun.com", "mysql.com", "innodb.com")
+
 DEFAULT_SKIP_DONORS = (
     r"^initial import\b",
     r"^initial revision\b",
@@ -138,20 +146,22 @@ def walk_nodes(repo, base, tip):
 
 def load_dag(repo, base, tip):
     """One pass: sha -> parents, sha -> subject, for every commit in the range."""
-    out = git_text(repo, "log", "--format=%H\x01%P\x01%s", f"{base}..{tip}")
-    parents, subjects = {}, {}
+    out = git_text(repo, "log", "--format=%H\x01%P\x01%ae\x01%s",
+                   f"{base}..{tip}")
+    parents, subjects, emails = {}, {}, {}
     for line in out.split("\n"):
         if not line:
             continue
-        sha, par, subject = line.split("\x01", 2)
+        sha, par, email, subject = line.split("\x01", 3)
         parents[sha] = par.split()
         subjects[sha] = subject
-    return parents, subjects
+        emails[sha] = email
+    return parents, subjects, emails
 
 
 def collect_units(repo, dag, base, tip, net_set, recurse_min_paths, max_depth,
                   depth=0, marker=None, stats=None):
-    parents_map, subjects = dag
+    parents_map, subjects, _emails = dag
     units: list[Unit] = []
     nodes = walk_nodes(repo, base, tip)
     stats["ranges"] += 1
@@ -275,7 +285,7 @@ def path_touchers(repo, base, tip, merges=False):
 
 
 def assign_by_toucher(repo, dag, units, paths, renames, base, tip, rule,
-                      skip_res=()):
+                      skip_res=(), upstream=()):
     """Own each path via the unit containing the commit `rule` picks for it.
 
     'introducer' (default): the OLDEST non-merge commit that touched the path,
@@ -286,7 +296,7 @@ def assign_by_toucher(repo, dag, units, paths, renames, base, tip, rule,
     Paths no non-merge commit touched fall through to merge deltas, then to
     the delta-scope rule.
     """
-    parents_map, subjects = dag
+    parents_map, subjects, emails = dag
     pick_of: dict[str, str] = {}
     log("mapping commits to units")
     member = commit_to_unit(parents_map, units)
@@ -302,7 +312,7 @@ def assign_by_toucher(repo, dag, units, paths, renames, base, tip, rule,
         order = list(reversed(seq)) if rule == "introducer" else seq
         pick = None
         for cand in order:
-            if skip_res and any(r.search(subjects.get(cand, "")) for r in skip_res):
+            if bad_donor(cand, subjects, emails, skip_res, upstream):
                 continue
             pick = cand
             break
@@ -349,7 +359,20 @@ def assign_by_toucher(repo, dag, units, paths, renames, base, tip, rule,
     return [p for p in paths if p not in owner], pick_of
 
 
-def resolve_donors(repo, units, subjects=None, skip_res=()):
+def bad_donor(sha, subjects, emails, skip_res, upstream):
+    """True when a commit must not be credited with a path."""
+    subject = (subjects or {}).get(sha, "")
+    if skip_res and any(r.search(subject) for r in skip_res):
+        return True
+    if upstream:
+        domain = (emails or {}).get(sha, "").rsplit("@", 1)[-1].lower()
+        if domain in upstream:
+            return True
+    return False
+
+
+def resolve_donors(repo, units, subjects=None, skip_res=(), emails=None,
+                   upstream=()):
     """Fill in donors for collapsed trains: earliest non-merge in the train.
 
     Repo-plumbing commits are skipped here too. Skipping them only at
@@ -365,8 +388,7 @@ def resolve_donors(repo, units, subjects=None, skip_res=()):
         candidates = [c for c in out.split("\n") if c.strip()]
         first = ""
         for cand in candidates:
-            subj = (subjects or {}).get(cand, "")
-            if skip_res and any(r.search(subj) for r in skip_res):
+            if bad_donor(cand, subjects, emails, skip_res, upstream):
                 continue
             first = cand
             break
@@ -462,8 +484,26 @@ def commit_meta(repo, sha):
     return an, ae, ad, cn, ce, cd, body.rstrip("\n") + "\n"
 
 
+def usable_ident(name, email):
+    """git stores commits with an empty ident but refuses to create one.
+
+    The deeper Percona history carries such objects (e.g. an author with only
+    <Dao-Gang.Qu@sun.com>), so fall back to the address's local part rather
+    than losing the commit.
+    """
+    name = (name or "").strip()
+    email = (email or "").strip()
+    if not name:
+        name = email.split("@", 1)[0].strip() or "unknown"
+    if not email:
+        email = "unknown@localhost"
+    return name, email
+
+
 def emit(repo, parent, tree, donor, marker, subject_override=None):
     an, ae, ad, cn, ce, cd, body = commit_meta(repo, donor)
+    an, ae = usable_ident(an, ae)
+    cn, ce = usable_ident(cn, ce)
     if subject_override:
         body = subject_override.rstrip("\n") + "\n"
     if marker:
@@ -534,6 +574,13 @@ def main(argv=None):
                     help="additional subject patterns whose commits must not "
                          "own a path (attribution falls through to the next "
                          "toucher); adds to the built-in plumbing list")
+    ap.add_argument("--upstream-domain", action="append", default=[],
+                    metavar="DOMAIN",
+                    help="additional author-email domains treated as upstream "
+                         "and barred from owning a path; adds to "
+                         + ", ".join(DEFAULT_UPSTREAM_DOMAINS))
+    ap.add_argument("--no-skip-upstream", action="store_true",
+                    help="let upstream-authored commits own paths after all")
     ap.add_argument("--no-skip-donors", action="store_true",
                     help="let repo-plumbing commits own paths after all")
     ap.add_argument("--dry-run", action="store_true",
@@ -569,11 +616,15 @@ def main(argv=None):
     pats = () if args.no_skip_donors else (
         tuple(DEFAULT_SKIP_DONORS) + tuple(args.skip_donor_subject))
     skip_res = tuple(re.compile(x, re.IGNORECASE) for x in pats)
+    upstream = () if args.no_skip_upstream else frozenset(
+        d.lower() for d in
+        tuple(DEFAULT_UPSTREAM_DOMAINS) + tuple(args.upstream_domain))
     pick_of: dict[str, str] = {}
     if args.ownership in ("introducer", "toucher"):
         unclaimed, pick_of = assign_by_toucher(repo, dag, units, paths,
                                                renames, base, tip,
-                                               args.ownership, skip_res)
+                                               args.ownership, skip_res,
+                                               upstream)
     else:
         unclaimed = assign(units, paths, renames)
     owning = sum(1 for u in units if u.owned)
@@ -616,7 +667,7 @@ def main(argv=None):
             f"(units would have given {sum(1 for u in units if u.owned)})")
     else:
         to_emit = [u for u in units if u.owned or args.keep_empty]
-        n = resolve_donors(repo, to_emit, dag[1], skip_res)
+        n = resolve_donors(repo, to_emit, dag[1], skip_res, dag[2], upstream)
         log(f"resolved {n} train donor(s) for {len(to_emit)} unit(s) to emit")
 
     parent, tree, emitted, rows = base, base_tree, 0, []

@@ -18,7 +18,15 @@ Rules:
     subject get a "[#NNN]" subject marker;
   * side-branch merge commits are squashed by replaying their net delta; when a
     nested merge imports a single real change, that change supplies metadata once,
-    while later broad merge squashes keep their own merge metadata.
+    while later broad merge squashes keep their own merge metadata.  --depth N
+    instead recurses into a side-branch merge's own second-parent side while the
+    current side depth is below N, so nested side branches are expanded rather
+    than squashed (--depth 2 is the default; --depth 1 restores the old
+    squash-everything behavior); a nested
+    merge is still squashed when it is only a version-propagation wrapper -- at
+    most one of the merge and the commits it would emit is not a "merge" of a
+    5.5/5.6/5.7 branch (case-insensitive) -- which keeps 5.x-to-8.0 propagation
+    chains collapsed around the real commit they carry;
   * one-parent side commits with merge-like subjects can use metadata from a
     matching real bug-fix commit when the original branch merge was already
     linearized before this script sees it.
@@ -36,7 +44,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -46,6 +54,7 @@ MERGE_BRANCH_SUBJECT_RE = re.compile(
     re.IGNORECASE,
 )
 BUG_ID_RE = re.compile(r"\bbug[-_/ ]*#?(\d{4,})\b", re.IGNORECASE)
+VERSION_MERGE_VERSIONS = ("5.5", "5.6", "5.7")
 MERGE_51_TO_55_SUBJECT_RE = re.compile(r"\b5\.1\b", re.IGNORECASE)
 SHORT_HASH_RE = re.compile(r"\b[0-9a-f]{12,40}\b")
 ACTION_RE = re.compile(r"^(emit|squash|replay|skip null|skip empty replay|done:|main|onto|upstream|=)(?=\s|\b)")
@@ -226,6 +235,9 @@ class Stats:
     emitted: int = 0
     skipped_null: int = 0
     expanded_merges: int = 0
+    recursed_merges: int = 0
+    version_merge_recursions_skipped: int = 0
+    recursed: list[tuple[int, str, str, int]] = field(default_factory=list)
     squashed_merges: int = 0
     linearized_merge_metadata: int = 0
     base_alignments: int = 0
@@ -626,6 +638,32 @@ def emit_upstream_import_merge(
 def first_parent_chain(repo: str | Path, base: str, tip: str) -> list[str]:
     out = git_text(repo, "rev-list", "--first-parent", "--reverse", f"{base}..{tip}")
     return [line for line in out.splitlines() if line]
+
+
+def first_parent_subjects(repo: str | Path, base: str, tip: str) -> list[str]:
+    out = git_text(repo, "log", "--first-parent", "--reverse", "--format=%s", f"{base}..{tip}")
+    return [line for line in out.splitlines() if line]
+
+
+def is_version_merge_subject(subject: str) -> bool:
+    lowered = (subject or "").lower()
+    return "merge" in lowered and any(v in lowered for v in VERSION_MERGE_VERSIONS)
+
+
+def is_version_merge_wrapper(repo: str | Path, meta: CommitMeta) -> bool:
+    """True when this merge is only a 5.x-to-8.0 propagation wrapper.
+
+    The inspected set is the merge itself plus the side commits it would emit,
+    which is exactly the commit list GitHub shows for the pull request.  It is
+    a wrapper when at least one of those is a 5.5/5.6/5.7 merge and at most one
+    is not, i.e. the whole chain is propagation around a single real commit.
+    Expanding those yields the real commit plus reconciliation noise, while the
+    squash already takes the real commit's metadata.
+    """
+    subjects = [meta.subject]
+    subjects.extend(first_parent_subjects(repo, meta.parents[0], meta.parents[1]))
+    matched = sum(1 for subject in subjects if is_version_merge_subject(subject))
+    return matched >= 1 and len(subjects) - matched <= 1
 
 
 def is_null_against_first_parent(repo: str | Path, meta: CommitMeta) -> bool:
@@ -1031,10 +1069,11 @@ def emit_merge_alignment(
     merge_meta: CommitMeta,
     emitted_parent: str,
     stats: Stats,
+    target_tree: str | None = None,
 ) -> str:
     return emit_tree_alignment(
         repo,
-        merge_meta.tree,
+        target_tree or merge_meta.tree,
         emitted_parent,
         merge_meta,
         stats,
@@ -1102,8 +1141,10 @@ def reconcile_side_to_merge_tree(
     merge_meta: CommitMeta,
     side_emitted: list[EmittedSideCommit],
     stats: Stats,
+    target_tree: str | None = None,
 ) -> str:
-    residual_paths = diff_paths(repo, tree_of(repo, emitted_parent), merge_meta.tree)
+    target_tree = target_tree or merge_meta.tree
+    residual_paths = diff_paths(repo, tree_of(repo, emitted_parent), target_tree)
     if not residual_paths:
         return emitted_parent
 
@@ -1136,7 +1177,7 @@ def reconcile_side_to_merge_tree(
                 adjusted_trees[tree_index] = overlay_tree_paths(
                     repo,
                     adjusted_trees[tree_index],
-                    merge_meta.tree,
+                    target_tree,
                     pending,
                 )
         emitted_parent = rebuild_side_suffix(
@@ -1150,9 +1191,9 @@ def reconcile_side_to_merge_tree(
 
     if fallback_paths:
         log(format_fallback_paths_line(len(fallback_paths)))
-        return emit_merge_alignment(repo, merge_meta, emitted_parent, stats)
+        return emit_merge_alignment(repo, merge_meta, emitted_parent, stats, target_tree)
 
-    remaining = diff_paths(repo, tree_of(repo, emitted_parent), merge_meta.tree)
+    remaining = diff_paths(repo, tree_of(repo, emitted_parent), target_tree)
     if remaining:
         sample = "\n".join(f"  {path}" for path in remaining[:20])
         raise FlattenError(
@@ -1160,6 +1201,21 @@ def reconcile_side_to_merge_tree(
             f"({len(remaining)} path(s) still differ)\n{sample}"
         )
     return emitted_parent
+
+
+def nested_reconcile_target(repo: str | Path, meta: CommitMeta, emitted_parent: str) -> str:
+    """Tree a nested side branch should reconcile to.
+
+    A main-chain merge may be aligned to its own tree because the emitted
+    parent tracks that merge's first parent.  Inside a recursion that no
+    longer holds: the emitted parent has moved on with the outer chain while
+    the merge's first parent can be far behind it, so aligning to the merge's
+    absolute tree would rewind every unrelated path in between.  Reconcile to
+    the emitted parent plus this merge's own delta instead; when the emitted
+    parent does sit on the merge's first parent the two are the same tree.
+    """
+    replayed = replay_delta_tree(repo, meta.parents[0], meta.sha, emitted_parent, meta.tree)
+    return replayed or tree_of(repo, emitted_parent)
 
 
 def flatten_side(
@@ -1176,7 +1232,10 @@ def flatten_side(
     upstream_tags: list[tuple[tuple[int, int, int], str]] | None = None,
     upstream_tag_cache: dict[str, tuple[tuple[int, int, int], str] | None] | None = None,
     used_metadata_shas: set[str] | None = None,
-) -> str:
+    depth: int = 1,
+    max_depth: int = 2,
+    target_tree: str | None = None,
+) -> tuple[str, list[EmittedSideCommit]]:
     upstream_tags = upstream_tags or []
     if upstream_tag_cache is None:
         upstream_tag_cache = {}
@@ -1184,7 +1243,10 @@ def flatten_side(
         used_metadata_shas = set()
     side_chain = first_parent_chain(repo, first_parent, second_parent)
     side_metas = [load_commit(repo, sha) for sha in side_chain]
-    log(f"  side {first_parent[:12]}..{second_parent[:12]}: {len(side_chain)} first-parent commits")
+    log(
+        f"{depth_marker(depth)}side {first_parent[:12]}..{second_parent[:12]}: "
+        f"{len(side_chain)} first-parent commits"
+    )
     side_base_parent = emitted_parent
     side_emitted: list[EmittedSideCommit] = []
     start_index = 0
@@ -1228,7 +1290,6 @@ def flatten_side(
                     forced_upstream_imports[side_metas[import_index].sha] = advanced_tag[1]
                     break
             scan_prev_endpoint = meta.sha
-    depth = 1
     diag_indent = "  " * (depth + 1)
     for meta in side_metas[start_index:]:
         stats.walked += 1
@@ -1267,6 +1328,43 @@ def flatten_side(
             continue
         if meta.is_merge:
             side_marker = marker_from_subject(meta.subject) or marker
+            if (
+                depth < max_depth
+                and len(meta.parents) >= 2
+                and not is_version_merge_wrapper(repo, meta)
+            ):
+                prev_emitted = emitted_parent
+                nested_target = nested_reconcile_target(repo, meta, emitted_parent)
+                emitted_parent, nested_emitted = flatten_side(
+                    repo,
+                    meta.parents[0],
+                    meta.parents[1],
+                    emitted_parent,
+                    stats,
+                    side_marker,
+                    nested_target,
+                    merge_meta=meta,
+                    align_source_tree=align_source_tree,
+                    preserve_upstream_imports=preserve_upstream_imports,
+                    upstream_tags=upstream_tags,
+                    upstream_tag_cache=upstream_tag_cache,
+                    used_metadata_shas=used_metadata_shas,
+                    depth=depth + 1,
+                    max_depth=max_depth,
+                    target_tree=nested_target,
+                )
+                if emitted_parent != prev_emitted:
+                    stats.recursed_merges += 1
+                    stats.recursed.append(
+                        (depth + 1, meta.sha, meta.subject, len(nested_emitted))
+                    )
+                    side_emitted.extend(nested_emitted)
+                    prev_endpoint = meta.sha
+                    continue
+                log(f"{diag_indent}skip empty recursion")
+            elif depth < max_depth and len(meta.parents) >= 2:
+                stats.version_merge_recursions_skipped += 1
+                log(f"{diag_indent}squash instead of recurse: 5.x version-merge wrapper")
             original = find_first_real_non_merge(repo, meta)
             metadata_meta = meta if original.sha in used_metadata_shas else original
             message = prefix_message_subject(metadata_meta.message, side_marker)
@@ -1338,8 +1436,9 @@ def flatten_side(
             merge_meta,
             side_emitted,
             stats,
+            target_tree,
         )
-    return emitted_parent
+    return emitted_parent, side_emitted
 
 
 def flatten_range(
@@ -1349,6 +1448,7 @@ def flatten_range(
     onto: str | None = None,
     align_source_trees: bool = True,
     preserve_upstream_imports: bool = True,
+    max_depth: int = 2,
 ) -> tuple[str, Stats]:
     stats = Stats()
     emitted_parent = onto if onto is not None else base
@@ -1390,7 +1490,7 @@ def flatten_range(
                 continue
             stats.expanded_merges += 1
             marker = marker_from_subject(meta.subject)
-            emitted_parent = flatten_side(
+            emitted_parent, _ = flatten_side(
                 repo,
                 meta.parents[0],
                 meta.parents[1],
@@ -1404,6 +1504,8 @@ def flatten_range(
                 upstream_tags=upstream_tags,
                 upstream_tag_cache=upstream_tag_cache,
                 used_metadata_shas=used_metadata_shas,
+                depth=1,
+                max_depth=max_depth,
             )
         else:
             prev_emitted = emitted_parent
@@ -1420,6 +1522,24 @@ def flatten_range(
                 log_commit_line(repo, "=> ", emitted_parent, emitted_meta.subject)
         prev_endpoint = sha
     return emitted_parent, stats
+
+
+def log_expanded_summary(stats: Stats) -> None:
+    """List the side-branch merges that were recursed into rather than squashed."""
+    if not stats.recursed:
+        log(
+            f"expanded at depth>=2: none "
+            f"({stats.version_merge_recursions_skipped} version-merge wrapper(s) squashed)"
+        )
+        return
+    total = sum(count for _, _, _, count in stats.recursed)
+    log(
+        f"expanded at depth>=2: {len(stats.recursed)} merge(s) -> {total} commit(s) "
+        f"({stats.version_merge_recursions_skipped} version-merge wrapper(s) squashed)"
+    )
+    for depth, sha, subject, count in stats.recursed:
+        line = f"  d{depth} {sha[:12]} {count:>3} commit(s)  {subject}"
+        log(line[:LOG_LINE_WIDTH])
 
 
 def update_output_branch(repo: str | Path, branch: str, new_tip: str) -> None:
@@ -1462,6 +1582,18 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--depth",
+        type=int,
+        default=2,
+        metavar="N",
+        help=(
+            "how many side-branch levels to expand (default: 2). At depth N a "
+            "side-branch merge is recursed into instead of being squashed, so "
+            "--depth 2 expands the side branch of a side-branch merge; pass "
+            "--depth 1 to squash every side-branch merge as before"
+        ),
+    )
+    parser.add_argument(
         "--color",
         choices=("auto", "always", "never"),
         default="auto",
@@ -1478,6 +1610,8 @@ def main(argv: list[str] | None = None) -> int:
         validate_branch_name(repo, args.output_branch)
         if args.preserve_onto_tree and not args.onto:
             raise FlattenError("--preserve-onto-tree requires --onto")
+        if args.depth < 1:
+            raise FlattenError("--depth must be at least 1")
         if branch_exists(repo, args.output_branch) and not args.force_output:
             raise FlattenError(
                 f"output branch already exists: {args.output_branch}; pass --force-output to update it"
@@ -1493,6 +1627,7 @@ def main(argv: list[str] | None = None) -> int:
             onto,
             align_source_trees=not args.preserve_onto_tree,
             preserve_upstream_imports=not args.no_preserve_upstream_imports,
+            max_depth=args.depth,
         )
 
         if not args.no_final_tree_check and tree_of(repo, new_tip) != tree_of(repo, tip):
@@ -1506,13 +1641,17 @@ def main(argv: list[str] | None = None) -> int:
         log(
             "done: "
             f"walked={stats.walked} emitted={stats.emitted} skipped_null={stats.skipped_null} "
-            f"expanded_merges={stats.expanded_merges} squashed_merges={stats.squashed_merges} "
+            f"expanded_merges={stats.expanded_merges} "
+            f"recursed_merges={stats.recursed_merges} "
+            f"version_merge_recursions_skipped={stats.version_merge_recursions_skipped} "
+            f"squashed_merges={stats.squashed_merges} "
             f"linearized_merge_metadata={stats.linearized_merge_metadata} "
             f"base_alignments={stats.base_alignments} merge_alignments={stats.merge_alignments} "
             f"merge_reconciled_paths={stats.merge_reconciled_paths} "
             f"upstream_import_merges={stats.upstream_import_merges} "
             f"output={args.output_branch}"
         )
+        log_expanded_summary(stats)
         return 0
     except FlattenError as exc:
         log(f"ERROR: {exc}")

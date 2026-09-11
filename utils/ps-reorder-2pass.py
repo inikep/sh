@@ -13,6 +13,12 @@ Pass 1 emits g1-g4, the groups that may split or squash source commits.
 Pass 2 emits g5-g10, and at each group tries to promote matching g11 commits
 with a real git cherry-pick conflict probe. Commits that do not match or do not
 probe cleanly remain in g11.
+
+For the groups listed in SPLIT_PROMOTION_GROUPS a failed promotion is not
+rejected wholesale: the commit is split by path. The paths that probe clean and
+are not at risk of a later clobber are emitted in the target group under the
+original subject, and only the blocked paths are carried forward as a separate
+"[gN]"-prefixed commit at the tail.
 """
 
 import argparse
@@ -23,6 +29,10 @@ import sys
 import time
 from collections import defaultdict
 
+
+# Groups whose failed g11 promotions are split by path instead of being
+# rejected as a whole commit.
+SPLIT_PROMOTION_GROUPS = frozenset({5})
 
 MAX_SUBJECT_LEN = 91
 BATCH_SIZE = 400
@@ -208,10 +218,21 @@ def log_move_to_g10(source_hash, group, reason):
     )
 
 
-def log_summary(group, promoted, kept_conflict, skipped_empty):
+def log_split(group, source_hash, clean_count, blocked_count, reason):
+    prefix = f"split g{group} {source_hash[:12]} {clean_count}/{blocked_count}: "
+    reason = truncate_text(reason, max(0, OUTPUT_STAT_LINE_LEN - len(prefix)))
+    log(
+        f"{STYLE.magenta('split')} {fmt_group(group)} {fmt_sha(source_hash)} "
+        f"{STYLE.green(str(clean_count))} clean / "
+        f"{STYLE.red(str(blocked_count))} blocked: {STYLE.yellow(reason)}"
+    )
+
+
+def log_summary(group, promoted, kept_conflict, skipped_empty, split=0):
     log(
         f"{fmt_group(group)} promotions: "
         f"{STYLE.green(str(promoted))} promoted, "
+        f"{STYLE.magenta(str(split))} split, "
         f"{STYLE.red(str(kept_conflict))} conflicted, "
         f"{STYLE.yellow(str(skipped_empty))} empty"
     )
@@ -1099,11 +1120,11 @@ def items_patch_overlap(left, right):
     )
 
 
-def promotion_clobber_reason(item, group, plan, ignored_ids=None):
-    """Return a reason if moving item to this group can be clobbered later."""
+def promotion_clobber_paths(item, group, plan, ignored_ids=None):
+    """Return the item paths that a later group could clobber, with a reason."""
     item_pos = item_source_pos(item)
     if item_pos < 0:
-        return None
+        return set(), None
     ignored_ids = ignored_ids or set()
 
     protected = []
@@ -1112,6 +1133,8 @@ def promotion_clobber_reason(item, group, plan, ignored_ids=None):
     protected.extend(plan["buckets"][11])
 
     item_paths = set(item["files"])
+    blocked = set()
+    reason = None
     for other in protected:
         if other is item:
             continue
@@ -1119,11 +1142,15 @@ def promotion_clobber_reason(item, group, plan, ignored_ids=None):
             continue
         if item_source_pos(other) >= item_pos:
             continue
+        shared = item_paths.intersection(other["files"])
+        if not shared:
+            continue
+        blocked |= shared
         if items_patch_overlap(item, other):
-            return "unsafe hunk overlap with later group"
-        if item_paths.intersection(other["files"]):
-            return "full-file-state clobber risk with earlier-source later item"
-    return None
+            reason = "unsafe hunk overlap with later group"
+        elif reason is None:
+            reason = "full-file-state clobber risk with earlier-source later item"
+    return blocked, reason
 
 
 def move_failed_promotion_to_g10(item, group, report, reason, emit_now=False):
@@ -1147,22 +1174,30 @@ def abort_cherry_pick_if_needed():
     run_git(["cherry-pick", "--abort"], check=False)
 
 
+def unmerged_paths():
+    r = run_git(["diff", "--name-only", "--diff-filter=U", "--no-renames"],
+                check=False)
+    return {line for line in r.stdout.splitlines() if line}
+
+
 def probe_clean_cherry_pick(source_hash):
+    """Probe a cherry-pick; return (status, output, conflicted_paths)."""
     before = git_rev_parse("HEAD")
     r = run_git(["cherry-pick", "--no-commit", source_hash], check=False)
     combined = r.stdout + r.stderr
 
     if r.returncode == 0:
         run_git(["reset", "--hard", before])
-        return "clean", combined
+        return "clean", combined, set()
 
+    conflicted = unmerged_paths()
     abort_cherry_pick_if_needed()
     run_git(["reset", "--hard", before])
 
     if is_empty_cherry_pick_output(combined):
-        return "empty", combined
+        return "empty", combined, set()
     if is_conflict_output(combined):
-        return "conflict", combined
+        return "conflict", combined, conflicted
 
     raise RuntimeError(
         f"unexpected cherry-pick probe failure for {source_hash}\n"
@@ -1170,12 +1205,74 @@ def probe_clean_cherry_pick(source_hash):
     )
 
 
+def split_note(body, note):
+    return (body + "\n\n" + note) if body.strip() else note
+
+
+def split_failed_promotion(item, group, plan, report, blocked_paths, reason):
+    """Emit the unblocked paths of a failed promotion in `group`.
+
+    The blocked paths are carried forward as a separate "[gN]"-prefixed
+    commit at the tail, exactly as an unsplit failed promotion would be.
+    Returns True when the split was performed.
+    """
+    item_paths = set(item["files"])
+    blocked = sorted(blocked_paths & item_paths)
+    clean = sorted(item_paths - set(blocked))
+    if not blocked or not clean:
+        return False
+
+    clean_item = dict(item)
+    clean_item["files"] = clean
+    clean_item["target_group"] = group
+    clean_item["kind"] = f"split-g11-to-g{group}"
+    clean_item["body"] = split_note(
+        item["body"],
+        f"Split of {item['source_hash']}: {len(clean)} path(s) promoted to "
+        f"group {group}; {len(blocked)} path(s) deferred ({reason}).",
+    )
+    if not emit_item(clean_item, report, clean_item["kind"]):
+        return False
+    report["promoted"].append({
+        "hash": item["source_hash"],
+        "subject": item["subject"],
+        "to_group": group,
+        "reason": f"split promotion: {len(clean)} conflict-free path(s)",
+    })
+
+    rest = dict(item)
+    rest["files"] = blocked
+    rest["body"] = split_note(
+        item["body"],
+        f"Split of {item['source_hash']}: {len(blocked)} path(s) held back "
+        f"from group {group} ({reason}); the remaining {len(clean)} path(s) "
+        f"were promoted to group {group}.",
+    )
+    moved = move_failed_promotion_to_g10(
+        rest, group, report,
+        f"split at g{group}: {len(blocked)} path(s) blocked ({reason})")
+    plan["buckets"][10].append(moved)
+
+    report.setdefault("splits", []).append({
+        "hash": item["source_hash"],
+        "subject": item["subject"],
+        "group": group,
+        "clean_paths": len(clean),
+        "blocked_paths": len(blocked),
+        "reason": reason,
+    })
+    log_split(group, item["source_hash"], len(clean), len(blocked), reason)
+    return True
+
+
 def promote_from_g11(plan, group, report):
     remaining = []
     promoted = 0
     kept_conflict = 0
     skipped_empty = 0
+    split_count = 0
     resolved_same_pass_ids = set()
+    splittable = group in SPLIT_PROMOTION_GROUPS
 
     for item in plan["buckets"][11]:
         if item.get("kept_from_group") is not None:
@@ -1186,11 +1283,23 @@ def promote_from_g11(plan, group, report):
             continue
 
         if group < 10:
-            clobber_reason = promotion_clobber_reason(
+            clobber_paths, clobber_reason = promotion_clobber_paths(
                 item, group, plan, resolved_same_pass_ids)
         else:
-            clobber_reason = None
+            clobber_paths, clobber_reason = set(), None
         if clobber_reason:
+            if splittable:
+                # A clobber-guarded commit is never probed on its own, but the
+                # probe is what tells us which of the remaining paths could be
+                # promoted, so run it here purely to widen the blocked set.
+                status, _output, conflicted = probe_clean_cherry_pick(
+                    item["source_hash"])
+                blocked = clobber_paths | conflicted
+                if status != "empty" and split_failed_promotion(
+                        item, group, plan, report, blocked, clobber_reason):
+                    resolved_same_pass_ids.add(id(item))
+                    split_count += 1
+                    continue
             moved = move_failed_promotion_to_g10(
                 item, group, report,
                 f"overlap/clobber guard: {clobber_reason}; moved to g10")
@@ -1201,7 +1310,7 @@ def promote_from_g11(plan, group, report):
                 f"overlap/clobber guard: {clobber_reason}")
             continue
 
-        status, output = probe_clean_cherry_pick(item["source_hash"])
+        status, output, conflicted = probe_clean_cherry_pick(item["source_hash"])
         if status == "clean":
             moved = dict(item)
             moved["target_group"] = group
@@ -1230,6 +1339,12 @@ def promote_from_g11(plan, group, report):
             )
             resolved_same_pass_ids.add(id(item))
         else:
+            if splittable and split_failed_promotion(
+                    item, group, plan, report, conflicted,
+                    "cherry-pick probe conflicted"):
+                resolved_same_pass_ids.add(id(item))
+                split_count += 1
+                continue
             moved = move_failed_promotion_to_g10(
                 item, group, report,
                 "cherry-pick probe conflicted; moved to g10",
@@ -1240,7 +1355,7 @@ def promote_from_g11(plan, group, report):
             log_move_to_g10(item["source_hash"], group, conflict_summary(output))
 
     plan["buckets"][11] = remaining
-    log_summary(group, promoted, kept_conflict, skipped_empty)
+    log_summary(group, promoted, kept_conflict, skipped_empty, split_count)
 
 
 def drain_g10_candidates(plan, report):
@@ -1385,6 +1500,10 @@ def print_final_report(args, base_hash, input_hash, parsed_count,
     log(f"{STYLE.bold('emitted commits')}: {STYLE.green(str(len(report['emitted'])))}")
     log(f"{STYLE.bold('promoted from g11')}: {STYLE.green(str(len(report['promoted'])))}")
     log(
+        f"{STYLE.bold('split promotions')}: "
+        f"{STYLE.magenta(str(len(report.get('splits', []))))}"
+    )
+    log(
         f"{STYLE.bold('failed promotions moved to g10')}: "
         f"{STYLE.red(str(len(report['kept'])))}"
     )
@@ -1435,6 +1554,16 @@ def print_final_report(args, base_hash, input_hash, parsed_count,
         lambda item: (
             f"{fmt_sha(item['hash'])} -> {fmt_group(item['to_group'])}: "
             f"{item['subject']}"
+        ),
+    )
+    log_entries(
+        "split promotions",
+        report.get("splits", []),
+        lambda item: (
+            f"{fmt_sha(item['hash'])} {fmt_group(item['group'])}: "
+            f"{item['clean_paths']} path(s) promoted, "
+            f"{item['blocked_paths']} path(s) deferred "
+            f"({item['reason']}): {item['subject']}"
         ),
     )
     log_entries(
@@ -1493,6 +1622,7 @@ def main(argv=None):
     report = {
         "emitted": [],
         "promoted": [],
+        "splits": [],
         "kept": [],
         "skipped": [],
         "squashed": [],

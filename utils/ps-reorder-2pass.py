@@ -4,6 +4,11 @@ ps-reorder2.py
 
 Two-pass Percona Server branch reorder tool.
 
+An input commit that already sits in g2-g10 is authoritative: it is emitted
+intact in its own group, never split by path and never relocated. Only g11
+commits (and commits ahead of the g1 marker) are split into g1-g4 buckets and
+offered for promotion.
+
 Pass 1 emits g1-g4, the groups that may split or squash source commits.
 Pass 2 emits g5-g10, and at each group tries to promote matching g11 commits
 with a real git cherry-pick conflict probe. Commits that do not match or do not
@@ -671,6 +676,18 @@ def plan_commits(parsed, removed_markers, removed_paths, base_hash):
                     })
                     continue
 
+        source_group = src["source_group"]
+        if 2 <= source_group <= 10:
+            # An existing g2-g10 commit is authoritative: emit it intact in its
+            # own group. Splitting it by path would divert whatever does not
+            # match that group into g11, from where promotion can drop it into
+            # another group at its source position -- ahead of that group's own
+            # commits, and applied as a full file state that clobbers the file's
+            # later content. Only g11 commits are split and promoted.
+            append_bucket_item(
+                source_group, make_item(src, files, source_group, "source-group"))
+            continue
+
         g1, files = split_g1_paths(files)
 
         for cat, paths in g1.items():
@@ -735,12 +752,9 @@ def plan_commits(parsed, removed_markers, removed_paths, base_hash):
                 })
             continue
 
-        source_group = src["source_group"]
-        if 5 <= source_group <= 10:
-            append_bucket_item(
-                source_group, make_item(src, rest, source_group, "source-group"))
-        else:
-            append_bucket_item(11, make_item(src, rest, 11, "remaining"))
+        # Only g11 commits and commits ahead of the g1 marker reach here;
+        # g2-g10 commits were emitted intact above.
+        append_bucket_item(11, make_item(src, rest, 11, "remaining"))
 
     for bucket in plan["buckets"].values():
         bucket.sort(key=lambda item: item["source_pos"])

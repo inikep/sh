@@ -15,7 +15,7 @@ SOURCE_EXTS = {".c", ".cc", ".cpp", ".cxx"}
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Find object targets for changed source files and run make on them. "
+            "Find object targets for changed source files and run ninja on them. "
             "Use this as a cheap compile preflight before a full replay build."
         )
     )
@@ -123,7 +123,7 @@ def main() -> int:
             log_fh.write("# no object targets found\n")
             print(f"changed-object build skipped; log: {args.log}")
             return 0
-        rc = run_logged(["make", f"-j{args.jobs}", *targets], build_dir, log_fh)
+        rc = run_logged(["ninja", f"-j{args.jobs}", *targets], build_dir, log_fh)
 
     if rc == 0:
         print(f"changed-object build passed ({len(targets)} targets); log: {args.log}")

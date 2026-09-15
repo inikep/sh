@@ -23,6 +23,10 @@ DEFAULT_CMAKE_FLAGS = [
     "-DCMAKE_C_COMPILER_LAUNCHER=ccache",
     "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache",
     "-DCMAKE_CXX_FLAGS=-fpermissive",
+    "-GNinja",
+    "-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=gold",
+    "-DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=gold",
+    "-DCMAKE_MODULE_LINKER_FLAGS=-fuse-ld=gold",
 ]
 
 
@@ -42,12 +46,12 @@ def parse_args() -> argparse.Namespace:
         "--jobs",
         type=int,
         default=max(1, (os.cpu_count() or 2) * 3 // 4),
-        help="make jobs (default: 3/4 of CPUs)",
+        help="ninja jobs (default: 3/4 of CPUs)",
     )
     parser.add_argument(
         "--incremental",
         action="store_true",
-        help="Run make in the existing build directory without cleaning or reconfiguring",
+        help="Run ninja in the existing build directory without cleaning or reconfiguring",
     )
     parser.add_argument(
         "--cmake-flag",
@@ -118,7 +122,7 @@ def main() -> int:
                 print(f"CMake failed; log: {args.log}")
                 return rc
 
-        rc = run_logged(["make", f"-j{args.jobs}"], build_dir, log_fh)
+        rc = run_logged(["ninja", f"-j{args.jobs}"], build_dir, log_fh)
 
     if rc == 0:
         print(f"build passed; log: {args.log}")

@@ -51,6 +51,10 @@ DEFAULT_CMAKE_FLAGS = [
     "-DCMAKE_C_COMPILER_LAUNCHER=ccache",
     "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache",
     "-DCMAKE_CXX_FLAGS=-fpermissive",
+    "-GNinja",
+    "-DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=gold",
+    "-DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=gold",
+    "-DCMAKE_MODULE_LINKER_FLAGS=-fuse-ld=gold",
 ]
 GROUP8_MARKER_SUBJECT = "==================== MARKER: GROUP 9 — Upstream bug fixes ===================="
 MARKER_RE = re.compile(r"^\s*=+\sMARKER:")
@@ -558,7 +562,7 @@ def run_build(args: argparse.Namespace, idx: int, sha: str) -> tuple[int, Path]:
             shutil.rmtree(build_dir)
     build_dir.mkdir(parents=True, exist_ok=True)
     cmake_cmd = ["cmake", str(args.worktree.resolve()), *DEFAULT_CMAKE_FLAGS, *args.cmake_flag]
-    make_cmd = ["make", f"-j{args.jobs}"]
+    build_cmd = ["ninja", f"-j{args.jobs}"]
     env = {**os.environ, "CC": "gcc-9", "CXX": "g++-9"}
     with log.open("w") as fh:
         if args.clean_build or not (build_dir / "CMakeCache.txt").exists():
@@ -566,9 +570,9 @@ def run_build(args: argparse.Namespace, idx: int, sha: str) -> tuple[int, Path]:
             cmake = subprocess.run(cmake_cmd, cwd=build_dir, text=True, stdout=fh, stderr=subprocess.STDOUT, env=env)
             if cmake.returncode != 0:
                 return cmake.returncode, log
-        fh.write("\n$ " + " ".join(make_cmd) + "\n\n")
-        make = subprocess.run(make_cmd, cwd=build_dir, text=True, stdout=fh, stderr=subprocess.STDOUT, env=env)
-        return make.returncode, log
+        fh.write("\n$ " + " ".join(build_cmd) + "\n\n")
+        build = subprocess.run(build_cmd, cwd=build_dir, text=True, stdout=fh, stderr=subprocess.STDOUT, env=env)
+        return build.returncode, log
 
 
 def should_build(

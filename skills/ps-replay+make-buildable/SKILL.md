@@ -133,7 +133,7 @@ Default to the low-token replay mode unless the user asks for detailed narration
 Use an out-of-tree build. Default configuration:
 
 ```sh
-CC=gcc-9 CXX=g++-9 cmake .. \
+CC=gcc-9 CXX=g++-9 cmake -GNinja .. \
   -DCMAKE_BUILD_TYPE=Debug \
   -DCMAKE_C_COMPILER_LAUNCHER=ccache \
   -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
@@ -146,9 +146,22 @@ CC=gcc-9 CXX=g++-9 cmake .. \
   -DENABLE_DOWNLOADS=1 \
   -DWITH_READLINE=system \
   -DCMAKE_CXX_FLAGS=-fpermissive \
+  -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=gold \
+  -DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=gold \
+  -DCMAKE_MODULE_LINKER_FLAGS=-fuse-ld=gold \
   $EXTRA_CMAKE_FLAGS
-make -j$(( $(nproc) * 3 / 4 ))
+ninja -j$(( $(nproc) * 3 / 4 ))
 ```
+
+Build with the Ninja generator and the GNU gold linker. Post-checkpoint commits typically compile
+one or two translation units but relink every dependent target, including the multi-hundred-MB Debug
+`mysqld`; with Make plus the default BFD linker that link step dominates and costs tens of minutes
+per commit. Ninja plus gold cuts it several-fold without changing the compiler, the sources, or the
+set of targets built, so a PASS still means the same thing.
+
+The generator cannot be switched inside an existing build tree. If `$BUILD_DIR` was configured with
+another generator, delete and reconfigure it; ccache absorbs most of the one-time recompile. Record
+the switch and the source index it happened at in `$REPORT_FILE`.
 
 Pass task-requested build flags through `$EXTRA_CMAKE_FLAGS` or equivalent CMake variables, and record them. Store each build log under `$RUN_DIR/logs/` with source index, source SHA, output SHA, and attempt number.
 
@@ -437,9 +450,9 @@ Allowed helpers:
 - `ps_replay_scan_range.py`: preflight scan of source/reference ranges for markers, squash/snap-like commits, and reference-only commits. Use during the reference-shape audit.
 - `ps_replay_range_feature_gate.py`: range-level feature audit comparing selected source commits against `$DESTINATION_BASE_BRANCH..$REFERENCE_BRANCH`. Use exactly twice: once before replay starts for the pre-Group-9 range (`--start 1 --end $((GROUP9_INDEX - 1))`) and once before post-Group-8 replay for the rest; consult `decision_hint` before each non-marker commit in the corresponding range. This is the only allowed feature-gate helper in this skill.
 - `ps_replay_batch.py`: bounded replay driver. It must use plain `git cherry-pick <sha>` for every non-marker commit, preserve marker commits with `git commit --allow-empty`, stop on conflicts/build failures/missing build records, and HP-8 check post-Group-8 source/plugin commits. For clean plain cherry-picks it checks the resulting output commit's changed paths; for conflicts, do the staged-path HP-8 check manually before `git cherry-pick --continue` unless the optional fast path above resolved only configured reference-absent conflicts. Use `--classify-only` before trusting bucket decisions. Pass the range-gate evidence files with `--feature-gate` (repeatable: pre-Group-9 and post-Group-8 files); the driver then stops before cherry-picking any commit whose decision hint requires manual review (pre-Group-9: `needs-review` and `partial-match-review`; post-Group-8: `needs-review`) unless explicitly accelerated with `--gate-auto-apply-path-glob` and `--gate-auto-apply-unmatched-identifier`, or already reviewed with `--gate-decided-apply <idx>` / `--gate-decided-apply-file <file>`. After inspecting a stopped commit, restart with a decided-apply option to apply it, or handle the skip/hunk-drop manually and restart after that index. For repeated audited absent packaging paths, pass `--auto-drop-reference-absent-conflict-glob <glob>` and `--ledger-file $RUN_DIR/ledger.tsv`; the driver may auto-`git rm` only conflicted paths that match the globs and are absent from `$REFERENCE_BRANCH`.
-- `ps_replay_auto_loop.sh`: compatibility wrapper around `ps_replay_batch.py`; it must inherit the same stop/build/cross-check behavior. Set `PS_REPLAY_CMAKE_FLAGS='-DCMAKE_CXX_FLAGS=-fpermissive'` or pass `--cmake-flag` to the Python helper for task-specific build flags. Set `PS_REPLAY_FEATURE_GATES` (whitespace-separated gate JSON paths), `PS_REPLAY_GATE_DECIDED_APPLY` (whitespace-separated indexes), and/or `PS_REPLAY_GATE_DECIDED_APPLY_FILE` to forward the feature-gate options. Optional acceleration env vars: `PS_REPLAY_GATE_AUTO_APPLY_PATH_GLOBS`, `PS_REPLAY_GATE_AUTO_APPLY_UNMATCHED_IDENTIFIERS`, `PS_REPLAY_AUTO_DROP_CONFLICT_GLOBS`, and `PS_REPLAY_LEDGER_FILE`. It takes exactly two positional arguments, `START END`, and passes nothing else through; every other option must arrive as one of these env vars, or call `ps_replay_batch.py` directly.
-- `ps_replay_build.py`: standard CMake/build runner that writes logs.
-- `ps_replay_changed_object_build.py`: cheap preflight that finds CMake object targets for changed C/C++ files and runs `make` on those objects. Use before full builds to shorten compile-error loops; full build PASS is still required.
+- `ps_replay_auto_loop.sh`: compatibility wrapper around `ps_replay_batch.py`; it must inherit the same stop/build/cross-check behavior (including the Ninja generator and gold linker defaults). Set `PS_REPLAY_CMAKE_FLAGS='-DCMAKE_CXX_FLAGS=-fpermissive'` or pass `--cmake-flag` to the Python helper for task-specific build flags. Set `PS_REPLAY_FEATURE_GATES` (whitespace-separated gate JSON paths), `PS_REPLAY_GATE_DECIDED_APPLY` (whitespace-separated indexes), and/or `PS_REPLAY_GATE_DECIDED_APPLY_FILE` to forward the feature-gate options. Optional acceleration env vars: `PS_REPLAY_GATE_AUTO_APPLY_PATH_GLOBS`, `PS_REPLAY_GATE_AUTO_APPLY_UNMATCHED_IDENTIFIERS`, `PS_REPLAY_AUTO_DROP_CONFLICT_GLOBS`, and `PS_REPLAY_LEDGER_FILE`. It takes exactly two positional arguments, `START END`, and passes nothing else through; every other option must arrive as one of these env vars, or call `ps_replay_batch.py` directly.
+- `ps_replay_build.py`: standard CMake/Ninja build runner that writes logs. It configures with `-GNinja` and the gold linker flags and builds with `ninja -j<N>`.
+- `ps_replay_changed_object_build.py`: cheap preflight that finds CMake object targets for changed C/C++ files and runs `ninja` on those objects. Use before full builds to shorten compile-error loops; full build PASS is still required.
 - `ps_replay_errors.py`: extracts likely root-cause diagnostics from large build logs.
 - `ps_replay_recover_cherry_pick.py`: restores `CHERRY_PICK_HEAD` and `MERGE_MSG` when the cherry-pick pseudo-files are lost while the index/worktree still hold the interrupted pick. It recovers cherry-pick state only; it never resolves files. Use it before hand-creating a replacement commit.
 - `ps_replay_conflict_triage.py`: prints conflict status and may stage only files whose conflict regions already match safely; remaining files require manual hunk review. Requires `--reference`.

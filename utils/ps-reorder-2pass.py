@@ -911,14 +911,39 @@ def run_git_bytes(args, check=True):
 
 
 def item_patch_groups(item):
-    """[(source_hash, paths)] for the item, honouring per-file source overrides."""
+    """[(source_hash, paths)] steps for the item, in application order.
+
+    A path squashed forward by add_file_source_override() carries a chain of
+    sources in source_history_by_file: the item's own source first, then every
+    override. Under snapshot emission only the last one mattered, because
+    checking it out reproduces the file's final state. A patch is not a state,
+    so every delta in the chain has to be applied and in order -- taking only
+    the last source drops the item's own contribution to that file, which is
+    how e.g. the PS-7019 block went missing from mysql-test/r/join.result and
+    had to be restored by the final reconciliation commit.
+    """
+    history = item.get("source_history_by_file") or {}
     source_by_file = item.get("source_by_file") or {}
-    if not source_by_file:
+    if not history and not source_by_file:
         return [(item["source_hash"], sorted(set(item["files"])))]
-    groups = defaultdict(list)
+
+    chains = {}
     for path in item["files"]:
-        groups[source_by_file.get(path, item["source_hash"])].append(path)
-    return [(src, sorted(set(paths))) for src, paths in sorted(groups.items())]
+        chain = history.get(path)
+        if not chain:
+            chain = [source_by_file.get(path, item["source_hash"])]
+        chains[path] = chain
+
+    steps = []
+    depth = max((len(chain) for chain in chains.values()), default=0)
+    for index in range(depth):
+        groups = defaultdict(list)
+        for path, chain in chains.items():
+            if index < len(chain):
+                groups[chain[index]].append(path)
+        for source_hash in sorted(groups):
+            steps.append((source_hash, sorted(groups[source_hash])))
+    return steps
 
 
 def apply_item_patch(item):
@@ -1385,6 +1410,10 @@ def probe_item_emission(item):
     try:
         for source_hash, paths in item_patch_groups(item):
             for path in paths:
+                if path in conflicted:
+                    # An earlier link of this path's source chain already
+                    # failed; the rest of the chain has nothing to build on.
+                    continue
                 patch = run_git_bytes([
                     "diff", "--full-index", "--binary", "--no-color",
                     f"{source_hash}^", source_hash, "--", path,

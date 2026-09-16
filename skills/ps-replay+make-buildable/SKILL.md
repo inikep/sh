@@ -145,6 +145,7 @@ CC=gcc-9 CXX=g++-9 cmake -GNinja .. \
   -DWITH_PAM=ON \
   -DENABLE_DOWNLOADS=1 \
   -DWITH_READLINE=system \
+  -DWITH_CURL=system \
   -DCMAKE_CXX_FLAGS=-fpermissive \
   -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=gold \
   -DCMAKE_SHARED_LINKER_FLAGS=-fuse-ld=gold \
@@ -158,6 +159,20 @@ one or two translation units but relink every dependent target, including the mu
 `mysqld`; with Make plus the default BFD linker that link step dominates and costs tens of minutes
 per commit. Ninja plus gold cuts it several-fold without changing the compiler, the sources, or the
 set of targets built, so a PASS still means the same thing.
+
+`-DWITH_CURL=system` is required, not optional. Upstream sets `WITH_CURL_DEFAULT` to `system` only
+under `IF(WITH_INTERNAL AND UNIX)`, so a normal replay build resolves it to `none`, leaves `CURL_FOUND`
+unset, and `plugin/keyring_vault/CMakeLists.txt` then aborts configure with
+`CHECK_IF_LIB_FOUND(CURL "keyring_vault" FATAL_ERROR)` as soon as the keyring_vault commit lands. That
+is a build-environment gap, not a replay defect: do not re-add source hunks to `cmake/curl.cmake` to
+work around it when the reference keeps the file at its upstream form. The system curl development
+headers must be installed; on Debian/Ubuntu they live at the multiarch path
+`/usr/include/<triplet>/curl/curl.h`, so check with `dpkg -L libcurl4-openssl-dev` or
+`FIND_PACKAGE(CURL)` output rather than testing `/usr/include/curl/curl.h`.
+
+If `$BUILD_DIR` was already configured without it, the cached `WITH_CURL:STRING=none` wins over the new
+default; re-run `cmake -DWITH_CURL=system .` inside the build tree to override the cache in place
+instead of deleting the tree.
 
 The generator cannot be switched inside an existing build tree. If `$BUILD_DIR` was configured with
 another generator, delete and reconfigure it; ccache absorbs most of the one-time recompile. Record

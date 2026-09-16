@@ -48,6 +48,7 @@ DEFAULT_CMAKE_FLAGS = [
     "-DWITH_PAM=ON",
     "-DENABLE_DOWNLOADS=1",
     "-DWITH_READLINE=system",
+    "-DWITH_CURL=system",
     "-DCMAKE_C_COMPILER_LAUNCHER=ccache",
     "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache",
     "-DCMAKE_CXX_FLAGS=-fpermissive",

@@ -528,6 +528,52 @@ def describe_conflicts(worktree: Path, reference: str) -> list[Path]:
     return paths
 
 
+CMAKE_STAMP_NAME = ".ps_replay_cmake_stamp"
+
+
+def is_cmake_path(path: str) -> bool:
+    return path.endswith(".cmake") or Path(path).name in {"CMakeLists.txt", "CMakeCache.txt"}
+
+
+def write_cmake_stamp(worktree: Path, build_dir: Path) -> None:
+    head = git(worktree, ["rev-parse", "HEAD"], check=False)
+    if head.returncode == 0:
+        (build_dir / CMAKE_STAMP_NAME).write_text(head.stdout.strip() + "\n")
+
+
+def needs_cmake(worktree: Path, build_dir: Path) -> tuple[bool, str]:
+    """Decide whether cmake must run before ninja in an existing build tree.
+
+    MySQL globs `plugin/*/CMakeLists.txt` and similar directory lists at
+    configure time, so a commit that adds or edits a CMake input is invisible
+    to an existing `build.ninja`: ninja then succeeds after compiling nothing
+    from that commit, which looks like a PASS but verifies nothing. Reconfigure
+    whenever the build tree is unconfigured or a CMake input changed since the
+    last configure; otherwise reuse the existing configuration.
+    """
+    if not (build_dir / "CMakeCache.txt").exists():
+        return True, "no CMakeCache.txt"
+    stamp = build_dir / CMAKE_STAMP_NAME
+    last = stamp.read_text().strip() if stamp.exists() else ""
+    if not last:
+        return True, "no cmake configure stamp"
+    head = git(worktree, ["rev-parse", "HEAD"], check=False)
+    if head.returncode != 0:
+        return True, "cannot resolve worktree HEAD"
+    if head.stdout.strip() == last:
+        return False, ""
+    diff = git(worktree, ["diff", "--name-only", last, "HEAD"], check=False)
+    if diff.returncode != 0:
+        return True, f"cannot diff {last[:12]}..HEAD"
+    changed = [path for path in diff.stdout.splitlines() if path and is_cmake_path(path)]
+    if changed:
+        shown = ", ".join(changed[:5])
+        if len(changed) > 5:
+            shown += f", +{len(changed) - 5} more"
+        return True, f"cmake inputs changed since {last[:12]}: {shown}"
+    return False, ""
+
+
 def run_build(args: argparse.Namespace, idx: int, sha: str) -> tuple[int, Path]:
     if args.build_dir is None or args.log_dir is None:
         raise RuntimeError("build-dir and log-dir are required for replay")
@@ -547,10 +593,12 @@ def run_build(args: argparse.Namespace, idx: int, sha: str) -> tuple[int, Path]:
             "--jobs",
             str(args.jobs),
         ]
-        if args.clean_build or not (args.build_dir.resolve() / "CMakeCache.txt").exists():
-            pass
-        else:
+        if not args.clean_build:
+            reconfigure, reason = needs_cmake(args.worktree.resolve(), args.build_dir.resolve())
             cmd.append("--incremental")
+            if reconfigure:
+                cmd.append("--reconfigure")
+                print(f"[{idx}] re-running cmake ({reason})", flush=True)
         for flag in args.cmake_flag:
             cmd.append(f"--cmake-flag={flag}")
         return subprocess.run(cmd, text=True).returncode, log
@@ -565,12 +613,16 @@ def run_build(args: argparse.Namespace, idx: int, sha: str) -> tuple[int, Path]:
     cmake_cmd = ["cmake", str(args.worktree.resolve()), *DEFAULT_CMAKE_FLAGS, *args.cmake_flag]
     build_cmd = ["ninja", f"-j{args.jobs}"]
     env = {**os.environ, "CC": "gcc-9", "CXX": "g++-9"}
+    reconfigure, reason = needs_cmake(args.worktree.resolve(), build_dir)
     with log.open("w") as fh:
-        if args.clean_build or not (build_dir / "CMakeCache.txt").exists():
+        if reconfigure:
+            print(f"[{idx}] re-running cmake ({reason})", flush=True)
+            fh.write(f"# cmake: {reason}\n")
             fh.write("$ " + " ".join(cmake_cmd) + "\n\n")
             cmake = subprocess.run(cmake_cmd, cwd=build_dir, text=True, stdout=fh, stderr=subprocess.STDOUT, env=env)
             if cmake.returncode != 0:
                 return cmake.returncode, log
+            write_cmake_stamp(args.worktree.resolve(), build_dir)
         fh.write("\n$ " + " ".join(build_cmd) + "\n\n")
         build = subprocess.run(build_cmd, cwd=build_dir, text=True, stdout=fh, stderr=subprocess.STDOUT, env=env)
         return build.returncode, log

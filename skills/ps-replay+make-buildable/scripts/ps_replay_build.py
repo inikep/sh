@@ -55,6 +55,11 @@ def parse_args() -> argparse.Namespace:
         help="Run ninja in the existing build directory without cleaning or reconfiguring",
     )
     parser.add_argument(
+        "--reconfigure",
+        action="store_true",
+        help="With --incremental, re-run cmake in the existing build directory before ninja",
+    )
+    parser.add_argument(
         "--cmake-flag",
         action="append",
         default=[],
@@ -79,6 +84,22 @@ def ensure_safe_build_dir(build_dir: Path, allow_non_tmp: bool) -> None:
             f"refusing to clean build directory outside /tmp: {resolved}; "
             "pass --allow-non-tmp-build-dir to override"
         ) from exc
+
+
+CMAKE_STAMP_NAME = ".ps_replay_cmake_stamp"
+
+
+def write_cmake_stamp(worktree: Path, build_dir: Path) -> None:
+    """Record the configured commit so callers can skip redundant reconfigures."""
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    if head.returncode == 0:
+        (build_dir / CMAKE_STAMP_NAME).write_text(head.stdout.strip() + "\n")
 
 
 def run_logged(command: list[str], cwd: Path, log_fh) -> int:
@@ -116,12 +137,13 @@ def main() -> int:
         raise SystemExit(f"incremental build directory does not exist: {build_dir}")
 
     with args.log.open("w") as log_fh:
-        if not args.incremental:
+        if not args.incremental or args.reconfigure:
             cmake_cmd = ["cmake", str(worktree), *DEFAULT_CMAKE_FLAGS, *args.cmake_flag]
             rc = run_logged(cmake_cmd, build_dir, log_fh)
             if rc != 0:
                 print(f"CMake failed; log: {args.log}")
                 return rc
+            write_cmake_stamp(worktree, build_dir)
 
         rc = run_logged(["ninja", f"-j{args.jobs}"], build_dir, log_fh)
 

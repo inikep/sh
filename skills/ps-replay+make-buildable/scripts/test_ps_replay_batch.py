@@ -3,6 +3,8 @@
 
 from pathlib import Path
 from unittest.mock import patch
+import subprocess
+import tempfile
 import unittest
 
 import ps_replay_batch
@@ -437,6 +439,86 @@ class FeatureGateTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(paths, [])
         self.assertEqual(reasons, ["build-ps/ubuntu/control exists on reference"])
+
+
+class NeedsCmakeTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.worktree = Path(self.tmp.name) / "wt"
+        self.build_dir = Path(self.tmp.name) / "build"
+        self.worktree.mkdir()
+        self.build_dir.mkdir()
+        self.git("init", "-q", ".")
+        self.git("config", "user.email", "replay@example.com")
+        self.git("config", "user.name", "replay")
+        self.commit("sql/mysqld.cc", "int main() {}")
+
+    def git(self, *args: str) -> None:
+        subprocess.run(["git", *args], cwd=self.worktree, check=True, stdout=subprocess.DEVNULL)
+
+    def commit(self, relpath: str, body: str) -> None:
+        path = self.worktree / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body)
+        self.git("add", "-A")
+        self.git("commit", "-qm", relpath)
+
+    def configured(self) -> None:
+        (self.build_dir / "CMakeCache.txt").write_text("")
+        ps_replay_batch.write_cmake_stamp(self.worktree, self.build_dir)
+
+    def test_missing_cache_requires_cmake(self):
+        needed, reason = ps_replay_batch.needs_cmake(self.worktree, self.build_dir)
+        self.assertTrue(needed)
+        self.assertEqual(reason, "no CMakeCache.txt")
+
+    def test_cache_without_stamp_requires_cmake(self):
+        (self.build_dir / "CMakeCache.txt").write_text("")
+        needed, reason = ps_replay_batch.needs_cmake(self.worktree, self.build_dir)
+        self.assertTrue(needed)
+        self.assertEqual(reason, "no cmake configure stamp")
+
+    def test_unresolvable_stamp_requires_cmake(self):
+        self.configured()
+        (self.build_dir / ps_replay_batch.CMAKE_STAMP_NAME).write_text("deadbeef\n")
+        needed, reason = ps_replay_batch.needs_cmake(self.worktree, self.build_dir)
+        self.assertTrue(needed)
+        self.assertIn("cannot diff", reason)
+
+    def test_source_only_commits_reuse_configuration(self):
+        self.configured()
+        self.commit("sql/item.cc", "int x;")
+        self.assertEqual(ps_replay_batch.needs_cmake(self.worktree, self.build_dir), (False, ""))
+
+    def test_new_plugin_cmakelists_requires_cmake(self):
+        self.configured()
+        self.commit("plugin/foo/CMakeLists.txt", "MYSQL_ADD_PLUGIN(foo)")
+        needed, reason = ps_replay_batch.needs_cmake(self.worktree, self.build_dir)
+        self.assertTrue(needed)
+        self.assertIn("plugin/foo/CMakeLists.txt", reason)
+
+    def test_cmake_module_change_requires_cmake(self):
+        self.configured()
+        self.commit("cmake/curl.cmake", "# module")
+        needed, reason = ps_replay_batch.needs_cmake(self.worktree, self.build_dir)
+        self.assertTrue(needed)
+        self.assertIn("cmake/curl.cmake", reason)
+
+    def test_deferred_cmake_change_still_triggers_later_build(self):
+        self.configured()
+        self.commit("cmake/curl.cmake", "# module")
+        self.commit("sql/item.cc", "int x;")
+        needed, reason = ps_replay_batch.needs_cmake(self.worktree, self.build_dir)
+        self.assertTrue(needed)
+        self.assertIn("cmake/curl.cmake", reason)
+
+    def test_reconfigure_clears_the_requirement(self):
+        self.configured()
+        self.commit("plugin/foo/CMakeLists.txt", "MYSQL_ADD_PLUGIN(foo)")
+        self.assertTrue(ps_replay_batch.needs_cmake(self.worktree, self.build_dir)[0])
+        ps_replay_batch.write_cmake_stamp(self.worktree, self.build_dir)
+        self.assertEqual(ps_replay_batch.needs_cmake(self.worktree, self.build_dir), (False, ""))
 
 
 if __name__ == "__main__":

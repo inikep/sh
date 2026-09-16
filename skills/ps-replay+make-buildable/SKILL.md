@@ -160,6 +160,22 @@ one or two translation units but relink every dependent target, including the mu
 per commit. Ninja plus gold cuts it several-fold without changing the compiler, the sources, or the
 set of targets built, so a PASS still means the same thing.
 
+Re-run `cmake` whenever a CMake input changed, not only when the build tree is missing. MySQL globs
+`plugin/*/CMakeLists.txt` (and similar directory lists) at configure time, so a commit that adds a
+new plugin or storage-engine directory is invisible to an existing `build.ninja`: `ninja` then
+succeeds after compiling nothing from that commit, which looks like a PASS but verifies nothing. The
+symptom is a build log with only a handful of trivial targets for a commit that added many source
+files - check the target count against the commit's file list before accepting such a PASS, and
+confirm the new component appears in `build.ninja`.
+
+`ps_replay_batch.py` configures when `CMakeCache.txt` is absent, and otherwise when any
+`CMakeLists.txt` or `*.cmake` path changed since the last configure. It tracks that with
+`<build-dir>/.ps_replay_cmake_stamp`, which `ps_replay_build.py` writes with the worktree HEAD after
+every successful `cmake` run; a missing or unreadable stamp forces a reconfigure. Because the stamp
+is a commit, not a single build, deferred no-build batches still trigger one reconfigure at the next
+build they are folded into. `ps_replay_build.py --incremental --reconfigure` does the same thing by
+hand: `cmake` plus `ninja` in the existing build tree, without the clean-build wipe.
+
 `-DWITH_CURL=system` is required, not optional. Upstream sets `WITH_CURL_DEFAULT` to `system` only
 under `IF(WITH_INTERNAL AND UNIX)`, so a normal replay build resolves it to `none`, leaves `CURL_FOUND`
 unset, and `plugin/keyring_vault/CMakeLists.txt` then aborts configure with

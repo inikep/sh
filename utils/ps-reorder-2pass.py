@@ -1,8 +1,44 @@
 #!/usr/bin/env python3
 """
-ps-reorder2.py
+ps-reorder-2pass.py
 
 Two-pass Percona Server branch reorder tool.
+
+An emitted commit materializes its content as a patch, not as a whole-file
+state snapshot. A snapshot never conflicts, but it also means a commit emitted
+later silently reverts any earlier commit that touches the same path with an
+older source state, which is why promotion_clobber_paths() used to reject
+promotions that would in fact apply cleanly ("full-file-state clobber risk with
+earlier-source later item"). Instead the source commit's delta for the item's
+paths is applied with `git apply --3way --index`, i.e. a per-path cherry-pick,
+so a commit contributes only its own hunks and does not carry the rest of the
+file back in time. When a 3-way apply conflicts the item falls back to a
+whole-file snapshot and the fallback is recorded in the final report.
+
+Because the clobber risk only exists for paths that a later commit will emit as
+a snapshot, the guard is relaxed accordingly: with --patch-emit=all nothing is
+snapshot-emitted, so only a real hunk overlap can block a promotion.
+
+The promotion probe is item-scoped. Probing the whole source commit with
+`git cherry-pick --no-commit` fails for any commit that pass 1 already split:
+the half emitted in g2-g4 is re-applied on top of itself and reports a conflict
+on a path the item no longer owns. The probe applies only the item's own paths,
+exactly as emission will.
+
+Commits sitting in the input's g1 region are never replayed: g1 is entirely
+this tool's own product (the "Squash: ..." commits and "Remove files deleted by
+input branch") and is regenerated from scratch on every run, so replaying it
+would emit a second, stale copy of each synthetic commit.
+
+A commit that pass 1 split into g4 plus a remainder keeps its MyRocks identity:
+the remainder is offered to g7 even when no token survives in its subject or
+paths, and if it cannot be promoted it lands in g10 carrying "[myrocks] ".
+
+--patch-emit=all (default) patch-emits every item. --patch-emit=promoted
+patch-emits only relocated content, which is every item whose target group
+differs from its source group; note that this alone does not unblock a
+promotion that is guarded by authoritative g2-g10 commits, because those are
+still snapshot-emitted.
 
 An input commit that already sits in g2-g10 is authoritative: it is emitted
 intact in its own group, never split by path and never relocated. Only g11
@@ -37,6 +73,16 @@ SPLIT_PROMOTION_GROUPS = frozenset({5})
 MAX_SUBJECT_LEN = 91
 BATCH_SIZE = 400
 OUTPUT_STAT_LINE_LEN = 104
+
+# Subject prefix for the g10 remainder of a commit whose MyRocks paths were
+# split off into g4, so the leftover non-MyRocks hunks stay identifiable.
+MYROCKS_PREFIX = "[myrocks] "
+
+# How emitted items materialize their content:
+#   "promoted" - patch-emit relocated items only (target group != source group)
+#   "all"      - patch-emit every item
+PATCH_EMIT_CHOICES = ("promoted", "all")
+EMIT_CONFIG = {"patch_emit": "all"}
 
 
 GROUPS = {
@@ -183,6 +229,15 @@ def log_section(message):
 
 def log_marker(group, subject):
     log(f"{STYLE.cyan('marker')} {fmt_group(group)}: {STYLE.dim(subject)}")
+
+
+def log_patch_fallback(group, source_hash, subject):
+    prefix = f"patch-fallback g{group} {source_hash[:12]} "
+    subject = truncate_subject_for_prefix(prefix, subject)
+    log(
+        f"{STYLE.yellow('patch-fallback')} {fmt_group(group)} "
+        f"{fmt_sha(source_hash)} {STYLE.dim(subject)}"
+    )
 
 
 def log_emit(group, source_hash, new_hash, subject):
@@ -572,7 +627,13 @@ def matches_target_group(item, group):
             not is_build_only_changes(paths)
         )
     if group == 7:
-        return is_kernel_subject_or_path(subject, paths)
+        # The remainder of a commit whose MyRocks paths were split off into g4
+        # belongs with the kernel changes even when neither the subject nor any
+        # surviving path still carries a tokudb/rocksdb token -- g4 consumed
+        # every path that identified it. If the g7 promotion then conflicts it
+        # is moved to g10 like any other failed promotion, where emit_item()
+        # gives it the "[myrocks] " prefix.
+        return item.get("split_g4", False) or is_kernel_subject_or_path(subject, paths)
     if group == 8:
         return is_build_only_changes(paths)
     if group == 9:
@@ -717,6 +778,29 @@ def plan_commits(parsed, removed_markers, removed_paths, base_hash):
                 plan["g1_first_info"][cat] = src["info"]
                 plan["g1_first_pos"][cat] = src["pos"]
 
+        if source_group == 1:
+            # A g1 source commit is never replayed. The input's g1 region only
+            # ever holds this tool's own previous output -- the "Squash: ..."
+            # commits and "Remove files deleted by input branch" -- and all of
+            # that is regenerated from scratch on every run: squash categories
+            # from the loop above, deletions from base_removed_files. Replaying
+            # one emits a second copy of a synthetic commit, e.g. a stale
+            # "Remove files deleted by input branch" still advertising the path
+            # count of the previous run. Its paths have already been collected
+            # into the g1 categories; anything left over is dropped here.
+            reason = "g1 source commit; g1 content is regenerated from scratch"
+            if files:
+                reason += (
+                    f" ({len(files)} path(s) matched no g1 squash category "
+                    "and were dropped)"
+                )
+            plan["removed"].append({
+                "hash": src["hash"],
+                "subject": src["info"]["subject"],
+                "reason": reason,
+            })
+            continue
+
         if is_result_only_commit(files):
             result_files_before_squash = list(files)
             files, squashed = squash_result_files_into_previous(
@@ -775,7 +859,12 @@ def plan_commits(parsed, removed_markers, removed_paths, base_hash):
 
         # Only g11 commits and commits ahead of the g1 marker reach here;
         # g2-g10 commits were emitted intact above.
-        append_bucket_item(11, make_item(src, rest, 11, "remaining"))
+        rest_item = make_item(src, rest, 11, "remaining")
+        if g4:
+            # The MyRocks paths of this commit were split off into g4; mark the
+            # remainder so it is recognizable if it ends up in g10.
+            rest_item["split_g4"] = True
+        append_bucket_item(11, rest_item)
 
     for bucket in plan["buckets"].values():
         bucket.sort(key=lambda item: item["source_pos"])
@@ -809,6 +898,71 @@ def remove_paths(paths):
     for batch in batched(paths):
         run_git(["rm", "-rf", "--quiet", "--ignore-unmatch", "--"] + batch,
                 check=False)
+
+
+def run_git_bytes(args, check=True):
+    r = subprocess.run(["git"] + list(args), capture_output=True)
+    if check and r.returncode != 0:
+        raise RuntimeError(
+            f"git {' '.join(args)} failed: "
+            f"{r.stderr.decode('utf-8', 'replace')[:400]}"
+        )
+    return r.stdout
+
+
+def item_patch_groups(item):
+    """[(source_hash, paths)] for the item, honouring per-file source overrides."""
+    source_by_file = item.get("source_by_file") or {}
+    if not source_by_file:
+        return [(item["source_hash"], sorted(set(item["files"])))]
+    groups = defaultdict(list)
+    for path in item["files"]:
+        groups[source_by_file.get(path, item["source_hash"])].append(path)
+    return [(src, sorted(set(paths))) for src, paths in sorted(groups.items())]
+
+
+def apply_item_patch(item):
+    """Apply the item's source delta for its paths with a 3-way merge.
+
+    Returns True when everything applied. On False the index/worktree may hold
+    a partial application and the caller must reset before doing anything else.
+    """
+    for source_hash, paths in item_patch_groups(item):
+        for batch in batched(paths):
+            patch = run_git_bytes([
+                "diff", "--full-index", "--binary", "--no-color",
+                f"{source_hash}^", source_hash, "--",
+            ] + batch)
+            if not patch.strip():
+                continue
+            r = subprocess.run(
+                ["git", "apply", "--3way", "--index", "--whitespace=nowarn"],
+                input=patch, capture_output=True)
+            if r.returncode != 0 or unmerged_paths():
+                return False
+    return True
+
+
+def reset_worktree_to_head():
+    run_git(["reset", "--hard", "HEAD"], check=False)
+
+
+def item_emission_mode(item):
+    if EMIT_CONFIG["patch_emit"] == "all":
+        return "patch"
+    if item.get("source_group") != item.get("target_group"):
+        return "patch"
+    return "state"
+
+
+def item_will_state_emit(item, bucket_group):
+    """Would this planned item overwrite whole files when it is emitted?"""
+    if EMIT_CONFIG["patch_emit"] == "all":
+        return False
+    if bucket_group == 11:
+        # Still unplaced: it may be promoted (patch) or stay (snapshot).
+        return True
+    return item.get("source_group") == bucket_group
 
 
 def apply_file_states(treeish, paths):
@@ -871,13 +1025,33 @@ def emit_marker(group):
 
 
 def emit_item(item, report, label):
-    apply_item_file_states(item)
+    if item.get("target_group") == 10 and item.get("split_g4"):
+        item["subject"] = add_myrocks_prefix(item["subject"])
+    if item_emission_mode(item) == "patch":
+        if apply_item_patch(item):
+            item["emitted_as"] = "patch"
+        else:
+            reset_worktree_to_head()
+            item["emitted_as"] = "patch-fallback-state"
+            report.setdefault("patch_fallbacks", []).append({
+                "hash": item["source_hash"],
+                "subject": item["subject"],
+                "group": item["target_group"],
+                "paths": len(item["files"]),
+            })
+            log_patch_fallback(item["target_group"], item["source_hash"],
+                               item["subject"])
+            apply_item_file_states(item)
+    else:
+        item["emitted_as"] = "state"
+        apply_item_file_states(item)
     ok = commit_with_info(item["info"], item["subject"], item["body"])
     entry = {
         "hash": item["source_hash"],
         "subject": item["subject"],
         "group": item["target_group"],
         "label": label,
+        "emitted_as": item["emitted_as"],
     }
     if ok:
         new_head = git_rev_parse("HEAD")
@@ -994,6 +1168,12 @@ def add_failed_promotion_prefix(subject, group):
     if subject.startswith(prefix):
         return subject
     return f"{prefix}{subject}"
+
+
+def add_myrocks_prefix(subject):
+    if subject.startswith(MYROCKS_PREFIX):
+        return subject
+    return f"{MYROCKS_PREFIX}{subject}"
 
 
 def item_source_pos(item):
@@ -1129,13 +1309,14 @@ def promotion_clobber_paths(item, group, plan, ignored_ids=None):
 
     protected = []
     for protected_group in range(group + 1, 11):
-        protected.extend(plan["buckets"][protected_group])
-    protected.extend(plan["buckets"][11])
+        protected.extend(
+            (protected_group, other) for other in plan["buckets"][protected_group])
+    protected.extend((11, other) for other in plan["buckets"][11])
 
     item_paths = set(item["files"])
     blocked = set()
     reason = None
-    for other in protected:
+    for other_group, other in protected:
         if other is item:
             continue
         if id(other) in ignored_ids:
@@ -1144,6 +1325,16 @@ def promotion_clobber_paths(item, group, plan, ignored_ids=None):
             continue
         shared = item_paths.intersection(other["files"])
         if not shared:
+            continue
+        if not item_will_state_emit(other, other_group):
+            # A patch-emitted later item contributes only its own hunks, so it
+            # cannot clobber us. Ordering interference between two patches is a
+            # merge question, and items_patch_overlap() cannot answer it: it
+            # compares line ranges taken from two different base trees, so two
+            # commits hundreds of apart in the source list "overlap" whenever
+            # their unrelated hunks happen to land on similar line numbers.
+            # Leave the verdict to probe_item_emission(), which performs the
+            # real 3-way apply.
             continue
         blocked |= shared
         if items_patch_overlap(item, other):
@@ -1168,6 +1359,53 @@ def move_failed_promotion_to_g10(item, group, report, reason, emit_now=False):
         "reason": reason,
     })
     return moved
+
+
+def restore_path(treeish, path):
+    """Put one path back to its `treeish` state, clearing any unmerged entry."""
+    exists = run_git(["cat-file", "-e", f"{treeish}:{path}"], check=False).returncode == 0
+    run_git(["reset", "--quiet", treeish, "--", path], check=False)
+    if exists:
+        run_git(["checkout", "--force", treeish, "--", path], check=False)
+    else:
+        run_git(["rm", "-f", "--quiet", "--ignore-unmatch", "--", path], check=False)
+
+
+def probe_item_emission(item):
+    """Probe exactly the paths this item will emit, one path at a time.
+
+    Returns (status, output, conflicted_paths) with status "clean", "empty" or
+    "conflict". Unlike probe_clean_cherry_pick() this never touches paths that
+    pass 1 split off into another group, so a commit whose storage/rocksdb half
+    was already emitted in g4 is not reported as conflicting on those paths.
+    """
+    before = git_rev_parse("HEAD")
+    conflicted = set()
+    changed = False
+    try:
+        for source_hash, paths in item_patch_groups(item):
+            for path in paths:
+                patch = run_git_bytes([
+                    "diff", "--full-index", "--binary", "--no-color",
+                    f"{source_hash}^", source_hash, "--", path,
+                ])
+                if not patch.strip():
+                    continue
+                r = subprocess.run(
+                    ["git", "apply", "--3way", "--index", "--whitespace=nowarn"],
+                    input=patch, capture_output=True)
+                if r.returncode != 0 or unmerged_paths():
+                    conflicted.add(path)
+                    restore_path(before, path)
+                else:
+                    changed = True
+    finally:
+        run_git(["reset", "--hard", before], check=False)
+
+    if conflicted:
+        summary = "CONFLICT (patch): " + ", ".join(sorted(conflicted))
+        return "conflict", summary, conflicted
+    return ("clean" if changed else "empty"), "", set()
 
 
 def abort_cherry_pick_if_needed():
@@ -1292,8 +1530,7 @@ def promote_from_g11(plan, group, report):
                 # A clobber-guarded commit is never probed on its own, but the
                 # probe is what tells us which of the remaining paths could be
                 # promoted, so run it here purely to widen the blocked set.
-                status, _output, conflicted = probe_clean_cherry_pick(
-                    item["source_hash"])
+                status, _output, conflicted = probe_item_emission(item)
                 blocked = clobber_paths | conflicted
                 if status != "empty" and split_failed_promotion(
                         item, group, plan, report, blocked, clobber_reason):
@@ -1310,7 +1547,7 @@ def promote_from_g11(plan, group, report):
                 f"overlap/clobber guard: {clobber_reason}")
             continue
 
-        status, output, conflicted = probe_clean_cherry_pick(item["source_hash"])
+        status, output, conflicted = probe_item_emission(item)
         if status == "clean":
             moved = dict(item)
             moved["target_group"] = group
@@ -1320,7 +1557,7 @@ def promote_from_g11(plan, group, report):
                 "hash": item["source_hash"],
                 "subject": item["subject"],
                 "to_group": group,
-                "reason": "clean cherry-pick probe",
+                "reason": "clean patch probe",
             })
             resolved_same_pass_ids.add(id(item))
             promoted += 1
@@ -1330,7 +1567,7 @@ def promote_from_g11(plan, group, report):
                 "subject": item["subject"],
                 "group": group,
                 "label": f"g11-to-g{group}",
-                "reason": "cherry-pick probe was empty at target group",
+                "reason": "patch probe was empty at target group",
             })
             skipped_empty += 1
             log(
@@ -1341,13 +1578,13 @@ def promote_from_g11(plan, group, report):
         else:
             if splittable and split_failed_promotion(
                     item, group, plan, report, conflicted,
-                    "cherry-pick probe conflicted"):
+                    "patch probe conflicted"):
                 resolved_same_pass_ids.add(id(item))
                 split_count += 1
                 continue
             moved = move_failed_promotion_to_g10(
                 item, group, report,
-                "cherry-pick probe conflicted; moved to g10",
+                "patch probe conflicted; moved to g10",
                 emit_now=(group == 10))
             if group != 10:
                 plan["buckets"][10].append(moved)
@@ -1498,6 +1735,15 @@ def print_final_report(args, base_hash, input_hash, parsed_count,
     marker_status = STYLE.green("yes") if had_markers else STYLE.yellow("no")
     log(f"{STYLE.bold('recognized markers in input')}: {marker_status}")
     log(f"{STYLE.bold('emitted commits')}: {STYLE.green(str(len(report['emitted'])))}")
+    modes = defaultdict(int)
+    for entry in report["emitted"]:
+        modes[entry.get("emitted_as", "state")] += 1
+    log(
+        f"{STYLE.bold('emission mode')}: {STYLE.cyan(args.patch_emit)} "
+        f"(patch={STYLE.green(str(modes['patch']))}, "
+        f"snapshot={STYLE.yellow(str(modes['state']))}, "
+        f"patch-fallback={STYLE.red(str(modes['patch-fallback-state']))})"
+    )
     log(f"{STYLE.bold('promoted from g11')}: {STYLE.green(str(len(report['promoted'])))}")
     log(
         f"{STYLE.bold('split promotions')}: "
@@ -1601,6 +1847,13 @@ def parse_args(argv):
                         help="allow starting from a dirty worktree")
     parser.add_argument("--no-reconcile", action="store_true",
                         help="fail instead of creating a final reconciliation commit")
+    parser.add_argument("--patch-emit", choices=PATCH_EMIT_CHOICES,
+                        default="all",
+                        help="which items are emitted as a 3-way patch instead "
+                             "of a whole-file snapshot: 'all' (default) "
+                             "patch-emits everything and reduces the promotion "
+                             "clobber guard to real hunk overlap; 'promoted' "
+                             "patch-emits relocated items only")
     parser.add_argument("--color", choices=("auto", "always", "never"),
                         default="auto",
                         help="colorize progress output (default: auto)")
@@ -1610,6 +1863,7 @@ def parse_args(argv):
 def main(argv=None):
     args = parse_args(argv or sys.argv[1:])
     configure_color(args.color)
+    EMIT_CONFIG["patch_emit"] = args.patch_emit
     if not args.allow_dirty:
         ensure_clean_worktree()
 

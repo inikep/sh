@@ -1117,6 +1117,19 @@ def rebuild_side_suffix(
         subject = emitted.message.splitlines()[0] if emitted.message else emitted.emit_meta.subject
         if tree == tree_of(repo, parent):
             log(format_commit_line("skip empty replay ", emitted.sha, f"{subject} after reconcile", depth=1))
+            # Alias the dropped entry onto the parent it collapsed into.  A
+            # nested side branch's list is spliced into its parent branch's
+            # side_emitted, and an outer reconcile rebuilds from
+            # [emitted.tree for emitted in side_emitted]; leaving the
+            # pre-reconcile sha/tree here would resurrect this commit from a
+            # tree the inner reconcile already superseded.
+            side_emitted[index] = EmittedSideCommit(
+                emitted.source_meta,
+                emitted.emit_meta,
+                parent,
+                tree,
+                emitted.message,
+            )
             continue
         new_sha = commit_tree(repo, tree, parent, emitted.emit_meta, emitted.message)
         side_emitted[index] = EmittedSideCommit(

@@ -170,6 +170,68 @@ Exit statuses worth recognizing:
 Confirm the real state from Git, not from the process table: `git status --short | grep '^UU\|^AA\|^DU\|^UD'`
 and `git log --oneline -1` say whether a cherry-pick is actually open and where the branch stands.
 
+### Five-Minute Progress Heartbeat
+
+A long post-Group-8 range is mostly waiting: one full build per commit, ten to
+twenty minutes each. The dominant failure mode of that wait is **not** a hung
+driver — it is the driver or build finishing while nothing looks at the result,
+so the run idles for hours. Treat a silent run as unverified, never as busy.
+
+Poll every **5 minutes** for the whole of any wait. Each tick must read the
+run's own state, not a notification:
+
+```sh
+$SCRIPTS/ps_replay_watchdog.sh $RUN_DIR 300        # 300s tick, stall after 6 quiet ticks
+```
+
+It prints one line per tick and **exits as soon as `driver.rc` or `build.rc`
+appears**, so the caller is handed back the moment the work is done:
+
+```
+t=00:05:00  rc=-  head=5be41b8bd8bf  n=938  idx=939/1237  log_age=42s
+t=00:10:00  rc=driver:3  head=f9a00a7ec163  n=939  idx=940/1237  log_age=3s
+FINISHED  rc=driver:3  head=f9a00a7ec163
+```
+
+Fields: elapsed, recorded exit status, branch head, commits on the output
+branch, the last `[idx/total]` the driver logged, and the age of the newest log
+write. A rising `log_age` with an unchanged `idx` and `head` is the stall
+signature.
+
+The watchdog exits **2 — STALLED** when `head`, `idx` and the newest log's
+mtime are all unchanged for `STALL_TICKS` consecutive ticks (default 6, i.e.
+30 minutes). That is a genuine hang-up: investigate before restarting anything.
+Note that a single large InnoDB translation unit, or the Debug `mysqld` link,
+can legitimately hold one tick or two without touching the log, so a stall is
+only declared after the full run of quiet ticks.
+
+Rules for the wait:
+
+- Never end a turn describing work as "running" without having polled it in
+  that turn. The cost of a missed completion is measured in hours of idle time,
+  not seconds.
+- A background-task notification is a hint, not the source of truth. Poll
+  `driver.rc` / `build.rc` directly; a waiter whose last command is a `grep`
+  that matched nothing exits non-zero and will be reported as a failure even
+  though the build passed.
+- When the watchdog exits 0, act on it immediately: read the rc, resolve or
+  amend, and restart the driver at `IDX + 1`.
+- Record any stall longer than one tick in `$REPORT_FILE`, with the elapsed
+  time and what the run was waiting on, so the timing summary stays honest.
+
+Two more launch details that cost a restart each if missed:
+
+- Options whose value starts with `-` must be passed as `--cmake-flag=-DCMAKE_CXX_FLAGS=-fpermissive`.
+  With a space, `argparse` reads the value as the next option and fails.
+- `--group8-marker` defaults to the full-width Group 9 marker subject. Real branches often carry a
+  truncated marker (fewer trailing `=`), so read the exact subject out of Git and pass it:
+  `M9=$(git log -1 --format=%s <group9-marker-sha>)` then `--group8-marker "$M9"`. Verify with
+  `git log -1 --format=%s <sha> | cat -A` when a "required marker not found" error appears. The
+  marker must also fall inside `--start`..`--end` for the boundary to be detected, so keep `--end`
+  at the last source index and move only `--start` when restarting; once `--start` is past the
+  marker, `--allow-missing-group8-marker` is required and the driver's automatic HP-8 check for
+  clean picks no longer runs, so audit those output commits' paths against their source commits
+  separately.
 
 ### Restart Protocol After A Manual Stop
 
@@ -579,6 +641,10 @@ Allowed helpers:
 - `ps_replay_resolve_conflicts.py`: inspection-only conflict display with nearby reference context.
 - `ps_replay_resolve_hunks.py`: best-effort conflict-block resolver; it may replace only conflict blocks, never whole files. Review its output before continuing. Unlike the other helpers it takes the reference as a positional argument and has no `--worktree`, so run it from inside the worktree: `ps_replay_resolve_hunks.py $REFERENCE_BRANCH <path>...` or `--all`. Exit 1 means some regions were left intact for manual work, not that the run failed.
 - `ps_replay_residual_audit.py`: classifies final residual diff hunks before reconciliation.
+- `ps_replay_watchdog.sh`: progress / hang-up heartbeat for a running driver or build. Prints one
+  status line per tick (default 300s), exits 0 as soon as `driver.rc` or `build.rc` appears, and
+  exits 2 when head, source index and log mtime are all unchanged for `STALL_TICKS` ticks. Use it
+  for every wait; see Five-Minute Progress Heartbeat.
 
 Library modules, never invoked directly:
 

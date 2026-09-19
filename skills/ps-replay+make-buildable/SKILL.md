@@ -128,6 +128,93 @@ Default to the low-token replay mode unless the user asks for detailed narration
 
    This compares `$BASE_BRANCH..$TIP_BRANCH` after task filters (for example `^mysql-5.7.44`) to `$DESTINATION_BASE_BRANCH..$REFERENCE_BRANCH`, not every commit to the whole reference tree. Record the command and summary counts. These two range gates (pre-Group-9 and post-Group-8) are the only feature-gate runs for the replay.
 
+## Driver Monitoring
+
+`ps_replay_batch.py` is not interactive and never blocks: it runs until the range is finished or it
+stops on a conflict, a build failure, a feature-gate review, or an HP-8 violation, then exits with a
+non-zero status. A driver that looks stuck is almost always a monitoring bug, not a hung driver.
+
+Launch it detached and have it record its own exit status, then wait on that file:
+
+```sh
+# launcher: run-driver.sh START [END]
+rm -f $RUN_DIR/driver.rc
+python3 $SCRIPTS/ps_replay_batch.py --source-list $RUN_DIR/source-list.txt \
+  --start $START --end ${END:-<last index>} ... > $RUN_DIR/logs/driver-$START.log 2>&1
+echo $? > $RUN_DIR/driver.rc
+```
+
+```sh
+# waiter: blocks until the driver finished, then prints its status and log tail
+for i in $(seq 1 $((TIMEOUT/5))); do [ -f $RUN_DIR/driver.rc ] && break; sleep 5; done
+[ -f $RUN_DIR/driver.rc ] && echo "EXITED rc=$(cat $RUN_DIR/driver.rc)" || echo "STILL-RUNNING"
+tail -8 $RUN_DIR/logs/driver-$START.log
+```
+
+Do **not** poll with `pgrep -f ps_replay_batch.py` (or any `pgrep -f` on a string that appears in the
+waiter's own command line). The polling shell's `-c '... pgrep -f ps_replay_batch.py ...'` command
+line contains the pattern, so `pgrep` matches the waiter itself and the loop reports `STILL-RUNNING`
+forever after the driver has already exited. The same trap hits `pkill -f`, which will kill the
+waiting shell. If a PID-based check is needed, capture the driver's own PID at launch and test it
+with `kill -0 "$PID"`.
+
+Exit statuses worth recognizing:
+
+| rc | meaning | next step |
+|---|---|---|
+| 0 | range finished | move to the next range, the checkpoint build, or final parity |
+| 3 | conflict or unresolved cherry-pick result | resolve hunks manually, HP-8 check, `git cherry-pick --continue`, restart after that index |
+| 4 | build failure | read the log under `$RUN_DIR/logs/`, apply a build-driven fix, amend, rebuild |
+| 6 | feature-gate stop | inspect, then restart with `--gate-decided-apply-file`, or handle the skip/hunk-drop manually |
+
+Confirm the real state from Git, not from the process table: `git status --short | grep '^UU\|^AA\|^DU\|^UD'`
+and `git log --oneline -1` say whether a cherry-pick is actually open and where the branch stands.
+
+
+### Restart Protocol After A Manual Stop
+
+The driver has no resume state: it always starts at `--start` and re-picks that index. After a stop
+you own the current index, and the restart index is always the next one.
+
+1. Resolve the conflict hunk by hunk, run the HP-8 staged-path check, `git cherry-pick --continue`.
+2. **If the commit is build-required, build it now**, at its own resulting SHA, before the driver
+   touches the next commit — a small `build-now.sh IDX SRCSHA` wrapper around
+   `ps_replay_build.py --incremental --reconfigure` (same `--cmake-flag`s as the driver) keeps this
+   one command.
+3. Only then restart the driver at `IDX + 1`.
+
+Both ways of getting this wrong are silent:
+
+- Restarting at `IDX` re-cherry-picks a commit that is already applied. It reopens the same conflict
+  on top of the committed result, leaving a stray `CHERRY_PICK_HEAD`; `git cherry-pick --abort`
+  recovers it and leaves `HEAD` untouched.
+- Restarting at `IDX + 1` *without* building leaves that commit with no PASS record, and the driver
+  will happily apply and build later commits over it. Recovering means `git reset --hard` back to
+  that output SHA, building it, and replaying what came after — so it is worth the one extra
+  command up front.
+
+### Auditing A Clean Cherry-pick That Landed Wrong
+
+A cherry-pick that reports no conflict is not automatically correct. When an upstream release has
+re-indented or restructured a function, git can apply the source's context-matched hunks into the
+wrong nesting level and still exit 0. The symptom at build time is a burst of
+`a function-definition is not allowed here before '{' token` / `qualified-id in declaration before
+'(' token` errors well past the edited region, plus an undeclared variable that exists in a sibling
+block — brace imbalance, not a missing API.
+
+Do not chase those errors line by line. Instead:
+
+1. Reduce the source commit to its **net semantic change** for that file, ignoring pure
+   re-indentation and comment rewrapping (diff the added and removed lines as multisets: what is
+   left after cancelling equal stripped lines is the real change).
+2. Restore the file from your own previous output commit (`git show HEAD~1:<path>`) — this is your
+   replay state, not `$REFERENCE_BRANCH`, so it is not a snap.
+3. Re-apply only that net change, in the destination's shape.
+4. Amend the output commit and rebuild.
+
+`ps_replay_post_conflict_audit.py --cached` catches the same class of damage before the build; run it
+whenever a commit reindents a large block.
+
 ## Build Setup
 
 Use an out-of-tree build. Default configuration:

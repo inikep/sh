@@ -2,7 +2,11 @@
 """Flatten a merge-heavy branch by walking first-parent history.
 
 Rules:
-  * commits whose tree equals their first parent's tree are skipped;
+  * the main walk follows first-parent history, except at a merge whose first
+    parent no longer reaches --base: there it follows the parent that does and
+    replays the other side as a side branch, so a --base living on a branch that
+    is merged back only at --tip is not reverted and re-applied;
+  * commits whose tree equals their mainline parent's tree are skipped;
   * main-chain non-merge commits are re-emitted with the same
     tree/message/metadata and a rewritten parent;
   * --onto can set a separate output parent while --base..--tip remains the
@@ -607,12 +611,13 @@ def direct_upstream_import_tag(
     repo: str | Path,
     meta: CommitMeta,
     advanced_tag: tuple[tuple[int, int, int], str] | None,
+    mainline_index: int = 0,
 ) -> tuple[tuple[int, int, int], str] | None:
     """Return the advanced mysql tag only for a merge that directly imports it."""
     if advanced_tag is None or not meta.is_merge or len(meta.parents) < 2:
         return None
     upstream_parent = rev_parse(repo, advanced_tag[1])
-    if meta.parents[1] == upstream_parent:
+    if meta.parents[side_parent_index(meta, mainline_index)] == upstream_parent:
         return advanced_tag
     return None
 
@@ -638,6 +643,55 @@ def emit_upstream_import_merge(
 def first_parent_chain(repo: str | Path, base: str, tip: str) -> list[str]:
     out = git_text(repo, "rev-list", "--first-parent", "--reverse", f"{base}..{tip}")
     return [line for line in out.splitlines() if line]
+
+
+def is_ancestor(repo: str | Path, ancestor: str, descendant: str) -> bool:
+    return (
+        git(repo, "merge-base", "--is-ancestor", ancestor, descendant, check=False).returncode == 0
+    )
+
+
+def lineage_chain(repo: str | Path, base: str, tip: str) -> list[tuple[str, int]]:
+    """Walk base..tip following, at each merge, the parent that still reaches base.
+
+    Returns [(sha, mainline_parent_index), ...] oldest first.  When base sits on
+    tip's first-parent chain every index is 0 and the result is identical to
+    first_parent_chain().  When it does not -- base lives on a side branch that
+    a later merge brings back in -- the index names the parent that carries the
+    lineage, so the caller can replay the other parent as the side branch
+    instead of aligning the output back onto a line that predates base.
+    """
+    chain = first_parent_chain(repo, base, tip)
+    if chain and load_commit(repo, chain[0]).parents[:1] == [base]:
+        return [(sha, 0) for sha in chain]
+    if not is_ancestor(repo, base, tip):
+        raise FlattenError(f"--base {base[:12]} is not an ancestor of --tip {tip[:12]}")
+    walked: list[tuple[str, int]] = []
+    seen: set[str] = set()
+    current = tip
+    while current != base:
+        if current in seen:
+            raise FlattenError(f"cycle walking lineage to --base {base[:12]} at {current[:12]}")
+        seen.add(current)
+        meta = load_commit(repo, current)
+        mainline_index = next(
+            (
+                index
+                for index, parent in enumerate(meta.parents)
+                if parent == base or is_ancestor(repo, base, parent)
+            ),
+            None,
+        )
+        if mainline_index is None:
+            raise FlattenError(f"lost lineage to --base {base[:12]} at {current[:12]}")
+        walked.append((current, mainline_index))
+        current = meta.parents[mainline_index]
+    walked.reverse()
+    return walked
+
+
+def side_parent_index(meta: "CommitMeta", mainline_index: int) -> int:
+    return next(index for index in range(len(meta.parents)) if index != mainline_index)
 
 
 def first_parent_subjects(repo: str | Path, base: str, tip: str) -> list[str]:
@@ -666,8 +720,12 @@ def is_version_merge_wrapper(repo: str | Path, meta: CommitMeta) -> bool:
     return matched >= 1 and len(subjects) - matched <= 1
 
 
-def is_null_against_first_parent(repo: str | Path, meta: CommitMeta) -> bool:
-    return bool(meta.parents) and meta.tree == tree_of(repo, meta.parents[0])
+def is_null_against_first_parent(
+    repo: str | Path, meta: CommitMeta, parent_index: int = 0
+) -> bool:
+    return len(meta.parents) > parent_index and meta.tree == tree_of(
+        repo, meta.parents[parent_index]
+    )
 
 
 def marker_from_subject(subject: str) -> str | None:
@@ -1465,8 +1523,14 @@ def flatten_range(
 ) -> tuple[str, Stats]:
     stats = Stats()
     emitted_parent = onto if onto is not None else base
-    chain = first_parent_chain(repo, base, tip)
-    log(f"main {base[:12]}..{tip[:12]}: {len(chain)} first-parent commits")
+    chain = lineage_chain(repo, base, tip)
+    log(f"main {base[:12]}..{tip[:12]}: {len(chain)} lineage commits")
+    for sha, mainline_index in chain:
+        if mainline_index != 0:
+            log(
+                f"lineage {sha[:12]} follows parent #{mainline_index + 1}; "
+                f"parent #1 is replayed as its side branch"
+            )
     if onto is not None and onto != base:
         log(f"onto {onto[:12]}")
         if align_source_trees:
@@ -1475,7 +1539,7 @@ def flatten_range(
     upstream_tag_cache: dict[str, tuple[tuple[int, int, int], str] | None] = {}
     used_metadata_shas: set[str] = set()
     prev_endpoint = base
-    for sha in chain:
+    for sha, mainline_index in chain:
         meta = load_commit(repo, sha)
         stats.walked += 1
         advanced_tag = (
@@ -1484,11 +1548,11 @@ def flatten_range(
             else None
         )
         first_parent_upstream_tag = advanced_tag[1] if advanced_tag is not None else None
-        direct_upstream_tag = direct_upstream_import_tag(repo, meta, advanced_tag)
+        direct_upstream_tag = direct_upstream_import_tag(repo, meta, advanced_tag, mainline_index)
         if meta.is_merge and direct_upstream_tag is None:
             first_parent_upstream_tag = None
         log_first_parent_commit(repo, meta, first_parent_upstream_tag)
-        if is_null_against_first_parent(repo, meta):
+        if is_null_against_first_parent(repo, meta, mainline_index):
             stats.skipped_null += 1
             log("  skip null")
             prev_endpoint = sha
@@ -1505,8 +1569,8 @@ def flatten_range(
             marker = marker_from_subject(meta.subject)
             emitted_parent, _ = flatten_side(
                 repo,
-                meta.parents[0],
-                meta.parents[1],
+                meta.parents[mainline_index],
+                meta.parents[side_parent_index(meta, mainline_index)],
                 emitted_parent,
                 stats,
                 marker,

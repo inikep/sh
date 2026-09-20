@@ -252,8 +252,13 @@ you own the current index, and the restart index is always the next one.
 1. Resolve the conflict hunk by hunk, run the HP-8 staged-path check, `git cherry-pick --continue`.
 2. **If the commit is build-required, build it now**, at its own resulting SHA, before the driver
    touches the next commit — a small `build-now.sh IDX SRCSHA` wrapper around
-   `ps_replay_build.py --incremental --reconfigure` (same `--cmake-flag`s as the driver) keeps this
-   one command.
+   `ps_replay_build.py --incremental` (same `--cmake-flag`s as the driver) keeps this one command.
+   **Pass `--reconfigure` only when a CMake input actually changed**, exactly as the driver decides
+   it: compare `<build-dir>/.ps_replay_cmake_stamp` to `HEAD` and look for `CMakeLists.txt`,
+   `*.cmake`, `configure.cmake` or `config.h.cmake` in the delta (and in the unstaged worktree).
+   A forced reconfigure of this tree costs about 4.5 minutes; a 20-object incremental build costs
+   about 25 seconds, so reconfiguring unconditionally makes every manual build an order of
+   magnitude slower than the driver's own.
 3. Only then restart the driver at `IDX + 1`.
 
 Both ways of getting this wrong are silent:
@@ -334,7 +339,9 @@ confirm the new component appears in `build.ninja`.
 every successful `cmake` run; a missing or unreadable stamp forces a reconfigure. Because the stamp
 is a commit, not a single build, deferred no-build batches still trigger one reconfigure at the next
 build they are folded into. `ps_replay_build.py --incremental --reconfigure` does the same thing by
-hand: `cmake` plus `ninja` in the existing build tree, without the clean-build wipe.
+hand: `cmake` plus `ninja` in the existing build tree, without the clean-build wipe. Reach for
+`--reconfigure` only when a CMake input changed — plain `--incremental` reuses the existing
+`build.ninja` and is several minutes faster per build.
 
 `-DWITH_CURL=system` is required, not optional. Upstream sets `WITH_CURL_DEFAULT` to `system` only
 under `IF(WITH_INTERNAL AND UNIX)`, so a normal replay build resolves it to `none`, leaves `CURL_FOUND`

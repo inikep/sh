@@ -170,27 +170,38 @@ Exit statuses worth recognizing:
 Confirm the real state from Git, not from the process table: `git status --short | grep '^UU\|^AA\|^DU\|^UD'`
 and `git log --oneline -1` say whether a cherry-pick is actually open and where the branch stands.
 
-### Five-Minute Progress Heartbeat
+### Progress Heartbeat And Completion Detection
 
-A long post-Group-8 range is mostly waiting: one full build per commit, ten to
-twenty minutes each. The dominant failure mode of that wait is **not** a hung
-driver — it is the driver or build finishing while nothing looks at the result,
-so the run idles for hours. Treat a silent run as unverified, never as busy.
+A long post-Group-8 range is mostly waiting. The dominant failure mode of that
+wait is **not** a hung driver — it is the driver or build finishing while
+nothing looks at the result, so the run idles. Treat a silent run as
+unverified, never as busy.
 
-Poll every **5 minutes** for the whole of any wait. Each tick must read the
-run's own state, not a notification:
+Wait on the run with the watchdog, which does two separate jobs at two
+different cadences:
 
 ```sh
-$SCRIPTS/ps_replay_watchdog.sh $RUN_DIR 300        # 300s tick, stall after 6 quiet ticks
+$SCRIPTS/ps_replay_watchdog.sh $RUN_DIR             # 1s completion poll, 300s heartbeat
+$SCRIPTS/ps_replay_watchdog.sh $RUN_DIR 300 6 1     # same, spelled out
+#                                       ^   ^ ^
+#                                       |   | poll seconds  (completion detection)
+#                                       |   stall ticks
+#                                       heartbeat seconds   (status line cadence)
 ```
 
-It prints one line per tick and **exits as soon as `driver.rc` or `build.rc`
-appears**, so the caller is handed back the moment the work is done:
+- **Completion is detected within ~1 second.** `driver.rc` / `build.rc` are
+  polled every `POLL` seconds and the watchdog exits 0 immediately when one
+  appears. The heartbeat interval must never gate this — a build that finishes
+  in 25 s hands control back in 25 s even with the default 300 s heartbeat.
+- **The heartbeat interval is only the status-line cadence and the stall
+  clock.** It exists so a genuinely hung run is noticed, not so completions are
+  noticed. Do not shrink it to make completion detection faster; that is what
+  `POLL` is for, and it is already fast.
 
 ```
-t=00:05:00  rc=-  head=5be41b8bd8bf  n=938  idx=939/1237  log_age=42s
-t=00:10:00  rc=driver:3  head=f9a00a7ec163  n=939  idx=940/1237  log_age=3s
-FINISHED  rc=driver:3  head=f9a00a7ec163
+t=00:00:00  rc=-  head=5be41b8bd8bf  n=938  idx=939/1237  log_age=0s
+t=00:00:25  rc=build:0  head=5be41b8bd8bf  n=938  idx=194/194  log_age=1s
+FINISHED  rc=build:0  head=5be41b8bd8bf
 ```
 
 Fields: elapsed, recorded exit status, branch head, commits on the output
@@ -199,8 +210,8 @@ write. A rising `log_age` with an unchanged `idx` and `head` is the stall
 signature.
 
 The watchdog exits **2 — STALLED** when `head`, `idx` and the newest log's
-mtime are all unchanged for `STALL_TICKS` consecutive ticks (default 6, i.e.
-30 minutes). That is a genuine hang-up: investigate before restarting anything.
+mtime are all unchanged for `STALL_TICKS` consecutive *heartbeat* ticks
+(default 6 × 300 s, i.e. 30 minutes). That is a genuine hang-up: investigate before restarting anything.
 Note that a single large InnoDB translation unit, or the Debug `mysqld` link,
 can legitimately hold one tick or two without touching the log, so a stall is
 only declared after the full run of quiet ticks.
@@ -641,10 +652,11 @@ Allowed helpers:
 - `ps_replay_resolve_conflicts.py`: inspection-only conflict display with nearby reference context.
 - `ps_replay_resolve_hunks.py`: best-effort conflict-block resolver; it may replace only conflict blocks, never whole files. Review its output before continuing. Unlike the other helpers it takes the reference as a positional argument and has no `--worktree`, so run it from inside the worktree: `ps_replay_resolve_hunks.py $REFERENCE_BRANCH <path>...` or `--all`. Exit 1 means some regions were left intact for manual work, not that the run failed.
 - `ps_replay_residual_audit.py`: classifies final residual diff hunks before reconciliation.
-- `ps_replay_watchdog.sh`: progress / hang-up heartbeat for a running driver or build. Prints one
-  status line per tick (default 300s), exits 0 as soon as `driver.rc` or `build.rc` appears, and
-  exits 2 when head, source index and log mtime are all unchanged for `STALL_TICKS` ticks. Use it
-  for every wait; see Five-Minute Progress Heartbeat.
+- `ps_replay_watchdog.sh`: progress / hang-up heartbeat for a running driver or build. Polls
+  `driver.rc` / `build.rc` every `POLL` seconds (default 1) and exits 0 within ~1s of either
+  appearing; prints one status line per heartbeat tick (default 300s); exits 2 when head, source
+  index and log mtime are all unchanged for `STALL_TICKS` ticks. Use it for every wait; see
+  Progress Heartbeat And Completion Detection.
 
 Library modules, never invoked directly:
 

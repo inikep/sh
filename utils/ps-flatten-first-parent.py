@@ -31,6 +31,10 @@ Rules:
     most one of the merge and the commits it would emit is not a "merge" of a
     5.5/5.6/5.7 branch (case-insensitive) -- which keeps 5.x-to-8.0 propagation
     chains collapsed around the real commit they carry;
+  * a side branch is walked with everything already emitted excluded (--base plus
+    each enclosing side's own first parent), so a stale PR branch that back-merges
+    the mainline ("Merge branch '8.0' into patch-1") does not replay the mainline
+    a second time;
   * one-parent side commits with merge-like subjects can use metadata from a
     matching real bug-fix commit when the original branch merge was already
     linearized before this script sees it.
@@ -640,8 +644,11 @@ def emit_upstream_import_merge(
     return new_sha
 
 
-def first_parent_chain(repo: str | Path, base: str, tip: str) -> list[str]:
-    out = git_text(repo, "rev-list", "--first-parent", "--reverse", f"{base}..{tip}")
+def first_parent_chain(
+    repo: str | Path, base: str, tip: str, exclude: tuple[str, ...] = ()
+) -> list[str]:
+    args = ["rev-list", "--first-parent", "--reverse", tip, "--not", base, *exclude]
+    out = git_text(repo, *args)
     return [line for line in out.splitlines() if line]
 
 
@@ -1306,18 +1313,26 @@ def flatten_side(
     depth: int = 1,
     max_depth: int = 2,
     target_tree: str | None = None,
+    exclude: tuple[str, ...] = (),
 ) -> tuple[str, list[EmittedSideCommit]]:
     upstream_tags = upstream_tags or []
     if upstream_tag_cache is None:
         upstream_tag_cache = {}
     if used_metadata_shas is None:
         used_metadata_shas = set()
-    side_chain = first_parent_chain(repo, first_parent, second_parent)
+    side_chain = first_parent_chain(repo, first_parent, second_parent, exclude)
     side_metas = [load_commit(repo, sha) for sha in side_chain]
     log(
         f"{depth_marker(depth)}side {first_parent[:12]}..{second_parent[:12]}: "
         f"{len(side_chain)} first-parent commits"
     )
+    if exclude:
+        unpruned = len(first_parent_chain(repo, first_parent, second_parent))
+        if unpruned != len(side_chain):
+            log(
+                f"{depth_marker(depth)}  back-merge: dropped {unpruned - len(side_chain)} "
+                f"commit(s) already emitted on the mainline"
+            )
     side_base_parent = emitted_parent
     side_emitted: list[EmittedSideCommit] = []
     start_index = 0
@@ -1423,6 +1438,7 @@ def flatten_side(
                     depth=depth + 1,
                     max_depth=max_depth,
                     target_tree=nested_target,
+                    exclude=(*exclude, first_parent),
                 )
                 if emitted_parent != prev_emitted:
                     stats.recursed_merges += 1
@@ -1583,6 +1599,7 @@ def flatten_range(
                 used_metadata_shas=used_metadata_shas,
                 depth=1,
                 max_depth=max_depth,
+                exclude=(base,),
             )
         else:
             prev_emitted = emitted_parent

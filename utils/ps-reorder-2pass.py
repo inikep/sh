@@ -123,6 +123,7 @@ G1_DOC = "doc"
 G1_MAN = "man"
 G1_INTERNAL = "internal"
 G1_TOKUDB_BACKUP = "tokudb-backup-plugin"
+G1_AUDIT_LOG = "audit-log"
 G1_STORAGE_TOKUDB = "storage-tokudb"
 G1_PS_TOKUDB_ADMIN = "ps-tokudb-admin"
 G1_VERSION_UNIV = "version-univ"
@@ -135,6 +136,7 @@ G1_SUBJECTS = {
     G1_MAN: "Squash: man/",
     G1_INTERNAL: "Squash: internal/",
     G1_TOKUDB_BACKUP: "Squash: plugin/tokudb-backup-plugin/",
+    G1_AUDIT_LOG: "Squash: plugin/audit_log/",
     G1_STORAGE_TOKUDB: "Squash: storage/tokudb/",
     G1_PS_TOKUDB_ADMIN: "Squash: scripts/ps_tokudb_admin.sh and scripts/fill_help_tables.sql",
     G1_VERSION_UNIV: "Squash: MYSQL_VERSION, VERSION and storage/innobase/include/univ.i",
@@ -510,6 +512,8 @@ def classify_g1(path):
         return G1_INTERNAL
     if path.startswith("plugin/tokudb-backup-plugin/"):
         return G1_TOKUDB_BACKUP
+    if path.startswith("plugin/audit_log/"):
+        return G1_AUDIT_LOG
     if path.startswith("storage/tokudb/"):
         return G1_STORAGE_TOKUDB
     if path in {"scripts/ps_tokudb_admin.sh", "scripts/fill_help_tables.sql"}:

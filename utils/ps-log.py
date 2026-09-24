@@ -76,6 +76,8 @@ class Style:
     def bold_magenta(self, t): return self._wrap("1;35", t)
     def bold_blue(self, t): return self._wrap("1;34", t)
     def pale_yellow(self, t): return self._wrap("38;5;220", t)
+    def dark_cyan(self, t): return self._wrap("38;5;30", t)
+    def bold_dark_cyan(self, t): return self._wrap("1;38;5;30", t)
 
 
 STYLE = Style(False)
@@ -109,6 +111,8 @@ INS_RE = re.compile(r"(\d+) insertion")
 DEL_RE = re.compile(r"(\d+) deletion")
 C_CPP_EXTS = (".h", ".c", ".cc", ".cxx", ".cpp", ".hh", ".hpp", ".hxx")
 DEPTH_VALUE_RE = re.compile(r"-?\d+")
+# Subject tags with these prefixes are shown as "[<name>]" in the given color.
+TAG_PREFIX_COLORS = (("[plugin/", "dark_cyan"), ("[components/", "magenta"))
 SUBJECT_MARKER_PREFIX_RE = re.compile(r"^((?:\[[^\]\s]+\]|\([^\)\s]+\)))(\s+)?")
 COMMIT_STATS_LINE_RE = re.compile(
     r"^(\s*)(.{5})(.{5})(\s)(.{5})(\s)([0-9a-f-]{12})(\s?)(.*)$"
@@ -366,14 +370,15 @@ def format_shortstat(files: int, ins: int, dele: int) -> str:
 
 
 def subject_style(text: str, bold: bool, red: bool,
-                  light_red: bool = False) -> str:
+                  light_red: bool = False, tag_color: str | None = None) -> str:
     prefix = SUBJECT_MARKER_PREFIX_RE.match(text)
     if prefix and not (red or light_red):
         rest = text[prefix.end():]
         marker = prefix.group(1)
+        color = tag_color or "blue"
+        name_style = getattr(STYLE, f"bold_{color}" if bold else color)
         return (subject_style(marker[0], bold, red, light_red) +
-                (STYLE.bold_blue(marker[1:-1]) if bold
-                 else STYLE.blue(marker[1:-1])) +
+                name_style(marker[1:-1]) +
                 subject_style(marker[-1], bold, red, light_red) +
                 (prefix.group(2) or "") +
                 subject_style(rest, bold, red, light_red))
@@ -416,7 +421,8 @@ def count_field_style(text: str, color: str, large_as_orange: bool) -> str:
 def colorize_stats_line(line: str, bold_subject: bool,
                         red_subject: bool,
                         light_red_subject: bool = False,
-                        c_source: bool = False) -> str:
+                        c_source: bool = False,
+                        tag_color: str | None = None) -> str:
     if not STYLE.enabled:
         return line
     m = COMMIT_STATS_LINE_RE.match(line)
@@ -430,7 +436,7 @@ def colorize_stats_line(line: str, bold_subject: bool,
             count_field_style(m.group(5), "red", large_as_orange=True) +
             m.group(6) + sha + m.group(8) +
             subject_style(m.group(9), bold_subject, red_subject,
-                          light_red_subject))
+                          light_red_subject, tag_color))
 
     m = TOTAL_STATS_LINE_RE.match(line)
     if not m:
@@ -540,13 +546,20 @@ def render_section(label: str | None, log_args: list[str],
 
     total_files = total_ins = total_dele = 0
     for ch, subject, files, ins, dele, depth, has_c in rows:
+        tag_color = None
+        for tag_prefix, color in TAG_PREFIX_COLORS:
+            if subject.startswith(tag_prefix):
+                subject = "[" + subject[len(tag_prefix):]
+                tag_color = color
+                break
         line = format_stats_line(files, ins, dele, ch, subject, depth)
         changed = ins + dele
         bold = changed <= 16
         red = dele > ins and changed >= 100
         light_red = dele > ins and 10 <= changed < 100
         print(colorize_stats_line(line, bold, red, light_red,
-                                  c_source=has_c), flush=True)
+                                  c_source=has_c, tag_color=tag_color),
+              flush=True)
         total_files += files
         total_ins += ins
         total_dele += dele

@@ -70,6 +70,8 @@ class Style:
     def default(self, t): return self._wrap("39", t)
     def bold_default(self, t): return self._wrap("1;39", t)
     def orange(self, t): return self._wrap("38;5;208", t)
+    def dark_green(self, t): return self._wrap("38;5;28", t)
+    def bold_dark_green(self, t): return self._wrap("1;38;5;28", t)
     def light_red(self, t): return self._wrap("91", t)
     def bold_red(self, t): return self._wrap("1;31", t)
     def bold_light_red(self, t): return self._wrap("1;91", t)
@@ -371,15 +373,19 @@ def format_shortstat(files: int, ins: int, dele: int) -> str:
 
 def subject_style(text: str, bold: bool, red: bool,
                   light_red: bool = False, tag_color: str | None = None) -> str:
+    if text.startswith("========"):
+        return STYLE.bold_dark_green(text) if bold else STYLE.dark_green(text)
     prefix = SUBJECT_MARKER_PREFIX_RE.match(text)
-    if prefix and not (red or light_red):
+    if prefix:
         rest = text[prefix.end():]
         marker = prefix.group(1)
         color = tag_color or "blue"
-        name_style = getattr(STYLE, f"bold_{color}" if bold else color)
-        return (subject_style(marker[0], bold, red, light_red) +
-                name_style(marker[1:-1]) +
-                subject_style(marker[-1], bold, red, light_red) +
+        name = getattr(STYLE, f"bold_{color}" if bold else color)(marker[1:-1])
+        # A colored "[tag]" drops its brackets; "(tag)" keeps its parentheses.
+        opening, closing = ("", "") if marker[0] == "[" else (marker[0], marker[-1])
+        return (subject_style(opening, bold, red, light_red) +
+                name +
+                subject_style(closing, bold, red, light_red) +
                 (prefix.group(2) or "") +
                 subject_style(rest, bold, red, light_red))
     if red and bold:
@@ -552,7 +558,11 @@ def render_section(label: str | None, log_args: list[str],
                 subject = "[" + subject[len(tag_prefix):]
                 tag_color = color
                 break
-        line = format_stats_line(files, ins, dele, ch, subject, depth)
+        max_len = OUTPUT_STAT_LINE_LEN
+        # A colored "[tag]" is printed without its brackets; fill their width.
+        if STYLE.enabled and subject.startswith("["):
+            max_len += 2 * bool(SUBJECT_MARKER_PREFIX_RE.match(subject))
+        line = format_stats_line(files, ins, dele, ch, subject, depth, max_len)
         changed = ins + dele
         bold = changed <= 16
         red = dele > ins and changed >= 100

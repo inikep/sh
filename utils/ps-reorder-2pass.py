@@ -360,7 +360,8 @@ def get_commit_files(commit):
     if not parents:
         r = run_git(["ls-tree", "-r", "--name-only", commit])
         return [line for line in r.stdout.splitlines() if line]
-    r = run_git(["diff", "--name-only", "--no-renames", parents[0], commit])
+    r = run_git(["diff", "--name-only", "--no-renames", "--ignore-submodules=none",
+                 parents[0], commit])
     return [line for line in r.stdout.splitlines() if line]
 
 
@@ -369,7 +370,7 @@ def get_commit_deleted_paths(commit):
     if not parents:
         return []
     r = run_git([
-        "diff", "--name-only", "--diff-filter=D", "--no-renames",
+        "diff", "--name-only", "--diff-filter=D", "--no-renames", "--ignore-submodules=none",
         parents[0], commit,
     ])
     return [line for line in r.stdout.splitlines() if line]
@@ -437,7 +438,7 @@ def parse_source_commits(commits):
 
 def final_removed_base_paths(base_hash, input_hash):
     r = run_git([
-        "diff", "--name-only", "--diff-filter=D", "--no-renames",
+        "diff", "--name-only", "--diff-filter=D", "--no-renames", "--ignore-submodules=none",
         base_hash, input_hash,
     ])
     return set(line for line in r.stdout.splitlines() if line)
@@ -959,7 +960,7 @@ def apply_item_patch(item):
     for source_hash, paths in item_patch_groups(item):
         for batch in batched(paths):
             patch = run_git_bytes([
-                "diff", "--full-index", "--binary", "--no-color",
+                "diff", "--full-index", "--binary", "--no-color", "--ignore-submodules=none",
                 f"{source_hash}^", source_hash, "--",
             ] + batch)
             if not patch.strip():
@@ -1262,12 +1263,12 @@ def item_patch_hunks(item):
     parents = get_commit_parents(item["source_hash"])
     if parents:
         args = [
-            "diff", "--unified=0", "--no-renames",
+            "diff", "--unified=0", "--no-renames", "--ignore-submodules=none",
             parents[0], item["source_hash"], "--",
         ] + list(item["files"])
     else:
         args = [
-            "show", "--format=", "--unified=0", "--no-renames",
+            "show", "--format=", "--unified=0", "--no-renames", "--ignore-submodules=none",
             item["source_hash"], "--",
         ] + list(item["files"])
     r = run_git(args, check=False)
@@ -1419,7 +1420,7 @@ def probe_item_emission(item):
                     # failed; the rest of the chain has nothing to build on.
                     continue
                 patch = run_git_bytes([
-                    "diff", "--full-index", "--binary", "--no-color",
+                    "diff", "--full-index", "--binary", "--no-color", "--ignore-submodules=none",
                     f"{source_hash}^", source_hash, "--", path,
                 ])
                 if not patch.strip():
@@ -1446,7 +1447,8 @@ def abort_cherry_pick_if_needed():
 
 
 def unmerged_paths():
-    r = run_git(["diff", "--name-only", "--diff-filter=U", "--no-renames"],
+    r = run_git(["diff", "--name-only", "--diff-filter=U", "--no-renames",
+                 "--ignore-submodules=none"],
                 check=False)
     return {line for line in r.stdout.splitlines() if line}
 
@@ -1665,7 +1667,8 @@ def emit_existing_group(plan, group, report):
 
 
 def remaining_diff_paths(input_hash, output_ref):
-    r = run_git(["diff", "--name-only", "--no-renames", output_ref, input_hash],
+    r = run_git(["diff", "--name-only", "--no-renames", "--ignore-submodules=none",
+                 output_ref, input_hash],
                 check=False)
     return [line for line in r.stdout.splitlines() if line]
 

@@ -10,6 +10,8 @@ import subprocess
 from pathlib import Path
 
 
+MAX_JOBS = 80
+
 DEFAULT_CMAKE_FLAGS = [
     "-DCMAKE_BUILD_TYPE=Debug",
     "-DMYSQL_MAINTAINER_MODE=OFF",
@@ -46,8 +48,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--jobs",
         type=int,
-        default=max(1, (os.cpu_count() or 2) * 3 // 4),
-        help="ninja jobs (default: 3/4 of CPUs)",
+        default=max(1, min(MAX_JOBS, (os.cpu_count() or 2) * 3 // 4)),
+        help=f"ninja jobs (default: 3/4 of CPUs, capped at {MAX_JOBS})",
     )
     parser.add_argument(
         "--incremental",
@@ -70,7 +72,9 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Allow deleting/reusing a build directory outside /tmp for clean builds",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.jobs = max(1, min(args.jobs, MAX_JOBS))
+    return args
 
 
 def ensure_safe_build_dir(build_dir: Path, allow_non_tmp: bool) -> None:

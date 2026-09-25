@@ -9,6 +9,8 @@ import subprocess
 from pathlib import Path
 
 
+MAX_JOBS = 80
+
 SOURCE_EXTS = {".c", ".cc", ".cpp", ".cxx"}
 
 
@@ -31,14 +33,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--jobs",
         type=int,
-        default=max(1, (os.cpu_count() or 2) * 3 // 4),
+        default=max(1, min(MAX_JOBS, (os.cpu_count() or 2) * 3 // 4)),
     )
     parser.add_argument(
         "--allow-missing",
         action="store_true",
         help="Warn instead of failing when no object target is found for a source",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.jobs = max(1, min(args.jobs, MAX_JOBS))
+    return args
 
 
 def git_text(worktree: Path, args: list[str]) -> str:

@@ -38,6 +38,8 @@ import sys
 from pathlib import Path
 
 
+MAX_JOBS = 80
+
 DEFAULT_CMAKE_FLAGS = [
     "-DCMAKE_BUILD_TYPE=Debug",
     "-DMYSQL_MAINTAINER_MODE=OFF",
@@ -213,7 +215,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--jobs",
         type=int,
-        default=max(1, (os.cpu_count() or 2) * 3 // 4),
+        default=max(1, min(MAX_JOBS, (os.cpu_count() or 2) * 3 // 4)),
     )
     parser.add_argument(
         "--clean-build",
@@ -226,7 +228,9 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help="Additional CMake flag passed through to ps_replay_build.py. May be passed multiple times.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.jobs = max(1, min(args.jobs, MAX_JOBS))
+    return args
 
 
 SOURCE_PREFIXES = (

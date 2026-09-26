@@ -1,0 +1,22 @@
+# Component infrastructure kept in every state on purpose (see SKILL.md "Component infrastructure stays")
+get_comp_registry_srv          # SysVars registry accessor (SysVars::init needs it before any instance)
+create_scope_guard             # component init guard
+comp_scope_guard
+mysql_thd_security_context     # component-API get_connection_user (plugin services unusable in a component)
+mysql_security_context_options
+Security_context_handle
+security_context_service
+security_context_opts_service
+kAuditEventNameGeneralLog      # X's event-pointer subclass helpers in the formatter base
+kAuditEventNameGeneralError
+kAuditEventNameGeneralResult
+kAuditEventNameGeneralStatus
+kAuditEventNameMessageInternal
+kAuditEventNameMessageUser
+kAuditEventNameServerShutdownShutdown
+kAuditEventNameServerStartupStartup
+kAuditEventNameStoredProgramExecute
+sql_command                    # component event tracking field
+ER_UDF_ERROR                   # used by the component UDF helpers
+# audit_log_json_handler.{h,cc}: lost in vps-8.1.0-build3, restored for 4df9a792ae36..8b3a73b05cea
+path:components/audit_log_filter/audit_log_json_handler.*

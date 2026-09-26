@@ -39,6 +39,13 @@ from pathlib import Path
 
 
 MAX_JOBS = 80
+# ps_replay_build.py exit status for "build passed, MTR smoke test (main.1st) failed"
+SMOKE_FAILED_RC = 5
+
+
+def smoke_log_path(build_log: Path) -> Path:
+    """Log written by ps_replay_build.py's smoke test next to the build log."""
+    return build_log.with_name(build_log.stem + "-mtr-1st.log")
 
 DEFAULT_CMAKE_FLAGS = [
     "-DCMAKE_BUILD_TYPE=Debug",
@@ -227,6 +234,11 @@ def parse_args() -> argparse.Namespace:
         action="append",
         default=[],
         help="Additional CMake flag passed through to ps_replay_build.py. May be passed multiple times.",
+    )
+    parser.add_argument(
+        "--no-smoke-test",
+        action="store_true",
+        help="Do not run the MTR smoke test (main.1st) after each build.",
     )
     args = parser.parse_args()
     args.jobs = max(1, min(args.jobs, MAX_JOBS))
@@ -605,6 +617,8 @@ def run_build(args: argparse.Namespace, idx: int, sha: str) -> tuple[int, Path]:
                 print(f"[{idx}] re-running cmake ({reason})", flush=True)
         for flag in args.cmake_flag:
             cmd.append(f"--cmake-flag={flag}")
+        if args.no_smoke_test:
+            cmd.append("--no-smoke-test")
         return subprocess.run(cmd, text=True).returncode, log
 
     build_dir = args.build_dir.resolve()
@@ -855,6 +869,10 @@ def main() -> int:
         if at_group8:
             print(f"[{idx}/{len(commits)}] Group 8 checkpoint build before marker", flush=True)
             rc, log = run_build(args, idx, sha)
+            if rc == SMOKE_FAILED_RC:
+                append(args.report_file, f"- Group 8 checkpoint build result: FAIL (build ok, main.1st smoke test failed); logs `{log}`, `{smoke_log_path(log)}`.")
+                print(f"[{idx}/{len(commits)}] checkpoint build ok but main.1st smoke test failed, log {smoke_log_path(log)}", flush=True)
+                return SMOKE_FAILED_RC
             if rc != 0:
                 append(args.report_file, f"- Group 8 checkpoint build result: FAIL (exit {rc}); log `{log}`.")
                 print(f"[{idx}/{len(commits)}] checkpoint build failed, log {log}", flush=True)
@@ -1017,6 +1035,10 @@ def main() -> int:
 
         print(f"[{idx}/{len(commits)}] build start {new_sha} ({build_reason})", flush=True)
         rc, log = run_build(args, idx, sha)
+        if rc == SMOKE_FAILED_RC:
+            append(args.report_file, f"- Commit {idx} build result: FAIL (build ok, main.1st smoke test failed); logs `{log}`, `{smoke_log_path(log)}`.")
+            print(f"[{idx}/{len(commits)}] build ok but main.1st smoke test failed, log {smoke_log_path(log)}", flush=True)
+            return SMOKE_FAILED_RC
         if rc != 0:
             append(args.report_file, f"- Commit {idx} build result: FAIL (exit {rc}); log `{log}`.")
             print(f"[{idx}/{len(commits)}] build failed, log {log}", flush=True)

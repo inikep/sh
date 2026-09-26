@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Run a clean or incremental Percona replay build with the skill defaults."""
+"""Run a clean or incremental Percona replay build with the skill defaults.
+
+After a successful ninja build the MTR smoke test (main.1st) runs from the build tree, so a commit
+whose mysql-test-run.pl does not compile or whose mysqld cannot bootstrap does not get a PASS record.
+Exit status: 0 build and smoke test passed, 5 build passed but the smoke test failed, anything else
+is the cmake/ninja failure status."""
 
 from __future__ import annotations
 
@@ -11,6 +16,8 @@ from pathlib import Path
 
 
 MAX_JOBS = 80
+SMOKE_FAILED_RC = 5
+SMOKE_TIMEOUT = 900
 
 DEFAULT_CMAKE_FLAGS = [
     "-DCMAKE_BUILD_TYPE=Debug",
@@ -68,6 +75,11 @@ def parse_args() -> argparse.Namespace:
         help="Additional CMake flag. May be passed multiple times.",
     )
     parser.add_argument(
+        "--no-smoke-test",
+        action="store_true",
+        help="Skip the MTR smoke test (main.1st) after a successful build",
+    )
+    parser.add_argument(
         "--allow-non-tmp-build-dir",
         action="store_true",
         help="Allow deleting/reusing a build directory outside /tmp for clean builds",
@@ -123,6 +135,58 @@ def run_logged(command: list[str], cwd: Path, log_fh) -> int:
     return proc.returncode
 
 
+def smoke_log_path(build_log: Path) -> Path:
+    return build_log.with_name(build_log.stem + "-mtr-1st.log")
+
+
+def run_smoke_test(build_dir: Path, build_log: Path) -> tuple[bool, Path, str]:
+    """Run main.1st with the build tree's own mysql-test-run.pl.
+
+    Passes only when MTR reports "Completed: All N tests were successful", which also covers the
+    shutdown_report pseudo test; a harness that does not compile, a server that fails --initialize or
+    a test-count mismatch all fail it."""
+    log = smoke_log_path(build_log)
+    mtr_dir = build_dir / "mysql-test"
+    vardir = build_dir / "mtr-smoke-var"
+    cmd = [
+        "perl",
+        "mysql-test-run.pl",
+        f"--vardir={vardir}",
+        "--force",
+        "--nowarnings",
+        "--parallel=1",
+        "--max-test-fail=0",
+        f"--mysqld=--lc-messages-dir={build_dir / 'share'}",
+        "--suite=main",
+        "1st",
+    ]
+    with log.open("w") as fh:
+        fh.write(f"$ cd {mtr_dir}\n$ " + " ".join(cmd) + "\n\n")
+        fh.flush()
+        if not (mtr_dir / "mysql-test-run.pl").exists():
+            fh.write("mysql-test-run.pl not found in the build tree\n")
+            return False, log, "mysql-test-run.pl missing in build tree"
+        try:
+            proc = subprocess.run(cmd, cwd=mtr_dir, stdout=fh, stderr=subprocess.STDOUT, text=True,
+                                  timeout=SMOKE_TIMEOUT)
+            rc = proc.returncode
+        except subprocess.TimeoutExpired:
+            fh.write(f"\n# timed out after {SMOKE_TIMEOUT}s\n")
+            return False, log, f"timed out after {SMOKE_TIMEOUT}s"
+        fh.write(f"\n# exit_code={rc}\n")
+    text = log.read_text(errors="replace")
+    completed = [l for l in text.splitlines() if l.startswith("Completed:")]
+    if rc == 0 and completed and "were successful" in completed[-1]:
+        return True, log, completed[-1]
+    lines = text.splitlines()
+    reason = ""
+    for key in ("Global symbol", "Assertion failure", "Assertion `", "[ fail ]", "*** ERROR", "compilation aborted"):
+        reason = next((l.strip() for l in lines if key in l), "")
+        if reason:
+            break
+    return False, log, (reason or f"exit {rc}")[:200]
+
+
 def main() -> int:
     args = parse_args()
     worktree = args.worktree.resolve()
@@ -151,11 +215,18 @@ def main() -> int:
 
         rc = run_logged(["ninja", f"-j{args.jobs}"], build_dir, log_fh)
 
-    if rc == 0:
-        print(f"build passed; log: {args.log}")
-    else:
+    if rc != 0:
         print(f"build failed with exit {rc}; log: {args.log}")
-    return rc
+        return rc
+    print(f"build passed; log: {args.log}")
+    if args.no_smoke_test:
+        return 0
+    ok, smoke_log, detail = run_smoke_test(build_dir, args.log)
+    if ok:
+        print(f"smoke test main.1st passed ({detail}); log: {smoke_log}")
+        return 0
+    print(f"smoke test main.1st FAILED ({detail}); log: {smoke_log}")
+    return SMOKE_FAILED_RC
 
 
 if __name__ == "__main__":

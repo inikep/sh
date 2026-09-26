@@ -14,7 +14,7 @@ Success requires all of:
 - `$OUTPUT_BRANCH` is rooted at `$DESTINATION_BASE_BRANCH`.
 - The selected source commits are processed in order, one at a time.
 - Empty marker commits are preserved; other empty cherry-picks are skipped.
-- The Group 8 end checkpoint (immediately before the Group 9 marker) and every later build-required commit has its own PASS build record.
+- The Group 8 end checkpoint (immediately before the Group 9 marker) and every later build-required commit has its own PASS build record. A PASS means the build succeeded **and** the MTR smoke test `main.1st` passed on that build.
 - Final tree diff to `$REFERENCE_BRANCH` is empty and the null-diff tip builds.
 - `$REPORT_FILE` records inputs, replay decisions, build logs, final parity, and `violations encountered: none` or the violations found.
 
@@ -165,6 +165,7 @@ Exit statuses worth recognizing:
 | 0 | range finished | move to the next range, the checkpoint build, or final parity |
 | 3 | conflict or unresolved cherry-pick result | resolve hunks manually, HP-8 check, `git cherry-pick --continue`, restart after that index |
 | 4 | build failure | read the log under `$RUN_DIR/logs/`, apply a build-driven fix, amend, rebuild |
+| 5 | build passed, `main.1st` smoke test failed | read `build-<idx>-<sha>-ccache-mtr-1st.log`; fix the harness or server defect at the commit that introduced it (not by overlaying a newer `mysql-test-run.pl`), amend, rebuild |
 | 6 | feature-gate stop | inspect, then restart with `--gate-decided-apply-file`, or handle the skip/hunk-drop manually |
 
 Confirm the real state from Git, not from the process table: `git status --short | grep '^UU\|^AA\|^DU\|^UD'`
@@ -253,6 +254,7 @@ you own the current index, and the restart index is always the next one.
 2. **If the commit is build-required, build it now**, at its own resulting SHA, before the driver
    touches the next commit — a small `build-now.sh IDX SRCSHA` wrapper around
    `ps_replay_build.py --incremental` (same `--cmake-flag`s as the driver) keeps this one command.
+   It runs the `main.1st` smoke test too; exit 0 is the only PASS, exit 5 is a smoke failure.
    **Pass `--reconfigure` only when a CMake input actually changed**, exactly as the driver decides
    it: compare `<build-dir>/.ps_replay_cmake_stamp` to `HEAD` and look for `CMakeLists.txt`,
    `*.cmake`, `configure.cmake` or `config.h.cmake` in the delta (and in the unstaged worktree).
@@ -379,6 +381,24 @@ scripts/ps_replay_changed_object_build.py \
 ```
 
 Use this to find compile errors faster; it is not a substitute for the required full build PASS.
+
+### MTR smoke test after every build
+
+`ps_replay_build.py` runs `main.1st` with the build tree's own `mysql-test-run.pl` after every
+successful ninja build (`--suite=main 1st`, `--parallel=1`, vardir `<build-dir>/mtr-smoke-var`,
+15-minute timeout). The log is written next to the build log as `<build-log-stem>-mtr-1st.log`.
+It passes only on `Completed: All N tests were successful`, which also covers the `shutdown_report`
+pseudo test. Exit status 5 means the build passed but the smoke test failed; `ps_replay_batch.py`
+stops with rc 5 and records both logs in `$REPORT_FILE`. It costs about 30-40 seconds per build.
+
+A compile-only PASS doesn't catch the defects that stop MTR altogether: a `mysql-test-run.pl` that
+no longer compiles (e.g. `Global symbol "$x" requires explicit package name` because a commit took
+the uses of a variable but not its declaration), a harness whose worker and master sides disagree
+("N+1 of N test(s) completed"), or a `mysqld --initialize` that crashes in InnoDB. Each of these
+hid for more than 100 commits in an earlier replay. Treat a smoke failure like a build failure: find
+the commit that introduced it, fix it there (fold the missing hunk into it or defer the part that
+depends on something later), amend, rebuild. `--no-smoke-test` (on both scripts) exists for
+diagnostic rebuilds only; a build without the smoke test is not a PASS record.
 
 ## Bucket Rules
 
@@ -654,6 +674,7 @@ Allowed helpers:
 - `ps_replay_batch.py`: bounded replay driver. It must use plain `git cherry-pick <sha>` for every non-marker commit, preserve marker commits with `git commit --allow-empty`, stop on conflicts/build failures/missing build records, and HP-8 check post-Group-8 source/plugin commits. For clean plain cherry-picks it checks the resulting output commit's changed paths; for conflicts, do the staged-path HP-8 check manually before `git cherry-pick --continue` unless the optional fast path above resolved only configured reference-absent conflicts. Use `--classify-only` before trusting bucket decisions. Pass the range-gate evidence files with `--feature-gate` (repeatable: pre-Group-9 and post-Group-8 files); the driver then stops before cherry-picking any commit whose decision hint requires manual review (pre-Group-9: `needs-review` and `partial-match-review`; post-Group-8: `needs-review`) unless explicitly accelerated with `--gate-auto-apply-path-glob` and `--gate-auto-apply-unmatched-identifier`, or already reviewed with `--gate-decided-apply <idx>` / `--gate-decided-apply-file <file>`. After inspecting a stopped commit, restart with a decided-apply option to apply it, or handle the skip/hunk-drop manually and restart after that index. For repeated audited absent packaging paths, pass `--auto-drop-reference-absent-conflict-glob <glob>` and `--ledger-file $RUN_DIR/ledger.tsv`; the driver may auto-`git rm` only conflicted paths that match the globs and are absent from `$REFERENCE_BRANCH`.
 - `ps_replay_auto_loop.sh`: compatibility wrapper around `ps_replay_batch.py`; it must inherit the same stop/build/cross-check behavior (including the Ninja generator and gold linker defaults). Set `PS_REPLAY_CMAKE_FLAGS='-DCMAKE_CXX_FLAGS=-fpermissive'` or pass `--cmake-flag` to the Python helper for task-specific build flags. Set `PS_REPLAY_FEATURE_GATES` (whitespace-separated gate JSON paths), `PS_REPLAY_GATE_DECIDED_APPLY` (whitespace-separated indexes), and/or `PS_REPLAY_GATE_DECIDED_APPLY_FILE` to forward the feature-gate options. Optional acceleration env vars: `PS_REPLAY_GATE_AUTO_APPLY_PATH_GLOBS`, `PS_REPLAY_GATE_AUTO_APPLY_UNMATCHED_IDENTIFIERS`, `PS_REPLAY_AUTO_DROP_CONFLICT_GLOBS`, and `PS_REPLAY_LEDGER_FILE`. It takes exactly two positional arguments, `START END`, and passes nothing else through; every other option must arrive as one of these env vars, or call `ps_replay_batch.py` directly.
 - `ps_replay_build.py`: standard CMake/Ninja build runner that writes logs. It configures with `-GNinja` and the gold linker flags and builds with `ninja -j<N>`, where `--jobs` is clamped to 80.
+- `ps_replay_build.py`: configure (when needed) and build with the skill defaults, then run the `main.1st` smoke test; exit 5 = build ok, smoke failed.
 - `ps_replay_changed_object_build.py`: cheap preflight that finds CMake object targets for changed C/C++ files and runs `ninja` on those objects. Use before full builds to shorten compile-error loops; full build PASS is still required.
 - `ps_replay_errors.py`: extracts likely root-cause diagnostics from large build logs.
 - `ps_replay_recover_cherry_pick.py`: restores `CHERRY_PICK_HEAD` and `MERGE_MSG` when the cherry-pick pseudo-files are lost while the index/worktree still hold the interrupted pick. It recovers cherry-pick state only; it never resolves files. Use it before hand-creating a replacement commit.

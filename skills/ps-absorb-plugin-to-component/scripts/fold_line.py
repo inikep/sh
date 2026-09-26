@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""fold_line.py BASE HEAD FROM UNTIL PATH ANCHOR LINE
-For commits in [FROM, UNTIL): insert LINE after ANCHOR in PATH if absent. UNTIL's tree must be
-unchanged (it already has the line). Later commits keep trees; raw objects rewritten. Prints new tip."""
+"""fold_line.py BASE HEAD FROM UNTIL PATH ANCHOR LINE [NOTE]
+For commits in [FROM, UNTIL): insert LINE after ANCHOR in PATH if absent (both may span several
+lines; a newline is appended to each). UNTIL's tree must be unchanged (it already has the line).
+Later commits keep trees; raw objects rewritten. NOTE, if given, is appended to FROM's message
+as a new paragraph. Prints new tip."""
 import subprocess, sys, os, tempfile
 def git(*a, inp=None, env=None):
     r = subprocess.run(['git', *a], input=inp, capture_output=True, env=env)
@@ -9,6 +11,7 @@ def git(*a, inp=None, env=None):
     return r.stdout
 rev = lambda x: git('rev-parse', x).decode().strip()
 base, head, frm, until, path, anchor, line = sys.argv[1:8]
+note = sys.argv[8] if len(sys.argv) > 8 else None
 anchor += '\n'; line += '\n'
 commits = git('rev-list', '--reverse', f'{base}..{head}').decode().split()
 i0, i1 = commits.index(rev(frm)), commits.index(rev(until))
@@ -27,6 +30,8 @@ for i, c in enumerate(commits[i0:], i0):
             nb = git('hash-object', '-w', '--stdin', inp=s.encode('utf-8', 'surrogateescape')).decode().strip()
             git('update-index', '--cacheinfo', f'{mode},{nb},{path}', env=env)
             tree = git('write-tree', env=env).decode().strip()
+    if note and i == i0:
+        msg = msg.rstrip(b'\n') + b'\n\n' + note.encode() + b'\n'
     nh = [(b'tree ' + tree.encode()) if l.startswith(b'tree ') else (b'parent ' + tip.encode()) if l.startswith(b'parent ') else l for l in hl]
     tip = git('hash-object', '-t', 'commit', '-w', '--stdin', inp=b'\n'.join(nh) + b'\n\n' + msg).decode().strip()
     if i == i1: assert tree == rev(c + '^{tree}')

@@ -11,7 +11,12 @@ keep their trees. Commit objects are rewritten raw (messages, author, committer 
 
 usage: rewrite_chain.py --base B --head H --start A --drop X --chain DIR --touchers FILE
          --old-root plugin/<name>/ --new-root components/<name>/ [--new-root ...]
-         [--transform PATH=PROG[@REV]] [--add PATH=REV:PATH[@REV]] [--append-msg-to A]
+         [--transform PATH=PROG[@REV[..END]]] [--add PATH=REV:PATH[@REV]] [--remove PATH[@REV]]
+         [--append-msg-to A]
+--old-root may be repeated (e.g. the plugin dir and its unittest dir); --remove deletes a path
+that X deletes but that is outside the old roots (e.g. a plugin-only mysql-test include).
+--transform ...@REV..END applies to commits in [REV, END) only (hoisting a hunk that a later
+commit removes again).
 Prints the new tip SHA; does not move any ref.
 """
 import argparse, glob, os, shlex, subprocess, sys, tempfile
@@ -32,10 +37,11 @@ ap.add_argument('--start', required=True)
 ap.add_argument('--drop', required=True)
 ap.add_argument('--chain', required=True)
 ap.add_argument('--touchers', required=True)
-ap.add_argument('--old-root', required=True)
+ap.add_argument('--old-root', action='append', required=True)
 ap.add_argument('--new-root', action='append', required=True)
 ap.add_argument('--transform', action='append', default=[])
 ap.add_argument('--add', action='append', default=[])
+ap.add_argument('--remove', action='append', default=[])
 ap.add_argument('--append-msg-to')
 ap.add_argument('--show', action='append', default=[])
 a = ap.parse_args()
@@ -66,19 +72,25 @@ def load(f):
     return out
 state_rows = {n: load(f) for n, f in states.items()}
 
-def split_at(v):
+def split_at(v, allow_end=False):
     if '@' in v:
         body, r = v.rsplit('@', 1)
+        end = di
+        if allow_end and '..' in r:
+            r, e = r.split('..', 1)
+            end = pos[rev(e)]
         idx = pos[rev(r)]
-        assert si <= idx < di
-        return body, idx
-    return v, si
-transforms, adds = [], []
+        assert si <= idx < di and idx < end <= di
+        return (body, idx, end) if allow_end else (body, idx)
+    return (v, si, di) if allow_end else (v, si)
+transforms, adds, removes = [], [], []
 for t in a.transform:
-    body, i0 = split_at(t); p, prog = body.split('=', 1); transforms.append((p, shlex.split(prog), i0))
+    body, i0, i1 = split_at(t, True); p, prog = body.split('=', 1); transforms.append((p, shlex.split(prog), i0, i1))
 for ad in a.add:
     body, i0 = split_at(ad); p, src = body.split('=', 1)
     adds.append((p, rev(src) if ':' in src else src, i0))
+for rm_ in a.remove:
+    removes.append(split_at(rm_))
 
 tmpdir = tempfile.mkdtemp(prefix='rewrite_chain.')
 env = dict(os.environ, GIT_INDEX_FILE=os.path.join(tmpdir, 'index'))
@@ -93,7 +105,7 @@ def transform(path, prog, blob, commit):
         cache[key] = git('hash-object', '-w', '--stdin', inp=r.stdout).decode().strip()
     return cache[key]
 
-roots = [a.old_root] + a.new_root
+roots = a.old_root + a.new_root
 drop_msg = git('cat-file', 'commit', drop).partition(b'\n\n')[2]
 append_to = rev(a.append_msg_to) if a.append_msg_to else None
 newmap = {}
@@ -110,7 +122,8 @@ for i, c in enumerate(commits):
     tree = [l for l in hl if l.startswith(b'tree ')][0][5:].decode()
     if i == di:
         if rev(newmap[op] + '^{tree}') != tree:
-            sys.exit('drop commit is not a no-op after the rewrite')
+            d = git('diff-tree', '-r', '--name-status', newmap[op] + '^{tree}', tree).decode()
+            sys.exit(f'drop commit is not a no-op after the rewrite; rewritten parent {newmap[op]} differs:\n{d[:3000]}')
         newmap[c] = newmap[op]
         continue
     if i < di:
@@ -121,6 +134,9 @@ for i, c in enumerate(commits):
         info = b''.join(b'0 ' + b'0' * 40 + b'\t' + p + b'\n' for p in rm if p)
         info += ''.join(f'{m} {b}\t{p}\n' for p, m, b in state_rows[tn]).encode()
         git('update-index', '--index-info', inp=info, env=env)
+        for path, i0 in removes:
+            if i >= i0:
+                git('update-index', '--force-remove', '--', path, env=env)
         for path, blob, i0 in adds:
             if i < i0:
                 continue
@@ -130,8 +146,8 @@ for i, c in enumerate(commits):
                     sys.exit(f'--add {path}: present at {c[:12]} with a different blob')
                 continue
             git('update-index', '--add', '--cacheinfo', f'100644,{blob},{path}', env=env)
-        for path, prog, i0 in transforms:
-            if i < i0:
+        for path, prog, i0, i1 in transforms:
+            if i < i0 or i >= i1:
                 continue
             ent = git('ls-files', '-s', '--', path, env=env).decode().split()
             if not ent:

@@ -55,6 +55,13 @@ rejected wholesale: the commit is split by path. The paths that probe clean and
 are not at risk of a later clobber are emitted in the target group under the
 original subject, and only the blocked paths are carried forward as a separate
 "[gN]"-prefixed commit at the tail.
+
+A commit promoted to g5 (whole or as the clean half of a split) is emitted
+without mysql-test/mysql-test-run.pl and mysql-test/collections/disabled.def.
+Each of those paths follows it in g5 as a separate commit with the same
+metadata and a "[mysql-test-run]" or "[disabled.def]" subject tag, so changes
+to the MTR driver and to the disabled-test list stay separately visible. A
+promoted commit that touches only such a path is just tagged.
 """
 
 import argparse
@@ -69,6 +76,13 @@ from collections import defaultdict
 # Groups whose failed g11 promotions are split by path instead of being
 # rejected as a whole commit.
 SPLIT_PROMOTION_GROUPS = frozenset({5})
+
+# Paths extracted from every commit promoted to g5 into a separate commit of
+# their own, emitted right after it, with the given subject tag.
+G5_EXTRACTED_PATHS = (
+    ("mysql-test/mysql-test-run.pl", "[mysql-test-run]"),
+    ("mysql-test/collections/disabled.def", "[disabled.def]"),
+)
 
 MAX_SUBJECT_LEN = 91
 BATCH_SIZE = 400
@@ -1097,6 +1111,71 @@ def emit_item(item, report, label):
     return False
 
 
+def split_g5_extracted_paths(item):
+    """Split G5_EXTRACTED_PATHS off a g5 promotion.
+
+    Returns (main_item, extracted_items); main_item is None when the item
+    touches nothing but extracted paths.
+    """
+    files = set(item["files"])
+    extracted = [(path, tag) for path, tag in G5_EXTRACTED_PATHS if path in files]
+    if not extracted:
+        return item, []
+
+    rest = sorted(files - {path for path, _tag in extracted})
+    main = None
+    if rest:
+        main = dict(item)
+        main["files"] = rest
+        main["body"] = split_note(
+            item["body"],
+            f"Split of {item['source_hash']}: "
+            f"{', '.join(path for path, _tag in extracted)} extracted into "
+            "separate commit(s).",
+        )
+
+    parts = []
+    for path, tag in extracted:
+        part = dict(item)
+        part["files"] = [path]
+        part["subject"] = add_subject_prefix(
+            item["subject"], tag, space_before_plain=True)
+        if rest or len(extracted) > 1:
+            part["body"] = split_note(
+                item["body"],
+                f"Split of {item['source_hash']}: {path} extracted from it.",
+            )
+        part["kind"] = f"{item['kind']}-extract"
+        parts.append(part)
+    return main, parts
+
+
+def emit_g5_promotion(item, report, label):
+    """Emit a g5 promotion followed by its extracted-path commits.
+
+    Returns True when at least one commit was emitted.
+    """
+    main, parts = split_g5_extracted_paths(item)
+    emitted = False
+    if main is not None:
+        emitted = emit_item(main, report, label)
+    for part in parts:
+        if emit_item(part, report, part["kind"]):
+            emitted = True
+            report.setdefault("extracted", []).append({
+                "hash": item["source_hash"],
+                "subject": part["subject"],
+                "path": part["files"][0],
+            })
+    return emitted
+
+
+def emit_promotion(item, report, label):
+    if item["target_group"] == 5:
+        return emit_g5_promotion(item, report, label)
+    return emit_item(item, report, label)
+
+
 def emit_squash(input_hash, cat, files, info, report):
     subject = G1_SUBJECTS[cat]
     apply_file_states(input_hash, sorted(files))
@@ -1504,7 +1583,7 @@ def split_failed_promotion(item, group, plan, report, blocked_paths, reason):
         f"Split of {item['source_hash']}: {len(clean)} path(s) promoted to "
         f"group {group}; {len(blocked)} path(s) deferred ({reason}).",
     )
-    if not emit_item(clean_item, report, clean_item["kind"]):
+    if not emit_promotion(clean_item, report, clean_item["kind"]):
         return False
     report["promoted"].append({
         "hash": item["source_hash"],
@@ -1587,7 +1666,7 @@ def promote_from_g11(plan, group, report):
             moved = dict(item)
             moved["target_group"] = group
             moved["kind"] = f"promoted-g11-to-g{group}"
-            emit_item(moved, report, moved["kind"])
+            emit_promotion(moved, report, moved["kind"])
             report["promoted"].append({
                 "hash": item["source_hash"],
                 "subject": item["subject"],
@@ -1786,6 +1865,10 @@ def print_final_report(args, base_hash, input_hash, parsed_count,
         f"{STYLE.magenta(str(len(report.get('splits', []))))}"
     )
     log(
+        f"{STYLE.bold('g5 extracted-path commits')}: "
+        f"{STYLE.magenta(str(len(report.get('extracted', []))))}"
+    )
+    log(
         f"{STYLE.bold('failed promotions moved to g10')}: "
         f"{STYLE.red(str(len(report['kept'])))}"
     )
@@ -1847,6 +1930,11 @@ def print_final_report(args, base_hash, input_hash, parsed_count,
             f"{item['blocked_paths']} path(s) deferred "
             f"({item['reason']}): {item['subject']}"
         ),
+    )
+    log_entries(
+        "g5 extracted-path commits",
+        report.get("extracted", []),
+        lambda item: f"{fmt_sha(item['hash'])} {item['path']}: {item['subject']}",
     )
     log_entries(
         "failed promotions moved to g10",
@@ -1913,6 +2001,7 @@ def main(argv=None):
         "emitted": [],
         "promoted": [],
         "splits": [],
+        "extracted": [],
         "kept": [],
         "skipped": [],
         "squashed": [],

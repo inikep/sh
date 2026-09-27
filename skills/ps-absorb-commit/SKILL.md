@@ -14,7 +14,7 @@ Remove `$ABSORB_COMMIT` by folding its hunks into the commits that own them, the
 - `$BASE_BRANCH`: lower bound for final counting, for example `mysql-5.7.9`.
 - `$WORK_BRANCH`: branch to rewrite.
 - `$REFERENCE`: final tree to preserve, usually the original `$WORK_BRANCH` tip.
-- `$ABSORB_BASE`: rebase/absorb anchor; must be an ancestor of `$WORK_BRANCH`.
+- `$ABSORB_BASE`: rebase/absorb anchor; must be an ancestor of `$WORK_BRANCH` and older than every owner in the owner table. For replay branches use the destination base (e.g. `mysql-8.3.0`); owners are often far below `$ABSORB_COMMIT`, beyond `git absorb`'s default stack depth.
 - `$ABSORB_COMMIT`: commit to remove.
 - `$OUTPUT_BRANCH`: branch to create/update.
 
@@ -23,7 +23,10 @@ Remove `$ABSORB_COMMIT` by folding its hunks into the commits that own them, the
 - **HR-1** Verify ancestry before rewriting. `git merge-base --is-ancestor "$ABSORB_BASE" "$WORK_BRANCH"` and `git merge-base --is-ancestor "$ABSORB_COMMIT" "$WORK_BRANCH"` must succeed. If either fails, stop and find the correct anchor or commit; do not rebase onto a convenient but unrelated base.
 - **HR-2** Record starting counts before changing anything: `git rev-list --count "$BASE_BRANCH..$WORK_BRANCH"` and `git rev-list --count "$ABSORB_BASE..$WORK_BRANCH"`. The absorbed result should usually have exactly one fewer commit than the input branch, unless an explicitly marked `[residual] ...` or `[snap] ...` commit is preserved.
 - **HR-3** Do not keep `$ABSORB_COMMIT`, an unmarked replacement absorb/snap commit, or any residual `fixup!` commits.
-- **HR-4** `git absorb` is only the first pass. It may leave staged hunks and may target repeated-context hunks too early. Each leftover hunk must be handled by one of three explicit outcomes: fold it into a concrete in-range owner commit, direct-edit that owner during rebase, or preserve it as a `[residual] ...` commit. Never hide leftovers in an arbitrary nearby feature commit. Use `[residual] ...` when the owner is outside the editable range, the hunk is baseline/reference alignment, the owner cannot be identified safely, or a full manual split cannot be completed in the same pass. Residual commits must preserve `$ABSORB_COMMIT`'s original metadata and message body, prefix the subject with `[residual] `, and be reported as residual work.
+- **HR-4** `git absorb` is advisory only. Its fixup commits are never kept: read its target choices as hints, then reset to `$ABSORB_COMMIT^` and create the fixups yourself from the owner table (HR-4a). Known absorb failures: hunks split across unrelated owners, positional drift (e.g. a fixup that deletes a file's closing `#endif`), repeated-context hunks targeted too early, and hunks left staged with no target. Every hunk must end in exactly one outcome: fold into a concrete in-range owner, direct-edit that owner during rebase, or a `[residual] ...` commit. Never hide a hunk in an arbitrary nearby feature commit. Use `[residual] ...` when the owner is outside the editable range, the hunk is baseline/reference alignment, the owner cannot be identified safely, or a full manual split cannot be completed in the same pass. Residual commits must preserve `$ABSORB_COMMIT`'s original metadata and message body, prefix the subject with `[residual] `, and be reported as residual work.
+- **HR-4a** Before creating any fixup, write an owner table covering every hunk of `$ABSORB_COMMIT` (`git diff "$ABSORB_COMMIT^" "$ABSORB_COMMIT"`): `file/hunk -> owner full SHA -> reason`. Reasons are one of: region-last-toucher (`git log -L`), introducer of the symbol/line (`git log -S`), or the in-range commit of the same feature/port (e.g. the `PS-NNNN` 8.x adaptation commit) when it touched the region. Put the table in the report.
+- **HR-4b** Moved code stays together. When a hunk removes lines in one place and another hunk adds the same lines elsewhere (declarations, includes, blocks), both go to the same owner, normally the later of the two region owners (the earlier one may not yet contain the lines being removed); splitting them leaves every commit between the two owners with the code duplicated or missing.
+- **HR-4c** Fixup subjects must be `fixup! <40-hex owner SHA>` (`git commit -m "fixup! $(git rev-parse <owner>)"`). Do not use `git commit --fixup=<owner>`: autosquash matches its `fixup! <subject>` by subject, and replay branches carry duplicate and 91-char-truncated subjects, so it silently squashes into the wrong commit. Check with `git log --format=%s "$ABSORB_BASE..$ABSORB_COMMIT^" | sort | uniq -d`.
 - **HR-5** Preserve the branch's existing ancestry and commit grouping. Do not repair count regressions by changing `$ABSORB_BASE` or rebasing onto another base; if a different anchor is truly needed, first verify it is an ancestor of `$WORK_BRANCH` and treat it as the new `$ABSORB_BASE`.
 - **HR-6** Never publish a non-null diff to `$REFERENCE`. If owner retargeting is complete but `HEAD` still differs from `$REFERENCE`, create one additional `[snap] ...` commit that makes the tree match `$REFERENCE`.
 - **HR-7** All rebase/autosquash conflicts must be solved with **CDF: Conflict-Driven Fix**. Inspect each conflicted hunk, identify the owning later commit or final local shape, then edit only that hunk.
@@ -50,18 +53,36 @@ Stop if ancestry is wrong. Do not rebase onto a convenient unrelated base.
 
 ### 1. Absorb the Prefix
 
+Optional hint pass (its commits are thrown away, HR-4):
+
 ```sh
 git switch -C absorb-commit-work "$ABSORB_COMMIT"
 git reset --soft "$ABSORB_COMMIT^"
 git absorb --force --base "$ABSORB_BASE"
-git status --short
-git diff --cached --stat
+git log --format='%h %s' "$ABSORB_COMMIT^..HEAD"   # targets = hints only
+for c in $(git rev-list --reverse "$ABSORB_COMMIT^..HEAD"); do git show --format='== %s' "$c"; done
+git status --short                                  # untargeted leftovers
+git reset --hard "$ABSORB_COMMIT^"                  # discard absorb's commits
 ```
 
-For staged leftovers, choose one of:
+Write the owner table (HR-4a/4b), then create one fixup per owner from `$ABSORB_COMMIT`'s own hunks:
 
-- `git commit --fixup=<owner>` when blame, `-S`, or file history identifies an in-range owner.
-- A `[residual] ...` commit when leftovers cannot be folded into an in-range owner safely, including leftovers whose natural owner is outside the editable range, baseline/reference alignment, or unclassified work; preserve `$ABSORB_COMMIT`'s original metadata and message body, prefix the subject with `[residual] `, and report it as residual work.
+```sh
+# whole file to one owner
+git diff "$ABSORB_COMMIT^" "$ABSORB_COMMIT" -- <file> | git apply --index
+git commit --no-verify -m "fixup! $(git rev-parse <owner>)"
+# one file split across owners: stage only that owner's hunks (git apply --index of an
+# edited per-hunk patch, or git add -p against a worktree holding $ABSORB_COMMIT's file)
+```
+
+When every hunk is staged into a fixup or a residual commit, verify the stack before any rebase:
+
+```sh
+test "$(git rev-parse HEAD^{tree})" = "$(git rev-parse "$ABSORB_COMMIT^{tree}")"
+git status --short    # must be empty (restore the worktree with git checkout -- . if needed)
+```
+
+Hunks without a safe in-range owner become a `[residual] ...` commit: owner outside the editable range, baseline/reference alignment, or unclassified work. Preserve `$ABSORB_COMMIT`'s original metadata and message body, prefix the subject with `[residual] `, and report it as residual work.
 
 Create a residual commit with original metadata and a marked subject:
 
@@ -83,6 +104,7 @@ Useful owner probes:
 ```sh
 git diff --cached --unified=0
 git log --reverse --format='%h %s' "$ABSORB_BASE..HEAD" -S'<symbol-or-line>' -- <file>
+git log -s --format='%h %s' -L '/<first line of region>/,+<n>:<file>' "$ABSORB_BASE..HEAD"   # region-last-toucher
 git blame -L <start>,<end> -- <file>
 git show --stat --oneline <candidate>
 ```
@@ -93,9 +115,11 @@ Autosquash the prefix:
 GIT_SEQUENCE_EDITOR=: git rebase -i --autosquash --reapply-cherry-picks --empty=keep "$ABSORB_BASE"
 git diff --stat HEAD "$ABSORB_COMMIT"
 git log --oneline --grep='^fixup!' "$ABSORB_BASE..HEAD"
+diff <(git log --format='%an%x09%ad%x09%s' "$ABSORB_BASE..HEAD") \
+     <(git log --format='%an%x09%ad%x09%s' "$ABSORB_BASE..$ABSORB_COMMIT^")
 ```
 
-The prefix must match `$ABSORB_COMMIT` and contain no `fixup!` commits before replaying later commits.
+The prefix must match `$ABSORB_COMMIT`'s tree, contain no `fixup!` commits, and keep the same author/date/subject sequence as `$ABSORB_COMMIT^` (one per original commit) before replaying later commits.
 
 ### 2. Replay the Suffix
 

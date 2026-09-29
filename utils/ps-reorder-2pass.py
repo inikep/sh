@@ -62,6 +62,11 @@ Each of those paths follows it in g5 as a separate commit with the same
 metadata and a "[mysql-test-run]" or "[disabled.def]" subject tag, so changes
 to the MTR driver and to the disabled-test list stay separately visible. A
 promoted commit that touches only such a path is just tagged.
+
+A g11 commit placed in g10 whose subject starts with a "[#NNNN]" pull-request
+tag and that touches components/<name>/ or plugin/<name>/ has that tag replaced
+by "[components/<name>]" or "[plugin/<name>]". The original subject is kept in
+the body under "Original title:".
 """
 
 import argparse
@@ -83,6 +88,11 @@ G5_EXTRACTED_PATHS = (
     ("mysql-test/mysql-test-run.pl", "[mysql-test-run]"),
     ("mysql-test/collections/disabled.def", "[disabled.def]"),
 )
+
+# A leading "[#NNNN]" pull-request tag, and the feature directory whose
+# "[components/<name>]" / "[plugin/<name>]" tag replaces it in g10.
+PR_TAG_RE = re.compile(r"^\[#\d+\]\s*")
+FEATURE_DIR_RE = re.compile(r"^((?:components|plugin)/[^/]+)/")
 
 MAX_SUBJECT_LEN = 91
 BATCH_SIZE = 400
@@ -1029,17 +1039,19 @@ def apply_item_file_states(item):
         apply_file_states(source_hash, paths)
 
 
-def build_message(subject, body):
-    if len(subject) <= MAX_SUBJECT_LEN:
+def build_message(subject, body, original_subject=None):
+    original = original_subject or subject
+    if len(subject) <= MAX_SUBJECT_LEN and original == subject:
         return subject + ("\n\n" + body if body.strip() else "")
     truncated = subject[:MAX_SUBJECT_LEN]
-    full_body = f"Original title:\n{subject}"
+    full_body = f"Original title:\n{original}"
     if body.strip():
         full_body += "\n\n" + body
     return truncated + "\n\n" + full_body
 
 
-def commit_with_info(info, subject, body="", allow_empty=False):
+def commit_with_info(info, subject, body="", allow_empty=False,
+                     original_subject=None):
     env = os.environ.copy()
     env["GIT_AUTHOR_NAME"] = info["author_name"]
     env["GIT_AUTHOR_EMAIL"] = info["author_email"]
@@ -1048,7 +1060,7 @@ def commit_with_info(info, subject, body="", allow_empty=False):
     env["GIT_COMMITTER_EMAIL"] = info["committer_email"]
     env["GIT_COMMITTER_DATE"] = info["committer_date"]
 
-    cmd = ["commit", "-m", build_message(subject, body)]
+    cmd = ["commit", "-m", build_message(subject, body, original_subject)]
     if allow_empty:
         cmd.append("--allow-empty")
     r = run_git(cmd, check=False, env=env)
@@ -1089,7 +1101,8 @@ def emit_item(item, report, label):
     else:
         item["emitted_as"] = "state"
         apply_item_file_states(item)
-    ok = commit_with_info(item["info"], item["subject"], item["body"])
+    ok = commit_with_info(item["info"], item["subject"], item["body"],
+                          original_subject=item.get("original_subject"))
     entry = {
         "hash": item["source_hash"],
         "subject": item["subject"],
@@ -1709,6 +1722,31 @@ def promote_from_g11(plan, group, report):
     log_summary(group, promoted, kept_conflict, skipped_empty, split_count)
 
 
+def feature_dir_tag(paths):
+    """"[components/<name>]" or "[plugin/<name>]" for the feature directory
+    holding most of `paths` (ties: first in path order), or None."""
+    counts = defaultdict(int)
+    for path in sorted(paths):
+        m = FEATURE_DIR_RE.match(path)
+        if m:
+            counts[m.group(1)] += 1
+    if not counts:
+        return None
+    return f"[{max(counts, key=counts.get)}]"
+
+
+def retag_g10_promotion(item):
+    """Replace a leading "[#NNNN]" subject tag with the feature-directory tag."""
+    m = PR_TAG_RE.match(item["subject"])
+    if not m:
+        return
+    tag = feature_dir_tag(item["files"])
+    if tag is None:
+        return
+    item["original_subject"] = item["subject"]
+    item["subject"] = f"{tag} {item['subject'][m.end():]}"
+
+
 def drain_g10_candidates(plan, report):
     remaining = []
     moved_count = 0
@@ -1722,10 +1760,11 @@ def drain_g10_candidates(plan, report):
         moved = dict(item)
         moved["target_group"] = 10
         moved["kind"] = "g10-code-placement"
+        retag_g10_promotion(moved)
         plan["buckets"][10].append(moved)
         report["promoted"].append({
             "hash": item["source_hash"],
-            "subject": item["subject"],
+            "subject": moved["subject"],
             "to_group": 10,
             "reason": "g10 source-order code placement",
         })

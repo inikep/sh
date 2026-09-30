@@ -26,7 +26,7 @@ on a path the item no longer owns. The probe applies only the item's own paths,
 exactly as emission will.
 
 Commits sitting in the input's g1 region are never replayed: g1 is entirely
-this tool's own product (the "Squash: ..." commits and "Remove files deleted by
+this tool's own product (the "[squash] ..." commits and "Remove files deleted by
 input branch") and is regenerated from scratch on every run, so replaying it
 would emit a second, stale copy of each synthetic commit.
 
@@ -157,17 +157,17 @@ G1_ROCKSDB_SUBMODULE = "rocksdb-submodule"
 
 
 G1_SUBJECTS = {
-    G1_DOC: "Squash: doc/",
-    G1_MAN: "Squash: man/",
-    G1_INTERNAL: "Squash: internal/",
-    G1_TOKUDB_BACKUP: "Squash: plugin/tokudb-backup-plugin/",
-    G1_AUDIT_LOG: "Squash: plugin/audit_log/",
-    G1_STORAGE_TOKUDB: "Squash: storage/tokudb/",
-    G1_PS_TOKUDB_ADMIN: "Squash: scripts/ps_tokudb_admin.sh and scripts/fill_help_tables.sql",
-    G1_VERSION_UNIV: "Squash: MYSQL_VERSION, VERSION and storage/innobase/include/univ.i",
-    G1_TOKUDB_TESTS: "Squash: mysql-test/suite/tokudb* and MTR *toku* tests",
-    G1_TRAVIS: "Squash: .travis.yml",
-    G1_ROCKSDB_SUBMODULE: "Squash: .gitmodules and storage/rocksdb/rocksdb",
+    G1_DOC: "[squash] doc/",
+    G1_MAN: "[squash] man/",
+    G1_INTERNAL: "[squash] internal/",
+    G1_TOKUDB_BACKUP: "[squash] plugin/tokudb-backup-plugin/",
+    G1_AUDIT_LOG: "[squash] plugin/audit_log/",
+    G1_STORAGE_TOKUDB: "[squash] storage/tokudb/",
+    G1_PS_TOKUDB_ADMIN: "[squash] scripts/ps_tokudb_admin.sh and scripts/fill_help_tables.sql",
+    G1_VERSION_UNIV: "[squash] MYSQL_VERSION, VERSION and storage/innobase/include/univ.i",
+    G1_TOKUDB_TESTS: "[squash] mysql-test/suite/tokudb* and MTR *toku* tests",
+    G1_TRAVIS: "[squash] .travis.yml",
+    G1_ROCKSDB_SUBMODULE: "[squash] .gitmodules and storage/rocksdb/rocksdb",
 }
 
 
@@ -813,7 +813,7 @@ def plan_commits(parsed, removed_markers, removed_paths, base_hash):
 
         if source_group == 1:
             # A g1 source commit is never replayed. The input's g1 region only
-            # ever holds this tool's own previous output -- the "Squash: ..."
+            # ever holds this tool's own previous output -- the "[squash] ..."
             # commits and "Remove files deleted by input branch" -- and all of
             # that is regenerated from scratch on every run: squash categories
             # from the loop above, deletions from base_removed_files. Replaying

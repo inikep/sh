@@ -41,9 +41,9 @@ promotion that is guarded by authoritative g2-g10 commits, because those are
 still snapshot-emitted.
 
 An input commit that already sits in g2-g10 is authoritative: it is emitted
-intact in its own group, never split by path and never relocated. Only g11
-commits (and commits ahead of the g1 marker) are split into g1-g4 buckets and
-offered for promotion.
+in its own group, never relocated and never split by path, except that the g1
+squashes absorb their paths from every group. Only g11 commits (and commits
+ahead of the g1 marker) are split into g1-g4 buckets and offered for promotion.
 
 Pass 1 emits g1-g4, the groups that may split or squash source commits.
 Pass 2 emits g5-g10, and at each group tries to promote matching g11 commits
@@ -765,6 +765,13 @@ def plan_commits(parsed, removed_markers, removed_paths, base_hash):
         plan["buckets"][group].append(item)
         register_result_file_occurrences(item, result_file_last_item)
 
+    def collect_g1(src, g1):
+        for cat, paths in g1.items():
+            plan["g1_files"][cat].update(paths)
+            if cat not in plan["g1_first_info"]:
+                plan["g1_first_info"][cat] = src["info"]
+                plan["g1_first_pos"][cat] = src["pos"]
+
     for src in parsed:
         files = src["files"]
         if skipped_paths:
@@ -798,18 +805,25 @@ def plan_commits(parsed, removed_markers, removed_paths, base_hash):
             # match that group into g11, from where promotion can drop it into
             # another group at its source position -- ahead of that group's own
             # commits, and applied as a full file state that clobbers the file's
-            # later content. Only g11 commits are split and promoted.
+            # later content. Only g11 commits are split and promoted. The one
+            # exception is g1: its squashes absorb their paths from every group,
+            # so each category is set once, to its INPUT state, and no later
+            # commit touches it again.
+            g1, files = split_g1_paths(files)
+            collect_g1(src, g1)
+            if not files:
+                plan["removed"].append({
+                    "hash": src["hash"],
+                    "subject": src["info"]["subject"],
+                    "reason": "all changed paths were squashed into g1",
+                })
+                continue
             append_bucket_item(
                 source_group, make_item(src, files, source_group, "source-group"))
             continue
 
         g1, files = split_g1_paths(files)
-
-        for cat, paths in g1.items():
-            plan["g1_files"][cat].update(paths)
-            if cat not in plan["g1_first_info"]:
-                plan["g1_first_info"][cat] = src["info"]
-                plan["g1_first_pos"][cat] = src["pos"]
+        collect_g1(src, g1)
 
         if source_group == 1:
             # A g1 source commit is never replayed. The input's g1 region only

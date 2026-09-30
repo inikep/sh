@@ -153,6 +153,7 @@ G1_PS_TOKUDB_ADMIN = "ps-tokudb-admin"
 G1_VERSION_UNIV = "version-univ"
 G1_TOKUDB_TESTS = "tokudb-tests"
 G1_TRAVIS = "travis"
+G1_ROCKSDB_SUBMODULE = "rocksdb-submodule"
 
 
 G1_SUBJECTS = {
@@ -166,6 +167,7 @@ G1_SUBJECTS = {
     G1_VERSION_UNIV: "Squash: MYSQL_VERSION, VERSION and storage/innobase/include/univ.i",
     G1_TOKUDB_TESTS: "Squash: mysql-test/suite/tokudb* and MTR *toku* tests",
     G1_TRAVIS: "Squash: .travis.yml",
+    G1_ROCKSDB_SUBMODULE: "Squash: .gitmodules and storage/rocksdb/rocksdb",
 }
 
 
@@ -549,6 +551,8 @@ def classify_g1(path):
         return G1_TOKUDB_TESTS
     if path == ".travis.yml":
         return G1_TRAVIS
+    if path in {".gitmodules", "storage/rocksdb/rocksdb"}:
+        return G1_ROCKSDB_SUBMODULE
     return None
 
 

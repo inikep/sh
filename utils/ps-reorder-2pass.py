@@ -63,10 +63,11 @@ metadata and a "[mysql-test-run]" or "[disabled.def]" subject tag, so changes
 to the MTR driver and to the disabled-test list stay separately visible. A
 promoted commit that touches only such a path is just tagged.
 
-A g11 commit placed in g10 whose subject starts with a "[#NNNN]" pull-request
-tag and that touches components/<name>/ or plugin/<name>/ has that tag replaced
-by "[components/<name>]" or "[plugin/<name>]". The original subject is kept in
-the body under "Original title:".
+A g11 commit placed in g10 that touches components/<name>/ or plugin/<name>/
+is tagged "[components/<name>]" or "[plugin/<name>]": a leading "[#NNNN]"
+pull-request tag is replaced by it, with the original subject kept in the body
+under "Original title:", and a subject with no leading "[...]" tag gets it
+prepended. A subject that already starts with another tag is left alone.
 """
 
 import argparse
@@ -89,9 +90,11 @@ G5_EXTRACTED_PATHS = (
     ("mysql-test/collections/disabled.def", "[disabled.def]"),
 )
 
-# A leading "[#NNNN]" pull-request tag, and the feature directory whose
-# "[components/<name>]" / "[plugin/<name>]" tag replaces it in g10.
+# A leading "[#NNNN]" pull-request tag, any leading "[...]" subject tag, and
+# the feature directory whose "[components/<name>]" / "[plugin/<name>]" tag
+# replaces the former, or is prepended when there is neither, in g10.
 PR_TAG_RE = re.compile(r"^\[#\d+\]\s*")
+SUBJECT_TAG_RE = re.compile(r"^\[[^\]\s]+\]")
 FEATURE_DIR_RE = re.compile(r"^((?:components|plugin)/[^/]+)/")
 
 MAX_SUBJECT_LEN = 91
@@ -1754,15 +1757,20 @@ def feature_dir_tag(paths):
 
 
 def retag_g10_promotion(item):
-    """Replace a leading "[#NNNN]" subject tag with the feature-directory tag."""
-    m = PR_TAG_RE.match(item["subject"])
-    if not m:
+    """Tag the subject with its feature directory: replace a leading "[#NNNN]"
+    tag (keeping the original subject in the body), or prepend the tag when
+    the subject has no leading tag at all."""
+    subject = item["subject"]
+    m = PR_TAG_RE.match(subject)
+    if not m and SUBJECT_TAG_RE.match(subject):
         return
     tag = feature_dir_tag(item["files"])
     if tag is None:
         return
-    item["original_subject"] = item["subject"]
-    item["subject"] = f"{tag} {item['subject'][m.end():]}"
+    if m:
+        item["original_subject"] = subject
+        subject = subject[m.end():]
+    item["subject"] = f"{tag} {subject}"
 
 
 def drain_g10_candidates(plan, report):

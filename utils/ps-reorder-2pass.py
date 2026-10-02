@@ -324,7 +324,7 @@ def log_summary(group, promoted, kept_conflict, skipped_empty, split=0):
     )
 
 
-def run_git(args, check=True, env=None, retry_on_lock=True):
+def run_git(args, check=True, env=None, retry_on_lock=True, input=None):
     tries = 3 if retry_on_lock else 1
     last = None
     for attempt in range(tries):
@@ -335,6 +335,7 @@ def run_git(args, check=True, env=None, retry_on_lock=True):
             errors="replace",
             capture_output=True,
             env=env,
+            input=input,
         )
         if last.returncode == 0:
             return last
@@ -1081,10 +1082,13 @@ def commit_with_info(info, subject, body="", allow_empty=False,
     env["GIT_COMMITTER_EMAIL"] = info["committer_email"]
     env["GIT_COMMITTER_DATE"] = info["committer_date"]
 
-    cmd = ["commit", "-m", build_message(subject, body, original_subject)]
+    # Pass the message on stdin: a single argv entry is capped at 128 KiB
+    # (MAX_ARG_STRLEN), which squash-heavy commits can exceed.
+    cmd = ["commit", "-F", "-"]
     if allow_empty:
         cmd.append("--allow-empty")
-    r = run_git(cmd, check=False, env=env)
+    r = run_git(cmd, check=False, env=env,
+                input=build_message(subject, body, original_subject))
     if r.returncode == 0:
         return True
     combined = (r.stdout + r.stderr).lower()

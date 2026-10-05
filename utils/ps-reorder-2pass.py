@@ -624,7 +624,9 @@ def is_g5_promotable_path(path):
         path.startswith("mysql-test/") or
         path.endswith(".test") or
         path.endswith(".result") or
-        path.endswith(".results") or
+        path.endswith(".inc") or
+        path.endswith(".cnf") or
+        path.endswith(".supp") or
         path.endswith(".opt")
     )
 

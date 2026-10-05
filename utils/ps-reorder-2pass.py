@@ -71,6 +71,11 @@ storage/<name>/ or router/ is tagged "[components/<name>]", "[plugin/<name>]",
 a leading "[#NNNN]" pull-request tag is replaced by it, with the original
 subject kept in the body under "Original title:"; any other subject, including
 one that already starts with another "[...]" tag, gets it prepended.
+
+The release-branch tags "[8.4]", "[9.7]", "[9.x]" and "[trunk]" are removed
+from the subject of every g11 commit (and every commit ahead of the g1 marker)
+when it is planned, before any other subject tag is added, so they do not
+reach any group the commit or its split parts land in.
 """
 
 import argparse
@@ -101,6 +106,16 @@ G5_EXTRACTED_PATHS = (
 # tag replaces it, or is prepended when there is none, in g10. All of router/
 # counts as one feature directory.
 PR_TAG_RE = re.compile(r"^\[#\d+\]\s*")
+
+# Release-branch tags stripped from the subject of every g11 commit (and every
+# commit ahead of the g1 marker) as it is planned, wherever they occur: at the
+# start of the subject or of a quoted/parenthesized one, with a following ":"
+# and whitespace, or after a space or "-", e.g. "PS-1 [9.x]: Fix" -> "PS-1:
+# Fix", "[8.4] Merge ... ([8.4] Null-merge ...)" -> "Merge ... (Null-merge ...)".
+VERSION_TAGS = ("8.4", "9.7", "9.x", "trunk")
+_VERSION_TAG = "\\[(?:" + "|".join(re.escape(tag) for tag in VERSION_TAGS) + ")\\]"
+VERSION_TAG_RE = re.compile(
+    rf"(^|[(\"']){_VERSION_TAG}:?\s*|[ -]{_VERSION_TAG}")
 FEATURE_DIR_RE = re.compile(r"^((?:components|plugin|storage)/[^/]+|router)/")
 
 MAX_SUBJECT_LEN = 91
@@ -654,6 +669,11 @@ def is_result_only_commit(paths):
     return bool(paths) and all(is_result_file(path) for path in paths)
 
 
+def strip_version_tags(subject):
+    stripped = VERSION_TAG_RE.sub(lambda m: m.group(1) or "", subject)
+    return stripped if stripped.strip() else subject
+
+
 def add_subject_prefix(subject, prefix, space_before_plain=False):
     if subject.startswith(prefix):
         return subject
@@ -880,6 +900,12 @@ def plan_commits(parsed, removed_markers, removed_paths, base_hash):
                 "reason": reason,
             })
             continue
+
+        # Only g11 commits and commits ahead of the g1 marker reach here; drop
+        # their release-branch tags before any item takes the subject.
+        subject = strip_version_tags(src["info"]["subject"])
+        if subject != src["info"]["subject"]:
+            src = dict(src, info=dict(src["info"], subject=subject))
 
         if is_result_only_commit(files):
             result_files_before_squash = list(files)

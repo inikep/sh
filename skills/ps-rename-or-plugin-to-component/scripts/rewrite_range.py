@@ -17,9 +17,14 @@ rewritten raw: messages, author, committer and all other headers stay byte-ident
 --append-msg-to SHA appends the dropped commit's message to that commit after a
 '==========================================' line.
 
+Trees are rebuilt by splicing only the touched directories (treeedit.py), so the cost
+scales with the number of edited paths, not with the size of the tree.
+
 Prints the new tip SHA and a map of selected commits. Does not move any ref.
 """
 import argparse, os, shlex, subprocess, sys, tempfile
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from treeedit import ls_paths, edit_tree
 
 def git(*a, inp=None, env=None):
     r = subprocess.run(['git', *a], input=inp, capture_output=True, env=env)
@@ -68,8 +73,6 @@ for ad in a.add:
     adds.append((p, blob, i0))
 append_to = rev(a.append_msg_to) if a.append_msg_to else None
 
-tmpdir = tempfile.mkdtemp(prefix='rewrite_range.')
-env = dict(os.environ, GIT_INDEX_FILE=os.path.join(tmpdir, 'index'))
 cache = {}
 
 def transform(path, prog, blob, commit):
@@ -81,6 +84,46 @@ def transform(path, prog, blob, commit):
             sys.exit(f"transform {prog} failed on {path}@{commit[:12]}: {r.stderr.decode()}")
         cache[key] = git('hash-object', '-w', '--stdin', inp=r.stdout).decode().strip()
     return cache[key]
+
+def rewrite_tree(tree, i, c):
+    """Apply the moves, adds and transforms that are active at commit index i, in the
+    same order and with the same checks as an index-based rewrite, but by splicing only
+    the touched directories (treeedit.edit_tree)."""
+    paths = set()
+    for old, new, i0 in moves:
+        if i >= i0: paths.update((old, new))
+    for path, blob, i0 in adds:
+        if i >= i0: paths.add(path)
+    for path, prog, i0 in transforms:
+        if i >= i0: paths.add(path)
+    if not paths:
+        return tree
+    before = ls_paths(tree, paths)
+    for p_, (_, typ, _) in before.items():
+        if typ == 'tree':
+            sys.exit(f'{p_} is a directory at {c[:12]}; list its files instead')
+    cur = {p_: (m, s_) for p_, (m, _, s_) in before.items()}
+    for old, new, i0 in moves:
+        if i < i0 or old not in cur:
+            continue
+        if new in cur:
+            sys.exit(f'{new} already exists at {c[:12]}')
+        cur[new] = cur.pop(old)
+    for path, blob, i0 in adds:
+        if i < i0:
+            continue
+        if path in cur:
+            if cur[path][1] != blob:
+                sys.exit(f'--add {path}: present at {c[:12]} with a different blob {cur[path][1][:12]}')
+            continue
+        cur[path] = ('100644', blob)
+    for path, prog, i0 in transforms:
+        if i < i0 or path not in cur:
+            continue
+        cur[path] = (cur[path][0], transform(path, prog, cur[path][1], c))
+    init = {p_: (m, s_) for p_, (m, _, s_) in before.items()}
+    edits = {p_: cur.get(p_) for p_ in set(init) | set(cur) if init.get(p_) != cur.get(p_)}
+    return edit_tree(tree, edits) if edits else tree
 
 drop_msg = git('cat-file', 'commit', drop).partition(b'\n\n')[2]
 newmap = {}
@@ -95,45 +138,17 @@ for i, c in enumerate(commits):
     op = parents[0]
     tree = [l for l in hl if l.startswith(b'tree ')][0][5:].decode()
     if i == di:
-        if rev(newmap[op] + '^{tree}') != tree:
+        if rev(newmap.get(op, op) + '^{tree}') != tree:
             sys.exit('drop commit is not a no-op after the rewrite; absorption incomplete '
                      '(compare its tree with the rewritten parent)')
-        newmap[c] = newmap[op]
+        newmap[c] = newmap.get(op, op)
         continue
     if i < di:
-        git('read-tree', tree, env=env)
-        for old, new, i0 in moves:
-            if i < i0:
-                continue
-            ent = git('ls-files', '-s', '--', old, env=env).decode().split()
-            if not ent:
-                continue
-            if git('ls-files', '-s', '--', new, env=env).strip():
-                sys.exit(f'{new} already exists at {c[:12]}')
-            git('update-index', '--force-remove', '--', old, env=env)
-            git('update-index', '--add', '--cacheinfo', f'{ent[0]},{ent[1]},{new}', env=env)
-        for path, blob, i0 in adds:
-            if i < i0:
-                continue
-            ent = git('ls-files', '-s', '--', path, env=env).decode().split()
-            if ent:
-                if ent[1] != blob:
-                    sys.exit(f'--add {path}: present at {c[:12]} with a different blob {ent[1][:12]}')
-                continue
-            git('update-index', '--add', '--cacheinfo', f'100644,{blob},{path}', env=env)
-        for path, prog, i0 in transforms:
-            if i < i0:
-                continue
-            ent = git('ls-files', '-s', '--', path, env=env).decode().split()
-            if not ent:
-                continue
-            nb = transform(path, prog, ent[1], c)
-            git('update-index', '--cacheinfo', f'{ent[0]},{nb},{path}', env=env)
-        tree = git('write-tree', env=env).decode().strip()
+        tree = rewrite_tree(tree, i, c)
     if c == append_to:
         msg = msg.rstrip(b'\n') + b'\n\n==========================================\n\n' + drop_msg
     nh = [(b'tree ' + tree.encode()) if l.startswith(b'tree ') else
-          (b'parent ' + newmap[op].encode()) if l.startswith(b'parent ') else l for l in hl]
+          (b'parent ' + newmap.get(op, op).encode()) if l.startswith(b'parent ') else l for l in hl]
     newmap[c] = git('hash-object', '-t', 'commit', '-w', '--stdin',
                     inp=b'\n'.join(nh) + b'\n\n' + msg).decode().strip()
 

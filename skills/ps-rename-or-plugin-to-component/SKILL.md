@@ -1,12 +1,16 @@
 ---
-name: ps-absorb-plugin-to-component
-description: Use when a Percona Server / MySQL branch has a later "convert <name> plugin to a component" commit that must disappear, so the component exists from the plugin's introducing commit and every commit touching it builds (moving plugin/<name> to components/<name>, INSTALL PLUGIN to INSTALL COMPONENT, MYSQL_ADD_PLUGIN to MYSQL_ADD_COMPONENT in history).
+name: ps-rename-or-plugin-to-component
+description: Use when a Percona Server / MySQL branch has a later commit that must disappear by moving its effect back to where the files were introduced - either a "convert <name> plugin to a component" commit (plugin/<name> to components/<name>, INSTALL PLUGIN to INSTALL COMPONENT, MYSQL_ADD_PLUGIN to MYSQL_ADD_COMPONENT) or a commit that renames/moves files (e.g. splitting tests into a new MTR suite, dropping a filename prefix), so history shows the files at their new paths from their introducing commit.
 ---
 
-# Absorb a Plugin-to-Component Conversion
+# Absorb a Rename or a Plugin-to-Component Conversion
 
 ## Overview
-Treat the conversion commit X as a **deterministic transformation**, not a set of hunks. Derive rules from X, prove they turn `X^` into `X` byte for byte, apply them to every earlier version of each file, rewrite the trees with plumbing, then require that X becomes a no-op and drop it.
+Treat the commit X as a **deterministic transformation**, not a set of hunks. Derive rules from X, prove they turn `X^` into `X` byte for byte, apply them to every earlier version of each file, rewrite the trees with plumbing, then require that X becomes a no-op and drop it.
+
+Two kinds of X:
+1. **Rename in place of introduction:** X moves files (all `R100`), maybe adds verbatim copies and edits registration lines (suite lists). See *Rename-only X* below.
+2. **Plugin-to-component conversion:** renames plus content rewrites. Follow all steps.
 
 **Don't split X by hunk or splice by line position.** Each feature commit's file is a different version, so X's hunks don't apply to them.
 
@@ -32,7 +36,7 @@ The range must be linear.
    - If a needed header first appears later (commit H > A): when it is self-contained at `A` (all its includes exist there) and its blob doesn't change between H and X, introduce that same blob at `A` with `--add <path>=H:<path>@A`. H then no longer adds it; the final tree is unchanged. Build A and H^ and H. Otherwise stop and ask.
    - When a whole infrastructure commit is missing at `A` (e.g. keyring_common's pfs_string for a keyring component), the user may choose to move commits first: `scripts/reorder_down.py BASE HEAD A K` moves A after K, and `scripts/reorder_up.py BASE HEAD Q P` moves P before Q. Both abort on conflicts, require the moved range to end at the original tree, and keep later trees. Check that each moved commit's +/- lines are unchanged (blank-line noise is fine). A moved commit can depend on a line some intervening commit carried (a replay misattribution); `scripts/fold_line.py` folds that line into the moved commit. Build the moved commit itself. Then run the absorb on the reordered branch.
    - Check the tests' server-side prerequisites too, not just the component's: MTR combinations (`--version-suffix=...` needs a CMD_LINE sysvar), `-master.opt` options (`--thread-handling=pool-of-threads` needs the threadpool). Place such files at the commit that brings the prerequisite (`--add ...@REV`), or hoist the prerequisite with a transform. `--transform ...@REV..END` limits a hoist when a later commit removes the hunk again.
-3. **Renames first (optional separate branch).** Use `scripts/rewrite_range.py --move OLD=NEW` from `A` up to `X`, then verify. X then shows in-place edits only.
+3. **Renames first (optional separate branch).** `scripts/x_renames.py X --base BASE` lists X's 100% renames as `--move` arguments (it exits 1 for a conversion X; the list is still valid). Use them with `scripts/rewrite_range.py` from `A` up to `X`, then verify. X then shows in-place edits only.
 4. **Choose the mode.** Write the rules for one source file and one test, and run the X^→X gate (step 5) on them.
    - **Rule mode:** everything reproduces X (typical for UDF plugins: renames, descriptor→component macros, test install lines). Continue below.
    - **Backward-chain mode:** source files don't reproduce, because X rewrites APIs (services, sysvar registration, event tracking, THD storage). Use rules only for files that do reproduce (usually tests), and derive everything else with the backward chain (see that section). Tell the user the expected cost up front: a few hours per 10 touchers, mostly on resolutions and compile checks.
@@ -70,6 +74,20 @@ The range must be linear.
    - Keep the commit's own `include/plugin.defs` unless the newer harness rejects its format. If you overlay it, check the commit's `plugin.defs` line separately by eye.
    - Also run a control test (`main.1st`) with `--suite=main`; failures it shares are harness noise. Naming a test next to `--suite=X` restricts the run to that test; run them separately. Old servers under a new harness trigger the warnings check, so use `--nowarnings`: a test passes when its body completes with no result mismatch.
 
+## Rename-only X
+X moves files (`R100`), may add verbatim copies, and may edit a few **registration lines** that name the moved files (a suite list such as `@DEFAULT_SUITES` in `mysql-test-run.pl`, `disabled.def`, collections, packaging lists). Skip conversion step 1's builds and steps 2–5; the plugin tools (`check_stage.py`, `check_rules_noop.py`) don't apply.
+1. `scripts/x_renames.py X --base BASE > args.txt` emits `--move OLD=NEW` per 100% rename and `--add NEW=X:NEW@START` per added file. On stderr: START (first commit in `BASE..X^` touching an old path), toucher count, and checks: new paths untouched before X; each added file a copy of a file unchanged in `BASE..X` (then adding X's blob at START is tree-neutral, else pick `@REV`). It lists every other change as `needs a --transform`; exit 1 means some line needs a decision.
+2. **Registration edits** (each `M` it lists): write a stdin→stdout transform that changes only X's lines, idempotent (no-op if already present), aborting when its anchor isn't found exactly once (for a list format, after inserting next to each matching entry, assert the count equals X's). Place each line at the later of: the commit where its anchor exists, and the commit where the thing it registers exists in the rewritten history. A line for something X didn't move (another suite) follows the same rule. One file's edit may be split: pass several `--transform` for the same path with different `@REV`; they run in order. Gate with `cmp`:
+   - `git show X^:PATH | PROGS | cmp - <(git show X:PATH)` (all parts chained);
+   - `git show X:PATH | PROGS | cmp - <(git show X:PATH)` (no-op on X);
+   - every version of PATH from its first `@REV` to `X^` changes only by X's lines (the parts active at that commit; `diff` count).
+   Report commits where the moved files exist but a registration line can't appear yet (its anchor is added later).
+   A content change to a moved file (rename below 100%) is not rename-only: use the conversion steps.
+3. Back up: `git branch <OUT>-backup HEAD`. Then `mapfile -t ARGS < args.txt` and `scripts/rewrite_range.py --base BASE --head HEAD` (any ref; nothing needs to be checked out) `--start START --drop X "${ARGS[@]}" [--transform ...] --append-msg-to START`. Expect seconds for hundreds of commits. When part of X lands at a later `@REV`, say so in the report: only START gets X's message.
+4. Verify: `scripts/verify_rewrite.sh BASE HEAD NEW X $(scripts/x_renames.py X --old-paths)`; expect zero touchers per old path.
+5. **No build** when only tests, fixtures or registration lists move. MTR: the moved suite at the last toucher only if that build is cheap; START is often before the branch's buildable point; say so instead.
+6. Registration lines X did not edit stay as they are in every commit (equal before and after). Check X's message claims against the tip (e.g. "suite matches upstream file-for-file") and report leftovers X didn't move; don't fix them in the rewrite.
+
 ## Semantic conversions: backward chain
 When X rewrites code (APIs, services, registration), rules can't reproduce X from X^. Walk X's content backwards over each toucher T instead: `scripts/backchain.py` computes `before(T) = merge(after(T), T:<old>, T^:<old>)`. Merge in normalized space (`--normalize`); derive rule-reproducible files (tests) with `--transform-files`.
 - **Resolutions are edit scripts**, `res/<T12>/<newpath>.res.py` with `resolve(r)`. They are re-applied to a fresh merge on every run, so a change to a later-in-history step can't leave them stale. `scripts/mkres.py CHAIN RES T PATH` writes one from region lambdas (`keep_ours`, `keep_theirs`, `without(...)`) and dry-runs it. For files X restructured, edit `r.ours` with the `reslib` helpers (`drop`, `rep1`, `drop_between`, `drop_function`, `drop_decl_blocks`); they fail loudly when their anchor is gone. Never paste whole-file content: a stored full file (legacy form, still accepted) goes stale as soon as a later step changes.
@@ -93,6 +111,7 @@ When X rewrites code (APIs, services, registration), rules can't reproduce X fro
 ## Common Mistakes
 | Mistake | Fix |
 |---|---|
+| Per-entry `git update-index` on a full index in a rewrite loop | Rewrites the whole index per call (hours for 100 paths x 500 commits). `rewrite_range.py` splices trees via `treeedit.py`; reuse it in new tools. |
 | `rebase --autosquash` fixups from X | They 3-way-merge against a distant version, giving whole-file conflicts. Use transforms and plumbing. |
 | Hunk splitting or positional splicing | Derive rules; the validation gate proves them. |
 | One UDF list for all commits | List only the UDFs present at that commit. |

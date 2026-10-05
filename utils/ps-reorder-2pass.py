@@ -54,7 +54,8 @@ For the groups listed in SPLIT_PROMOTION_GROUPS a failed promotion is not
 rejected wholesale: the commit is split by path. The paths that probe clean and
 are not at risk of a later clobber are emitted in the target group under the
 original subject, and only the blocked paths are carried forward as a separate
-"[gN]"-prefixed commit at the tail.
+tagged commit at the tail. A failed promotion to g5, g6, g7 or g8 is tagged
+"[mtr]", "[non-code]", "[myrocks]" or "[build]"; any other group gives "[gN]".
 
 A commit promoted to g5 (whole or as the clean half of a split) is emitted
 without mysql-test/mysql-test-run.pl, mysql-test/collections/disabled.def and
@@ -108,6 +109,15 @@ OUTPUT_STAT_LINE_LEN = 104
 # Subject prefix for the g10 remainder of a commit whose MyRocks paths were
 # split off into g4, so the leftover non-MyRocks hunks stay identifiable.
 MYROCKS_PREFIX = "[myrocks] "
+
+# Subject tag of a failed gN promotion carried to g10, named after the kind of
+# change the target group holds; groups not listed are tagged "[gN]".
+FAILED_PROMOTION_TAGS = {
+    5: "[mtr]",
+    6: "[non-code]",
+    7: "[myrocks]",
+    8: "[build]",
+}
 
 # How emitted items materialize their content:
 #   "promoted" - patch-emit relocated items only (target group != source group)
@@ -1341,8 +1351,12 @@ def is_empty_cherry_pick_output(text):
     ))
 
 
+def failed_promotion_tag(group):
+    return FAILED_PROMOTION_TAGS.get(group, f"[g{group}]")
+
+
 def add_failed_promotion_prefix(subject, group):
-    prefix = f"[g{group}]"
+    prefix = f"{failed_promotion_tag(group)} "
     if subject.startswith(prefix):
         return subject
     return f"{prefix}{subject}"
@@ -1633,8 +1647,9 @@ def split_note(body, note):
 def split_failed_promotion(item, group, plan, report, blocked_paths, reason):
     """Emit the unblocked paths of a failed promotion in `group`.
 
-    The blocked paths are carried forward as a separate "[gN]"-prefixed
-    commit at the tail, exactly as an unsplit failed promotion would be.
+    The blocked paths are carried forward as a separate commit tagged with
+    failed_promotion_tag(group) at the tail, exactly as an unsplit failed
+    promotion would be.
     Returns True when the split was performed.
     """
     item_paths = set(item["files"])

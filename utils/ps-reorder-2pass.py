@@ -65,11 +65,12 @@ subject tag (all mysql-test/lib/ paths share one commit), so changes to the MTR
 driver, its libraries and the disabled-test list stay separately visible. A
 promoted commit that touches only such paths is just tagged.
 
-A g11 commit placed in g10 that touches components/<name>/ or plugin/<name>/
-is tagged "[components/<name>]" or "[plugin/<name>]": a leading "[#NNNN]"
-pull-request tag is replaced by it, with the original subject kept in the body
-under "Original title:"; any other subject, including one that already starts
-with another "[...]" tag, gets it prepended.
+A g11 commit placed in g10 that touches components/<name>/, plugin/<name>/,
+storage/<name>/ or router/ is tagged "[components/<name>]", "[plugin/<name>]",
+"[storage/<name>]" or "[router]" after the directory holding most of its paths:
+a leading "[#NNNN]" pull-request tag is replaced by it, with the original
+subject kept in the body under "Original title:"; any other subject, including
+one that already starts with another "[...]" tag, gets it prepended.
 """
 
 import argparse
@@ -96,10 +97,11 @@ G5_EXTRACTED_PATHS = (
 )
 
 # A leading "[#NNNN]" pull-request tag, and the feature directory whose
-# "[components/<name>]" / "[plugin/<name>]" tag replaces it, or is prepended
-# when there is none, in g10.
+# "[components/<name>]" / "[plugin/<name>]" / "[storage/<name>]" / "[router]"
+# tag replaces it, or is prepended when there is none, in g10. All of router/
+# counts as one feature directory.
 PR_TAG_RE = re.compile(r"^\[#\d+\]\s*")
-FEATURE_DIR_RE = re.compile(r"^((?:components|plugin)/[^/]+)/")
+FEATURE_DIR_RE = re.compile(r"^((?:components|plugin|storage)/[^/]+|router)/")
 
 MAX_SUBJECT_LEN = 91
 BATCH_SIZE = 400
@@ -1793,8 +1795,9 @@ def promote_from_g11(plan, group, report):
 
 
 def feature_dir_tag(paths):
-    """"[components/<name>]" or "[plugin/<name>]" for the feature directory
-    holding most of `paths` (ties: first in path order), or None."""
+    """"[components/<name>]", "[plugin/<name>]", "[storage/<name>]" or
+    "[router]" for the feature directory holding most of `paths` (ties: first
+    in path order), or None."""
     counts = defaultdict(int)
     for path in sorted(paths):
         m = FEATURE_DIR_RE.match(path)

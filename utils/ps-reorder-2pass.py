@@ -156,7 +156,16 @@ G1_PS_TOKUDB_ADMIN = "ps-tokudb-admin"
 G1_VERSION_UNIV = "version-univ"
 G1_TOKUDB_TESTS = "tokudb-tests"
 G1_TRAVIS = "travis"
-G1_ROCKSDB_SUBMODULE = "rocksdb-submodule"
+G1_GITMODULES = "gitmodules"
+G1_SUBMODULES = "submodules"
+
+# Submodule gitlinks squashed into G1_SUBMODULES.
+G1_SUBMODULE_PATHS = frozenset({
+    "extra/coredumper",
+    "extra/jwt-cpp",
+    "extra/libkmip",
+    "storage/rocksdb/rocksdb",
+})
 
 
 G1_SUBJECTS = {
@@ -170,7 +179,8 @@ G1_SUBJECTS = {
     G1_VERSION_UNIV: "[squash] MYSQL_VERSION, VERSION and storage/innobase/include/univ.i",
     G1_TOKUDB_TESTS: "[squash] mysql-test/suite/tokudb* and MTR *toku* tests",
     G1_TRAVIS: "[squash] .travis.yml and .cirrus.yml",
-    G1_ROCKSDB_SUBMODULE: "[squash] .gitmodules and storage/rocksdb/rocksdb",
+    G1_GITMODULES: "[squash] .gitmodules and .gitignore",
+    G1_SUBMODULES: "[squash] extra/coredumper, extra/jwt-cpp, extra/libkmip and storage/rocksdb/rocksdb",
 }
 
 
@@ -555,8 +565,10 @@ def classify_g1(path):
         return G1_TOKUDB_TESTS
     if path in {".travis.yml", ".cirrus.yml"}:
         return G1_TRAVIS
-    if path in {".gitmodules", "storage/rocksdb/rocksdb"}:
-        return G1_ROCKSDB_SUBMODULE
+    if path in {".gitmodules", ".gitignore"}:
+        return G1_GITMODULES
+    if path in G1_SUBMODULE_PATHS:
+        return G1_SUBMODULES
     return None
 
 

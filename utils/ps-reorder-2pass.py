@@ -57,11 +57,12 @@ original subject, and only the blocked paths are carried forward as a separate
 "[gN]"-prefixed commit at the tail.
 
 A commit promoted to g5 (whole or as the clean half of a split) is emitted
-without mysql-test/mysql-test-run.pl and mysql-test/collections/disabled.def.
-Each of those paths follows it in g5 as a separate commit with the same
-metadata and a "[mysql-test-run]" or "[disabled.def]" subject tag, so changes
-to the MTR driver and to the disabled-test list stay separately visible. A
-promoted commit that touches only such a path is just tagged.
+without mysql-test/mysql-test-run.pl, mysql-test/collections/disabled.def and
+mysql-test/lib/. Each of those follows it in g5 as a separate commit with the
+same metadata and a "[mysql-test-run]", "[disabled.def]" or "[mysql-test/lib]"
+subject tag (all mysql-test/lib/ paths share one commit), so changes to the MTR
+driver, its libraries and the disabled-test list stay separately visible. A
+promoted commit that touches only such paths is just tagged.
 
 A g11 commit placed in g10 that touches components/<name>/ or plugin/<name>/
 is tagged "[components/<name>]" or "[plugin/<name>]": a leading "[#NNNN]"
@@ -84,10 +85,13 @@ from collections import defaultdict
 SPLIT_PROMOTION_GROUPS = frozenset({5})
 
 # Paths extracted from every commit promoted to g5 into a separate commit of
-# their own, emitted right after it, with the given subject tag.
+# their own, emitted right after it, with the given subject tag. An entry
+# ending in "/" matches every path under that directory, and all of them go
+# into one commit.
 G5_EXTRACTED_PATHS = (
     ("mysql-test/mysql-test-run.pl", "[mysql-test-run]"),
     ("mysql-test/collections/disabled.def", "[disabled.def]"),
+    ("mysql-test/lib/", "[mysql-test/lib]"),
 )
 
 # A leading "[#NNNN]" pull-request tag, any leading "[...]" subject tag, and
@@ -1163,6 +1167,12 @@ def emit_item(item, report, label):
     return False
 
 
+def g5_extracted_path_matches(path, pattern):
+    if pattern.endswith("/"):
+        return path.startswith(pattern)
+    return path == pattern
+
+
 def split_g5_extracted_paths(item):
     """Split G5_EXTRACTED_PATHS off a g5 promotion.
 
@@ -1170,11 +1180,17 @@ def split_g5_extracted_paths(item):
     touches nothing but extracted paths.
     """
     files = set(item["files"])
-    extracted = [(path, tag) for path, tag in G5_EXTRACTED_PATHS if path in files]
+    extracted = []
+    for pattern, tag in G5_EXTRACTED_PATHS:
+        matched = sorted(
+            path for path in files if g5_extracted_path_matches(path, pattern))
+        if matched:
+            extracted.append((pattern, tag, matched))
     if not extracted:
         return item, []
 
-    rest = sorted(files - {path for path, _tag in extracted})
+    rest = sorted(files - {
+        path for _pattern, _tag, matched in extracted for path in matched})
     main = None
     if rest:
         main = dict(item)
@@ -1182,22 +1198,23 @@ def split_g5_extracted_paths(item):
         main["body"] = split_note(
             item["body"],
             f"Split of {item['source_hash']}: "
-            f"{', '.join(path for path, _tag in extracted)} extracted into "
-            "separate commit(s).",
+            f"{', '.join(pattern for pattern, _tag, _matched in extracted)} "
+            "extracted into separate commit(s).",
         )
 
     parts = []
-    for path, tag in extracted:
+    for pattern, tag, matched in extracted:
         part = dict(item)
-        part["files"] = [path]
+        part["files"] = matched
         part["subject"] = add_subject_prefix(
             item["subject"], tag, space_before_plain=True)
         if rest or len(extracted) > 1:
             part["body"] = split_note(
                 item["body"],
-                f"Split of {item['source_hash']}: {path} extracted from it.",
+                f"Split of {item['source_hash']}: {pattern} extracted from it.",
             )
         part["kind"] = f"{item['kind']}-extract"
+        part["extract_pattern"] = pattern
         parts.append(part)
     return main, parts
 
@@ -1217,7 +1234,7 @@ def emit_g5_promotion(item, report, label):
             report.setdefault("extracted", []).append({
                 "hash": item["source_hash"],
                 "subject": part["subject"],
-                "path": part["files"][0],
+                "path": part["extract_pattern"],
             })
     return emitted
 

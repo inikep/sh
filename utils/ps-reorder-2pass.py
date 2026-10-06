@@ -76,6 +76,12 @@ The release-branch tags "[8.4]", "[9.7]", "[9.x]" and "[trunk]" are removed
 from the subject of every g11 commit (and every commit ahead of the g1 marker)
 when it is planned, before any other subject tag is added, so they do not
 reach any group the commit or its split parts land in.
+
+An input commit whose subject starts with "===== MARKER: source code identical
+to <ref>@<sha>" is not replayed in place. The latest such commit is emitted,
+with its own metadata and message, as the very last output commit, after the
+final reconciliation commit, so it still marks a tree identical to the input;
+any earlier one is dropped.
 """
 
 import argparse
@@ -174,6 +180,9 @@ MARKER_SUBJECTS = {
 
 GROUP_NAME_TO_NUMBER = {name: number for number, name in GROUPS.items()}
 MARKER_RE = re.compile(r"^={3,} MARKER: GROUP \d+ — (.+?) ={3,}$")
+# "===== MARKER: source code identical to <ref>@<sha> ...": the latest one in
+# the input is re-emitted, with its own metadata, as the last output commit.
+IDENTICAL_MARKER_RE = re.compile(r"^={3,} MARKER: source code identical to \S")
 
 
 G1_DOC = "doc"
@@ -484,9 +493,19 @@ def parse_source_commits(commits):
     current = 11
     parsed = []
     removed_markers = []
+    identical_marker = None
 
     for pos, commit in enumerate(commits):
         info = infos[commit]
+        if IDENTICAL_MARKER_RE.match(info["subject"]):
+            if identical_marker is not None:
+                removed_markers.append({
+                    "hash": identical_marker["hash"],
+                    "subject": identical_marker["subject"],
+                    "reason": "source-identical marker superseded by a later one",
+                })
+            identical_marker = info
+            continue
         group = marker_group(info["subject"])
         if group is not None:
             current = group
@@ -503,7 +522,7 @@ def parse_source_commits(commits):
             "source_group": current if has_marker else 11,
             "files": get_commit_files(commit),
         })
-    return parsed, removed_markers, has_marker
+    return parsed, removed_markers, has_marker, identical_marker
 
 
 def final_removed_base_paths(base_hash, input_hash):
@@ -1972,6 +1991,14 @@ def build_output(args, input_hash, base_hash, plan, report):
     if diff_paths:
         reconcile_to_input(input_hash, args.output_branch, report)
 
+    marker = plan.get("identical_marker")
+    if marker is not None:
+        commit_with_info(marker, marker["subject"], marker["body"],
+                         allow_empty=True)
+        report["identical_marker"] = marker
+        log(f"{STYLE.cyan('marker')} {fmt_sha(marker['hash'])}: "
+            f"{STYLE.dim(marker['subject'])}")
+
 
 def log_entries(title, entries, formatter):
     if not entries:
@@ -2044,6 +2071,13 @@ def print_final_report(args, base_hash, input_hash, parsed_count,
             f"{STYLE.bold('reconciliation')}: "
             f"{STYLE.yellow(str(rec['paths']))} path(s), "
             f"commit emitted={str(rec['emitted']).lower()}"
+        )
+
+    marker = report.get("identical_marker")
+    if marker:
+        log(
+            f"{STYLE.bold('source-identical marker kept last')}: "
+            f"{fmt_sha(marker['hash'])} {marker['subject']}"
         )
 
     log_entries(
@@ -2135,9 +2169,11 @@ def main(argv=None):
     base_hash = git_rev_parse(args.base_branch)
     input_hash = git_rev_parse(args.input_branch)
     commits = get_commit_list(base_hash, input_hash)
-    parsed, removed_markers, had_markers = parse_source_commits(commits)
+    parsed, removed_markers, had_markers, identical_marker = (
+        parse_source_commits(commits))
     removed_paths = analyze_removed_paths(parsed, base_hash, input_hash)
     plan = plan_commits(parsed, removed_markers, removed_paths, base_hash)
+    plan["identical_marker"] = identical_marker
     report = {
         "emitted": [],
         "promoted": [],

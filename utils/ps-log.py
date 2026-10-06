@@ -80,6 +80,8 @@ class Style:
     def pale_yellow(self, t): return self._wrap("38;5;220", t)
     def dark_cyan(self, t): return self._wrap("38;5;30", t)
     def bold_dark_cyan(self, t): return self._wrap("1;38;5;30", t)
+    def brown(self, t): return self._wrap("38;5;130", t)
+    def bold_brown(self, t): return self._wrap("1;38;5;130", t)
 
 
 STYLE = Style(False)
@@ -114,7 +116,11 @@ DEL_RE = re.compile(r"(\d+) deletion")
 C_CPP_EXTS = (".h", ".c", ".cc", ".cxx", ".cpp", ".hh", ".hpp", ".hxx")
 DEPTH_VALUE_RE = re.compile(r"-?\d+")
 # Subject tags with these prefixes are shown as "[<name>]" in the given color.
-TAG_PREFIX_COLORS = (("[plugin/", "dark_cyan"), ("[components/", "magenta"))
+TAG_PREFIX_COLORS = (
+    ("[plugin/", "dark_cyan"),
+    ("[components/", "magenta"),
+    ("[storage/", "brown"),
+)
 SUBJECT_MARKER_PREFIX_RE = re.compile(r"^((?:\[[^\]\s]+\]|\([^\)\s]+\)))(\s+)?")
 COMMIT_STATS_LINE_RE = re.compile(
     r"^(\s*)(.{5})(.{5})(\s)(.{5})(\s)([0-9a-f-]{12})(\s?)(.*)$"

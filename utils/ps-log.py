@@ -379,7 +379,7 @@ def format_shortstat(files: int, ins: int, dele: int) -> str:
 
 def subject_style(text: str, bold: bool, red: bool,
                   light_red: bool = False, tag_color: str | None = None) -> str:
-    if text.startswith("========"):
+    if text.startswith("====="):
         return STYLE.bold_dark_green(text) if bold else STYLE.dark_green(text)
     prefix = SUBJECT_MARKER_PREFIX_RE.match(text)
     if prefix:

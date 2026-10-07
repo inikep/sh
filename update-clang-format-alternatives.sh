@@ -4,7 +4,8 @@ update_clang_format () {
   echo update-alternatives clang-format-$1 priority=$2
   update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-$1 \
                     $2 \
-                    --slave   /usr/bin/clang-format-diff clang-format-diff /usr/bin/clang-format-diff-$1
+                    --slave   /usr/bin/clang-format-diff clang-format-diff /usr/bin/clang-format-diff-$1 \
+                    --slave   /usr/bin/git-clang-format git-clang-format /usr/bin/git-clang-format-$1
 
 }
 

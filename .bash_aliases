@@ -6,7 +6,7 @@ alias ssh134="ssh przemyslaw.skibinski@10.30.7.134 -i /home/przemek/.ssh/inikep-
 function sshini() { ssh przemyslaw.skibinski@$1 -i /home/przemek/.ssh/inikep-rsa4096.priv $2 $3; }
 alias sshkvm="ssh -p 2222 -i /home/przemek/.ssh/inikep-rsa4096.priv przemek@10.30.2.13"
 
-alias cf_on="git config --local include.path /data/mysql-server/percona-8.0/.gitconfig"
+alias cf_on="git config --local include.path /work/mysql-server/percona-8.0/.gitconfig"
 alias cf_off="git config --local --unset include.path"
 alias claude-yolo="claude --dangerously-skip-permissions"
 alias git-clang-format="cf_off; git clang-format $@; cf_on"

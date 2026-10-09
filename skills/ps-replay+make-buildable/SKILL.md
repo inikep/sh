@@ -306,7 +306,7 @@ CC=gcc-9 CXX=g++-9 cmake -GNinja .. \
   -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
   -DMYSQL_MAINTAINER_MODE=OFF \
   -DDOWNLOAD_BOOST=1 \
-  -DWITH_BOOST=/data/mysql-server/_deps \
+  -DWITH_BOOST=/work/mysql-server/_deps \
   -DWITHOUT_TOKUDB=1 \
   -DWITH_ROCKSDB=OFF \
   -DWITH_PAM=ON \

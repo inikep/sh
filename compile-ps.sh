@@ -59,7 +59,7 @@ case $var in
 esac
 done
 
-SRV_ROOT=${SRV_ROOT:-/data/mysql-server}
+SRV_ROOT=${SRV_ROOT:-/work/mysql-server}
 SRV_PATH=${SRV_PATH:-$SRV_ROOT/$SERVER_DIR}
 
 OS_VERSION=$(lsb_release -d -s)
@@ -68,7 +68,7 @@ if [[ "${OS_VERSION}" = *"CentOS release 6."* ]] || [[ "${OS_VERSION}" = *"CentO
    JOB_CMAKE='cmake3'
 else
    BUILD_PATH=$SRV_PATH
-#   JOB_CMAKE='cmake --trace-source=/data/mysql-server/fb-8.0.28/storage/rocksdb/CMakeLists.txt'
+#   JOB_CMAKE='cmake --trace-source=/work/mysql-server/fb-8.0.28/storage/rocksdb/CMakeLists.txt'
    JOB_CMAKE=${JOB_CMAKE:-cmake}
 fi
 

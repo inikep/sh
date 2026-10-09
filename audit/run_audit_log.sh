@@ -74,39 +74,39 @@ mkdir -p $LOGS_DIR
 case "$MODE" in
     80o*)
         TAG=alog80old
-        BASEDIR=/data/mysql-server/percona-8.0-deb-gcc14-rocks
+        BASEDIR=/work/mysql-server/percona-8.0-deb-gcc14-rocks
         FILTER_FORMAT_KEY="--loose-audit_log_format="
         INSTALL_FILE=install/audit_log_setup.sql
         ;;
     84o*)
         TAG=alog84old
-        BASEDIR=/data/mysql-server/percona-8.4-deb-gcc15-rocks
+        BASEDIR=/work/mysql-server/percona-8.4-deb-gcc15-rocks
         FILTER_FORMAT_KEY="--loose-audit_log_format="
         INSTALL_FILE=install/audit_log_setup.sql
         ;;
     80p*)
         TAG=alf80plugin
-        BASEDIR=/data/mysql-server/percona-8.0-deb-gcc14-rocks
+        BASEDIR=/work/mysql-server/percona-8.0-deb-gcc14-rocks
         FILTER_FORMAT_KEY="--loose-audit_log_filter_format="
         INSTALL_FILE=install/audit_log_filter_80_plugin_install.sql
         ;;
     84entc*)
         TAG=alf84ent_component
-        BASEDIR=/data/mysql-server/mysql-8.4.7-commercial
-        #BASEDIR=/data/mysql-server/ai-deb-gcc15-rocks
+        BASEDIR=/work/mysql-server/mysql-8.4.7-commercial
+        #BASEDIR=/work/mysql-server/ai-deb-gcc15-rocks
         FILTER_FORMAT_KEY="--loose-audit_log_filter.format="
         INSTALL_FILE=install/audit_log_filter_84_component_install.sql
         ;;
     84c*)
         TAG=alf84component
-        BASEDIR=/data/mysql-server/percona-8.4-deb-gcc15-rocks
-        #BASEDIR=/data/mysql-server/ai-deb-gcc15-rocks
+        BASEDIR=/work/mysql-server/percona-8.4-deb-gcc15-rocks
+        #BASEDIR=/work/mysql-server/ai-deb-gcc15-rocks
         FILTER_FORMAT_KEY="--loose-audit_log_filter.format="
         INSTALL_FILE=install/audit_log_filter_84_component_install.sql
         ;;
     84e*)
         TAG=alf84enterprise
-        BASEDIR=/data/mysql-server/mysql-8.4.7-commercial
+        BASEDIR=/work/mysql-server/mysql-8.4.7-commercial
         FILTER_FORMAT_KEY="--loose-audit_log_format="
         INSTALL_FILE=install/audit_log_commercial_install.sql
         ;;

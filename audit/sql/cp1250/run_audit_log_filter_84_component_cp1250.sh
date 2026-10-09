@@ -5,8 +5,8 @@ SCRIPT_DIR=/data/pstress/pstress/scripts
 AUDIT_DIR=$SCRIPT_DIR/audit_log
 DATA_DIR=/mnt/black/pstress-run/workdir-8044/audit_log_filter
 
-BASEDIR=/data/mysql-server/percona-8.4-deb-gcc14-rocks
-#BASEDIR=/data/mysql-server/percona-8.4-rel-gcc14-rocks-847-PS-10324
+BASEDIR=/work/mysql-server/percona-8.4-deb-gcc14-rocks
+#BASEDIR=/work/mysql-server/percona-8.4-rel-gcc14-rocks-847-PS-10324
 
 $SCRIPT_DIR/mysql_option_tester.py \
    --basedir $BASEDIR \

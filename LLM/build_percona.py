@@ -16,7 +16,7 @@ def main():
 
     # Check for specific directory structure to switch to out-of-source build
     # Logic: if we are in X, build in X-auto-build
-    # Example: /data/mysql-server/percona-8.0 -> /data/mysql-server/percona-8.0-auto-build
+    # Example: /work/mysql-server/percona-8.0 -> /work/mysql-server/percona-8.0-auto-build
     cwd_name = os.path.basename(cwd)
     # We apply this logic if we are seemingly in a source repo (simple heuristic: has .git or CMakeLists.txt)
     # But user specifically asked to strip last part and append suffix.

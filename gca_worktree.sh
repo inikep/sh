@@ -2,7 +2,7 @@
 
 set -u
 
-WORK_SRC_ROOT="/data/mysql-server"
+WORK_SRC_ROOT="/work/mysql-server"
 WORK_MAIN_REPO="8.0"
 
 readonly BRANCH=$1

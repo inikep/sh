@@ -54,20 +54,20 @@ mkdir -p $LOGS_DIR
 case "$AUDIT_MODE" in
     alf84enterprise)
         TAG=alf84enterprise
-        export BUILD_PATH=/data/mysql-server/mysql-8.4.7-commercial
+        export BUILD_PATH=/work/mysql-server/mysql-8.4.7-commercial
         export INSTALL_SQL_PATH=$AUDIT_DIR/install/audit_log_commercial_install.sql
         # export INSTALL_SQL_PATH=$AUDIT_DIR/audit_log_commercial_legacy_install.sql
         export MYEXTRA="--loose-audit_log_format=${FORMAT} --loose-audit_log_strategy=$STRATEGY --loose-audit_log_file=$LOGS_DIR/${TAG}_${STRATEGY}.${FORMAT}_ "
         ;;
     old84plugin)
         TAG=old84plugin
-        export BUILD_PATH=/data/mysql-server/percona-8.4-rel-gcc15-rocks
+        export BUILD_PATH=/work/mysql-server/percona-8.4-rel-gcc15-rocks
         export INSTALL_SQL_PATH=$AUDIT_DIR/install/audit_log_setup.sql
         unset MYEXTRA
         ;;
     alf84component)
         TAG=alf84component
-        export BUILD_PATH=/data/mysql-server/percona-8.4-rel-gcc15-rocks
+        export BUILD_PATH=/work/mysql-server/percona-8.4-rel-gcc15-rocks
         export INSTALL_SQL_PATH=$AUDIT_DIR/install/audit_log_filter_84_component_install.sql
         export MYEXTRA="--loose-audit_log_filter.direct_io=${DIRECT_IO} --loose-audit_log_filter.format=${FORMAT} --loose-audit_log_filter.strategy=$STRATEGY --loose-audit_log_filter.file=$LOGS_DIR/${TAG}_${STRATEGY}.${FORMAT}_  --loose-audit_log_filter.event_mode=$EVENT_MODE"
         ;;

@@ -70,7 +70,7 @@ print_usage() {
   echo "  DATADIR - path to Percona Server's data directory (default = $DATADIR)"
   echo "  WORKLOAD_SCRIPT - use a given script from 'sysbench.lua' directory (default = $WORKLOAD_SCRIPT)"
   echo "example:"
-  echo "  NTABS=8 NROWS=10M SECS=60 BENCH_PATH=/data/bench BUILDDIR=/data/mysql-server run_sysbench.sh wdc-8.0-rel-clang12 ~/cnf/vadim-rocksdb.cnf rocksdb init,prepare,verify,run"
+  echo "  NTABS=8 NROWS=10M SECS=60 BENCH_PATH=/data/bench BUILDDIR=/work/mysql-server run_sysbench.sh wdc-8.0-rel-clang12 ~/cnf/vadim-rocksdb.cnf rocksdb init,prepare,verify,run"
 }
 
 if [ $# -lt 4 ]; then echo "error: too few parameters"; print_usage; exit; fi

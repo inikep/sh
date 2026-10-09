@@ -27,6 +27,9 @@ usage() {
 
 SERVER_DIR=${1:-}
 
+SRV_ROOT=${SRV_ROOT:-/work/mysql-server}
+SRV_PATH=${SRV_PATH:-$SRV_ROOT/$SERVER_DIR}
+
 case "$SERVER_DIR" in
   "") SRV_VER="unknown" ;;
   fb-5.*)     SRV_VER="FB56" ;;
@@ -37,6 +40,14 @@ case "$SERVER_DIR" in
   *8.0*)      SRV_VER="8.0" ;;
   *)          SRV_VER="8.4" ;;
 esac
+
+# Stop if the version in the directory name (e.g. percona-8.4) doesn't match the checked-out source.
+DIR_VER=$(grep -oE '[0-9]+\.[0-9]+' <<< "$SERVER_DIR" | head -1)
+SRC_VER=$(awk -F= '/^MYSQL_VERSION_MAJOR=/{ma=$2} /^MYSQL_VERSION_MINOR=/{mi=$2} END{if (ma != "") print ma "." mi}' "$SRV_PATH/MYSQL_VERSION" 2>/dev/null)
+if [[ -n "$DIR_VER" && -n "$SRC_VER" && "$DIR_VER" != "$SRC_VER" ]]; then
+   echo "ERROR: $SRV_PATH is named $DIR_VER but contains $SRC_VER source (MYSQL_VERSION); check out the right branch"
+   exit 1
+fi
 
 
 if [[ "$SRV_VER" != +(5.7|8.0|8.4) ]] && [[ "$SRV_VER" != +(FB56|FB8) ]] && [[ "$SRV_VER" != +(MS57|MS8) ]]; then
@@ -58,9 +69,6 @@ case $var in
   lto) STOP_ON_WARN=OFF; PACKAGE_FLAGS=ON; DEBUG=0; RELEASE=0; LTO=1 ;;
 esac
 done
-
-SRV_ROOT=${SRV_ROOT:-/work/mysql-server}
-SRV_PATH=${SRV_PATH:-$SRV_ROOT/$SERVER_DIR}
 
 OS_VERSION=$(lsb_release -d -s)
 if [[ "${OS_VERSION}" = *"CentOS release 6."* ]] || [[ "${OS_VERSION}" = *"CentOS Linux release 7."* ]]; then

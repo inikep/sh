@@ -1,36 +1,87 @@
 #!/usr/bin/env python3
 """
-ps-reorder.py
+ps-reorder-2pass.py
 
-Single-pass Percona Server branch reorder tool.
+Two-pass Percona Server branch reorder tool.
 
-This is the simplified form of the two-pass tool (kept as ps-reorder-2pass.py).
-It performs only what the old tool called "pass 1: emit g1-g4":
+An emitted commit materializes its content as a patch, not as a whole-file
+state snapshot. A snapshot never conflicts, but it also means a commit emitted
+later silently reverts any earlier commit that touches the same path with an
+older source state, which is why promotion_clobber_paths() used to reject
+promotions that would in fact apply cleanly ("full-file-state clobber risk with
+earlier-source later item"). Instead the source commit's delta for the item's
+paths is applied with `git apply --3way --index`, i.e. a per-path cherry-pick,
+so a commit contributes only its own hunks and does not carry the rest of the
+file back in time. When a 3-way apply conflicts the item falls back to a
+whole-file snapshot and the fallback is recorded in the final report.
 
-  g1  Squashes            one commit per squash category, holding the final
-                          INPUT state of those paths
-  g2  build-ps            per-source-commit split of build-ps/, packaging/ and
-                          scripts/systemd/ paths
-  g3  CI configs          per-source-commit split of CI config paths
-  g4  MyRocks: storage    per-source-commit split of storage/rocksdb and
-      and MTR             rocksdb MTR paths
+Because the clobber risk only exists for paths that a later commit will emit as
+a snapshot, the guard is relaxed accordingly: with --patch-emit=all nothing is
+snapshot-emitted, so only a real hunk overlap can block a promotion.
 
-Every other commit is kept intact, in its original first-parent order, with only
-the g1-g4 paths removed from it. There is no group classification, no g11 queue,
-no cherry-pick promotion probe and no .result squashing.
+The promotion probe is item-scoped. Probing the whole source commit with
+`git cherry-pick --no-commit` fails for any commit that pass 1 already split:
+the half emitted in g2-g4 is re-applied on top of itself and reports a conflict
+on a path the item no longer owns. The probe applies only the item's own paths,
+exactly as emission will.
 
-When the input already carries GROUP markers, commits found inside its g2, g3 and
-g4 sections stay in their own section, in their original relative order. They keep
-every path they own plus every path that belongs to a later group or to no group
-at all, so nothing is ever pushed down to a later group or into the remaining
-section. Paths owned by an *earlier* group are still squashed into g1 or split
-into g2-g3 - a build-ps or doc/ path riding along in a g4 commit, for instance.
-That direction is always safe because the receiving section is emitted first, so
-the path's own section remains its last writer. Use --reclassify-groups to
-classify every commit purely by path instead.
+Commits sitting in the input's g1 region are never replayed: g1 is entirely
+this tool's own product (the "[squash] ..." commits and "Remove files deleted by
+input branch") and is regenerated from scratch on every run, so replaying it
+would emit a second, stale copy of each synthetic commit.
 
-Existing MARKER commits in the input are dropped; markers in the output are
-regenerated.
+A commit that pass 1 split into g4 plus a remainder keeps its MyRocks identity:
+the remainder is offered to g7 even when no token survives in its subject or
+paths, and if it cannot be promoted it lands in g10 carrying "[myrocks] ".
+
+--patch-emit=all (default) patch-emits every item. --patch-emit=promoted
+patch-emits only relocated content, which is every item whose target group
+differs from its source group; note that this alone does not unblock a
+promotion that is guarded by authoritative g2-g10 commits, because those are
+still snapshot-emitted.
+
+An input commit that already sits in g2-g10 is authoritative: it is emitted
+in its own group, never relocated and never split by path, except that the g1
+squashes absorb their paths from every group. Only g11 commits (and commits
+ahead of the g1 marker) are split into g1-g4 buckets and offered for promotion.
+
+Pass 1 emits g1-g4, the groups that may split or squash source commits.
+Pass 2 emits g5-g10, and at each group tries to promote matching g11 commits
+with a real git cherry-pick conflict probe. Commits that do not match or do not
+probe cleanly remain in g11.
+
+For the groups listed in SPLIT_PROMOTION_GROUPS a failed promotion is not
+rejected wholesale: the commit is split by path. The paths that probe clean and
+are not at risk of a later clobber are emitted in the target group under the
+original subject, and only the blocked paths are carried forward as a separate
+tagged commit at the tail. A failed promotion to g5, g6, g7 or g8 is tagged
+"[mtr]", "[non-code]", "[myrocks]" or "[build]"; any other group gives "[gN]".
+
+A commit promoted to g5 (whole or as the clean half of a split) is emitted
+without mysql-test/mysql-test-run.pl, mysql-test/collections/disabled.def and
+mysql-test/lib/. Each of those follows it in g5 as a separate commit with the
+same metadata and a "[mysql-test-run]", "[disabled.def]" or "[mysql-test/lib]"
+subject tag (all mysql-test/lib/ paths share one commit), so changes to the MTR
+driver, its libraries and the disabled-test list stay separately visible. A
+promoted commit that touches only such paths is just tagged.
+
+A g11 commit placed in g10 that touches components/<name>/, plugin/<name>/,
+storage/<name>/ or router/ is tagged "[components/<name>]", "[plugin/<name>]",
+"[storage/<name>]" or "[router]" after the directory holding most of its paths:
+a leading "[#NNNN]" pull-request tag is replaced by it, with the original
+subject kept in the body under "Original title:"; any other subject, including
+one that already starts with another "[...]" tag, gets it prepended.
+
+The release-branch tags "[8.4]", "[9.7]", "[9.x]" and "[trunk]" are removed
+from the subject of every g11 commit (and every commit ahead of the g1 marker)
+when it is planned, before any other subject tag is added, so they do not
+reach any group the commit or its split parts land in.
+
+An input commit whose subject starts with "===== MARKER: source code identical
+to <ref>@<sha>" is not replayed in place. The latest such commit is emitted,
+with its own metadata and message, as the very last output commit, after the
+final reconciliation commit, so it still marks a tree identical to the input;
+any earlier one is dropped.
 """
 
 import argparse
@@ -42,8 +93,74 @@ import time
 from collections import defaultdict
 
 
+# Groups whose failed g11 promotions are split by path instead of being
+# rejected as a whole commit.
+SPLIT_PROMOTION_GROUPS = frozenset({5})
+
+# Paths extracted from every commit promoted to g5 into a separate commit of
+# their own, emitted right after it, with the given subject tag. An entry
+# ending in "/" matches every path under that directory, and all of them go
+# into one commit.
+G5_EXTRACTED_PATHS = (
+    ("mysql-test/mysql-test-run.pl", "[mysql-test-run]"),
+    ("mysql-test/collections/disabled.def", "[disabled.def]"),
+    ("mysql-test/lib/", "[mysql-test/lib]"),
+)
+
+# A leading "[#NNNN]" pull-request tag, and the feature directory whose
+# "[components/<name>]" / "[plugin/<name>]" / "[storage/<name>]" / "[router]"
+# tag replaces it, or is prepended when there is none, in g10. All of router/
+# counts as one feature directory.
+PR_TAG_RE = re.compile(r"^\[#\d+\]\s*")
+
+# Release-branch tags stripped from the subject of every g11 commit (and every
+# commit ahead of the g1 marker) as it is planned, wherever they occur: at the
+# start of the subject or of a quoted/parenthesized one, with a following ":"
+# and whitespace, or after a space or "-", e.g. "PS-1 [9.x]: Fix" -> "PS-1:
+# Fix", "[8.4] Merge ... ([8.4] Null-merge ...)" -> "Merge ... (Null-merge ...)".
+VERSION_TAGS = ("8.4", "9.7", "9.x", "trunk")
+_VERSION_TAG = "\\[(?:" + "|".join(re.escape(tag) for tag in VERSION_TAGS) + ")\\]"
+VERSION_TAG_RE = re.compile(
+    rf"(^|[(\"']){_VERSION_TAG}:?\s*|[ -]{_VERSION_TAG}")
+FEATURE_DIR_RE = re.compile(r"^((?:components|plugin|storage)/[^/]+|router)/")
+
+MAX_SUBJECT_LEN = 91
 BATCH_SIZE = 400
 OUTPUT_STAT_LINE_LEN = 104
+
+# Subject prefix for the g10 remainder of a commit whose MyRocks paths were
+# split off into g4, so the leftover non-MyRocks hunks stay identifiable.
+MYROCKS_PREFIX = "[myrocks] "
+
+# Subject tag of a failed gN promotion carried to g10, named after the kind of
+# change the target group holds; groups not listed are tagged "[gN]".
+FAILED_PROMOTION_TAGS = {
+    5: "[mtr]",
+    6: "[non-code]",
+    7: "[myrocks]",
+    8: "[build]",
+}
+
+# How emitted items materialize their content:
+#   "promoted" - patch-emit relocated items only (target group != source group)
+#   "all"      - patch-emit every item
+PATCH_EMIT_CHOICES = ("promoted", "all")
+EMIT_CONFIG = {"patch_emit": "all"}
+
+
+GROUPS = {
+    1: "Squashes",
+    2: "build-ps",
+    3: "CI configs",
+    4: "MyRocks: storage and MTR",
+    5: "MTR tests",
+    6: "Non-code changes",
+    7: "TokuDB+MyRocks kernel changes",
+    8: "Build/Compilation",
+    9: "Upstream bug fixes",
+    10: "Code changes",
+    11: "New commits",
+}
 
 
 MARKER_SUBJECTS = {
@@ -51,60 +168,65 @@ MARKER_SUBJECTS = {
     2: "==================== MARKER: GROUP 2 — build-ps ====================",
     3: "==================== MARKER: GROUP 3 — CI configs ====================",
     4: "==================== MARKER: GROUP 4 — MyRocks: storage and MTR ==========",
-    5: "==================== MARKER: GROUP 5 — Remaining commits =================",
+    5: "==================== MARKER: GROUP 5 — MTR tests ====================",
+    6: "==================== MARKER: GROUP 6 — Non-code changes ==================",
+    7: "==================== MARKER: GROUP 7 — TokuDB+MyRocks kernel changes =====",
+    8: "==================== MARKER: GROUP 8 — Build/Compilation =================",
+    9: "==================== MARKER: GROUP 9 — Upstream bug fixes ================",
+    10: "==================== MARKER: GROUP 10 — Code changes ====================",
+    11: "==================== MARKER: GROUP 11 — New commits ====================",
 }
 
-REST_GROUP = 5
 
-# Commits already sitting in these input sections keep their place; only paths
-# owned by an earlier group are extracted out of them.
-KEEP_IN_PLACE_GROUPS = (2, 3, 4)
-
-UNGROUPED = 0
-
-DEFAULT_GROUP_LABELS = {
-    UNGROUPED: "ungrouped",
-    1: "Squashes",
-    2: "build-ps",
-    3: "CI configs",
-    4: "MyRocks: storage and MTR",
-    REST_GROUP: "Remaining commits",
-}
-
-# Matches the markers this tool emits and the 11-group markers emitted by the
-# older two-pass tool, so a previously reordered branch can be fed back in.
-MARKER_RE = re.compile(r"^={3,} MARKER: GROUP (\d+) — (.+?) ={3,}$")
+GROUP_NAME_TO_NUMBER = {name: number for number, name in GROUPS.items()}
+MARKER_RE = re.compile(r"^={3,} MARKER: GROUP \d+ — (.+?) ={3,}$")
+# "===== MARKER: source code identical to <ref>@<sha> ...": the latest one in
+# the input is re-emitted, with its own metadata, as the last output commit.
+IDENTICAL_MARKER_RE = re.compile(r"^={3,} MARKER: source code identical to \S")
 
 
 G1_DOC = "doc"
 G1_MAN = "man"
 G1_INTERNAL = "internal"
 G1_TOKUDB_BACKUP = "tokudb-backup-plugin"
+G1_AUDIT_LOG = "audit-log"
 G1_STORAGE_TOKUDB = "storage-tokudb"
 G1_PS_TOKUDB_ADMIN = "ps-tokudb-admin"
 G1_VERSION_UNIV = "version-univ"
 G1_TOKUDB_TESTS = "tokudb-tests"
 G1_TRAVIS = "travis"
+G1_GITMODULES = "gitmodules"
+G1_SUBMODULES = "submodules"
+
+# Submodule gitlinks squashed into G1_SUBMODULES.
+G1_SUBMODULE_PATHS = frozenset({
+    "extra/coredumper",
+    "extra/jwt-cpp",
+    "extra/libkmip",
+    "storage/rocksdb/rocksdb",
+})
 
 
 G1_SUBJECTS = {
-    G1_DOC: "Squash: doc/",
-    G1_MAN: "Squash: man/",
-    G1_INTERNAL: "Squash: internal/",
-    G1_TOKUDB_BACKUP: "Squash: plugin/tokudb-backup-plugin/",
-    G1_STORAGE_TOKUDB: "Squash: storage/tokudb/",
-    G1_PS_TOKUDB_ADMIN: "Squash: scripts/ps_tokudb_admin.sh and scripts/fill_help_tables.sql",
-    G1_VERSION_UNIV: "Squash: MYSQL_VERSION, VERSION and storage/innobase/include/univ.i",
-    G1_TOKUDB_TESTS: "Squash: mysql-test/suite/tokudb* and MTR *toku* tests",
-    G1_TRAVIS: "Squash: .travis.yml",
+    G1_DOC: "[squash] doc/",
+    G1_MAN: "[squash] man/",
+    G1_INTERNAL: "[squash] internal/",
+    G1_TOKUDB_BACKUP: "[squash] plugin/tokudb-backup-plugin/",
+    G1_AUDIT_LOG: "[squash] plugin/audit_log/",
+    G1_STORAGE_TOKUDB: "[squash] storage/tokudb/",
+    G1_PS_TOKUDB_ADMIN: "[squash] scripts/ps_tokudb_admin.sh and scripts/fill_help_tables.sql",
+    G1_VERSION_UNIV: "[squash] MYSQL_VERSION, VERSION and storage/innobase/include/univ.i",
+    G1_TOKUDB_TESTS: "[squash] mysql-test/suite/tokudb* and MTR *toku* tests",
+    G1_TRAVIS: "[squash] .travis.yml and .cirrus.yml",
+    G1_GITMODULES: "[squash] .gitmodules and .gitignore",
+    G1_SUBMODULES: "[squash] extra/coredumper, extra/jwt-cpp, extra/libkmip and storage/rocksdb/rocksdb",
 }
 
 
-# Emitted at the head of g1: paths the input branch deletes outright relative to
-# BASE that no g1-g4 section owns. Without it these deletions ride along in
-# whichever g5 commit happened to carry them, so every g1-g4 commit still holds
-# files the input branch does not have.
-HEAD_DELETION_SUBJECT = "Remove files deleted by input branch"
+CODE_EXTENSIONS = (
+    ".h", ".hh", ".hpp", ".hxx",
+    ".c", ".cc", ".cpp", ".cxx",
+)
 
 
 class Style:
@@ -169,6 +291,10 @@ def fmt_sha(sha):
     return STYLE.yellow(sha[:12])
 
 
+def fmt_subject(subject):
+    return STYLE.bold(subject)
+
+
 def truncate_text(text, max_len=OUTPUT_STAT_LINE_LEN):
     return text if len(text) <= max_len else text[:max_len]
 
@@ -185,12 +311,21 @@ def log_marker(group, subject):
     log(f"{STYLE.cyan('marker')} {fmt_group(group)}: {STYLE.dim(subject)}")
 
 
+def log_patch_fallback(group, source_hash, subject):
+    prefix = f"patch-fallback g{group} {source_hash[:12]} "
+    subject = truncate_subject_for_prefix(prefix, subject)
+    log(
+        f"{STYLE.yellow('patch-fallback')} {fmt_group(group)} "
+        f"{fmt_sha(source_hash)} {STYLE.dim(subject)}"
+    )
+
+
 def log_emit(group, source_hash, new_hash, subject):
     prefix = f"emit g{group} {source_hash[:12]} -> {new_hash[:12]} "
     subject = truncate_subject_for_prefix(prefix, subject)
     log(
         f"{STYLE.green('emit')} {fmt_group(group)} "
-        f"{fmt_sha(source_hash)} -> {fmt_sha(new_hash)} {STYLE.bold(subject)}"
+        f"{fmt_sha(source_hash)} -> {fmt_sha(new_hash)} {fmt_subject(subject)}"
     )
 
 
@@ -200,7 +335,45 @@ def log_skip(group, source_hash, subject):
     log(f"{STYLE.yellow('skip')} {fmt_group(group)} {fmt_sha(source_hash)} {subject}")
 
 
-def run_git(args, check=True, env=None, retry_on_lock=True):
+def log_keep(source_hash, group, reason):
+    prefix = f"keep g11 {source_hash[:12]} from g{group}: "
+    reason = truncate_text(reason, max(0, OUTPUT_STAT_LINE_LEN - len(prefix)))
+    log(
+        f"{STYLE.red('keep')} g11 {fmt_sha(source_hash)} "
+        f"from {fmt_group(group)}: {STYLE.yellow(reason)}"
+    )
+
+
+def log_move_to_g10(source_hash, group, reason):
+    prefix = f"move g10 {source_hash[:12]} from g{group}: "
+    reason = truncate_text(reason, max(0, OUTPUT_STAT_LINE_LEN - len(prefix)))
+    log(
+        f"{STYLE.red('move')} {fmt_group(10)} {fmt_sha(source_hash)} "
+        f"from {fmt_group(group)}: {STYLE.yellow(reason)}"
+    )
+
+
+def log_split(group, source_hash, clean_count, blocked_count, reason):
+    prefix = f"split g{group} {source_hash[:12]} {clean_count}/{blocked_count}: "
+    reason = truncate_text(reason, max(0, OUTPUT_STAT_LINE_LEN - len(prefix)))
+    log(
+        f"{STYLE.magenta('split')} {fmt_group(group)} {fmt_sha(source_hash)} "
+        f"{STYLE.green(str(clean_count))} clean / "
+        f"{STYLE.red(str(blocked_count))} blocked: {STYLE.yellow(reason)}"
+    )
+
+
+def log_summary(group, promoted, kept_conflict, skipped_empty, split=0):
+    log(
+        f"{fmt_group(group)} promotions: "
+        f"{STYLE.green(str(promoted))} promoted, "
+        f"{STYLE.magenta(str(split))} split, "
+        f"{STYLE.red(str(kept_conflict))} conflicted, "
+        f"{STYLE.yellow(str(skipped_empty))} empty"
+    )
+
+
+def run_git(args, check=True, env=None, retry_on_lock=True, input=None):
     tries = 3 if retry_on_lock else 1
     last = None
     for attempt in range(tries):
@@ -211,6 +384,7 @@ def run_git(args, check=True, env=None, retry_on_lock=True):
             errors="replace",
             capture_output=True,
             env=env,
+            input=input,
         )
         if last.returncode == 0:
             return last
@@ -265,7 +439,19 @@ def get_commit_files(commit):
     if not parents:
         r = run_git(["ls-tree", "-r", "--name-only", commit])
         return [line for line in r.stdout.splitlines() if line]
-    r = run_git(["diff", "--name-only", "--no-renames", parents[0], commit])
+    r = run_git(["diff", "--name-only", "--no-renames", "--ignore-submodules=none",
+                 parents[0], commit])
+    return [line for line in r.stdout.splitlines() if line]
+
+
+def get_commit_deleted_paths(commit):
+    parents = get_commit_parents(commit)
+    if not parents:
+        return []
+    r = run_git([
+        "diff", "--name-only", "--diff-filter=D", "--no-renames", "--ignore-submodules=none",
+        parents[0], commit,
+    ])
     return [line for line in r.stdout.splitlines() if line]
 
 
@@ -294,72 +480,87 @@ def get_commit_info(commit):
 
 
 def marker_group(subject):
-    """Return (group number, group label) for a marker subject, else None."""
     m = MARKER_RE.match(subject)
     if not m:
         return None
-    return int(m.group(1)), m.group(2).strip()
-
-
-def is_marker_subject(subject):
-    return marker_group(subject) is not None
+    return GROUP_NAME_TO_NUMBER.get(m.group(1).strip())
 
 
 def parse_source_commits(commits):
+    infos = {commit: get_commit_info(commit) for commit in commits}
+    has_marker = any(marker_group(info["subject"]) is not None
+                     for info in infos.values())
+    current = 11
     parsed = []
-    removed = []
-    labels = {}
-    current = UNGROUPED
+    removed_markers = []
+    identical_marker = None
 
     for pos, commit in enumerate(commits):
-        info = get_commit_info(commit)
-        marker = marker_group(info["subject"])
-        if marker is not None:
-            current, label = marker
-            labels[current] = label
-            removed.append({
+        info = infos[commit]
+        if IDENTICAL_MARKER_RE.match(info["subject"]):
+            if identical_marker is not None:
+                removed_markers.append({
+                    "hash": identical_marker["hash"],
+                    "subject": identical_marker["subject"],
+                    "reason": "source-identical marker superseded by a later one",
+                })
+            identical_marker = info
+            continue
+        group = marker_group(info["subject"])
+        if group is not None:
+            current = group
+            removed_markers.append({
                 "hash": commit,
                 "subject": info["subject"],
-                "reason": "source marker omitted; output markers are regenerated",
+                "reason": f"source marker for group {group} omitted; output markers are regenerated",
             })
             continue
         parsed.append({
             "hash": commit,
             "pos": pos,
             "info": info,
-            "source_group": current,
+            "source_group": current if has_marker else 11,
             "files": get_commit_files(commit),
         })
-    return parsed, removed, labels
+    return parsed, removed_markers, has_marker, identical_marker
 
 
-def group_label(group, labels):
-    return labels.get(group) or DEFAULT_GROUP_LABELS.get(group, "unknown")
+def final_removed_base_paths(base_hash, input_hash):
+    r = run_git([
+        "diff", "--name-only", "--diff-filter=D", "--no-renames", "--ignore-submodules=none",
+        base_hash, input_hash,
+    ])
+    return set(line for line in r.stdout.splitlines() if line)
 
 
-def log_source_groups(parsed, labels, keep_in_place=True):
-    """Report how many input commits were found in each group section."""
-    counts = defaultdict(int)
+def analyze_removed_paths(parsed, base_hash, input_hash):
+    base_removed = final_removed_base_paths(base_hash, input_hash)
+    deleted_in_range = set()
+    first_removal_info = None
+
     for src in parsed:
-        counts[src["source_group"]] += 1
+        deleted = set(get_commit_deleted_paths(src["hash"]))
+        if not deleted:
+            continue
+        deleted_in_range.update(deleted)
+        if first_removal_info is None and deleted.intersection(base_removed):
+            first_removal_info = src["info"]
 
-    log_section("input groups")
-    if not labels:
-        log(
-            f"  {STYLE.dim('no markers found')}: "
-            f"{STYLE.cyan(str(len(parsed)))} commit(s) treated as ungrouped"
-        )
-        return
+    transient_candidates = deleted_in_range.difference(base_removed)
+    _present_in_base, absent_in_base = split_present_absent(
+        base_hash, transient_candidates)
+    _present_in_input, absent_in_input = split_present_absent(
+        input_hash, absent_in_base)
+    transient_removed = set(absent_in_input)
 
-    for group in sorted(counts):
-        name = group_label(group, labels)
-        note = (" (kept in place; g1-g3 paths extracted)"
-                if keep_in_place and group in KEEP_IN_PLACE_GROUPS else "")
-        label = "ungrouped" if group == UNGROUPED else f"g{group}"
-        log(
-            f"  {STYLE.cyan(f'{label:<9}')} {STYLE.green(f'{counts[group]:>5}')} "
-            f"commit(s)  {STYLE.bold(name)}{STYLE.dim(note)}"
-        )
+    if base_removed and first_removal_info is None:
+        first_removal_info = parsed[-1]["info"] if parsed else get_commit_info(input_hash)
+
+    return {
+        "base_removed": base_removed,
+        "transient_removed": transient_removed,
+        "base_removal_info": first_removal_info,
+    }
 
 
 def is_tokudb_mtr_test_path(path):
@@ -377,15 +578,7 @@ def is_ci_path(path):
         path == "azure-pipelines.yml" or
         path == ".cirrus.yml" or
         path == ".clang-tidy" or
-        path.startswith(".github/workflows/")
-    )
-
-
-def is_g2_path(path):
-    return (
-        path.startswith("build-ps/") or
-        path.startswith("packaging/") or
-        path.startswith("scripts/systemd/")
+        path.startswith(".github/")
     )
 
 
@@ -409,6 +602,8 @@ def classify_g1(path):
         return G1_INTERNAL
     if path.startswith("plugin/tokudb-backup-plugin/"):
         return G1_TOKUDB_BACKUP
+    if path.startswith("plugin/audit_log/"):
+        return G1_AUDIT_LOG
     if path.startswith("storage/tokudb/"):
         return G1_STORAGE_TOKUDB
     if path in {"scripts/ps_tokudb_admin.sh", "scripts/fill_help_tables.sql"}:
@@ -417,26 +612,16 @@ def classify_g1(path):
         return G1_VERSION_UNIV
     if is_tokudb_mtr_test_path(path):
         return G1_TOKUDB_TESTS
-    if path == ".travis.yml":
+    if path in {".travis.yml", ".cirrus.yml"}:
         return G1_TRAVIS
-    return None
-
-
-def path_group(path):
-    """Group that owns this path by the path rules, or None for the rest."""
-    if classify_g1(path) is not None:
-        return 1
-    if is_g2_path(path):
-        return 2
-    if is_ci_path(path):
-        return 3
-    if is_g4_path(path):
-        return 4
+    if path in {".gitmodules", ".gitignore"}:
+        return G1_GITMODULES
+    if path in G1_SUBMODULE_PATHS:
+        return G1_SUBMODULES
     return None
 
 
 def split_paths(paths):
-    """Partition one commit's paths into g1 categories, g2, g3, g4 and rest."""
     g1 = defaultdict(list)
     g2 = []
     g3 = []
@@ -447,7 +632,7 @@ def split_paths(paths):
         g1_cat = classify_g1(path)
         if g1_cat is not None:
             g1[g1_cat].append(path)
-        elif is_g2_path(path):
+        elif path.startswith("build-ps/") or path.startswith("scripts/systemd/"):
             g2.append(path)
         elif is_ci_path(path):
             g3.append(path)
@@ -458,67 +643,116 @@ def split_paths(paths):
     return g1, g2, g3, g4, rest
 
 
-def plan_head_deletions(base_hash, input_hash, parsed):
-    """Paths present in BASE, absent from INPUT and owned by no g1-g4 section.
+def is_code_file(path):
+    return path.endswith(CODE_EXTENSIONS)
 
-    Returns (paths, info) where info is the commit identity to reuse. Prefer an
-    input commit that is itself a pure deletion of exactly these paths, so a
-    branch that already carries such a commit keeps its author and date.
-    """
-    r = run_git(["diff", "--name-only", "--no-renames", "--diff-filter=D",
-                 base_hash, input_hash], check=False)
-    paths = sorted(
-        line for line in r.stdout.splitlines()
-        if line and path_group(line) is None
+
+def is_build_only_file(path):
+    base = os.path.basename(path)
+    return (
+        base == "CMakeLists.txt" or
+        path.endswith(".cmake") or
+        path.endswith(".cmake.in")
     )
-    if not paths:
-        return [], None
-
-    wanted = set(paths)
-    for src in parsed:
-        files = src["files"]
-        if files and set(files) <= wanted and commit_is_pure_deletion(src["hash"]):
-            return paths, src["info"]
-    return paths, parsed[0]["info"] if parsed else None
 
 
-def commit_is_pure_deletion(commit):
-    r = run_git(["show", "--no-renames", "--diff-filter=D", "--name-only",
-                 "--format=", commit], check=False)
-    deleted = {line for line in r.stdout.splitlines() if line}
-    all_files = set(get_commit_files(commit))
-    return bool(all_files) and deleted == all_files
+def is_build_only_changes(paths):
+    return bool(paths) and all(is_build_only_file(path) for path in paths)
 
 
-def emit_head_deletions(paths, info, report):
-    if not paths:
-        return
-    remove_paths(paths)
-    body = (
-        f"Deleted {len(paths)} path(s) that exist in the base tree but not in "
-        "the input branch and that no g1-g4 section owns.\n\n"
-        "Emitted at the head of group 1 so the rest of the history does not "
-        "carry files the input branch has removed."
+def is_code_changes(paths):
+    return bool(paths) and any(is_code_file(path) for path in paths)
+
+
+def touches_only_mysql_test(paths):
+    return bool(paths) and all(path.startswith("mysql-test/") for path in paths)
+
+
+def is_g5_promotable_path(path):
+    return (
+        path.startswith("mysql-test/") or
+        path.endswith(".test") or
+        path.endswith(".result") or
+        path.endswith(".inc") or
+        path.endswith(".cnf") or
+        path.endswith(".supp") or
+        path.endswith(".opt")
     )
-    if commit_with_info(info, HEAD_DELETION_SUBJECT, body):
-        new_hash = git_rev_parse("HEAD")
-        report["emitted"].append({
-            "hash": info["hash"],
-            "subject": HEAD_DELETION_SUBJECT,
-            "group": 1,
-            "label": "head-deletions",
-            "new_hash": new_hash,
-        })
-        log_emit(1, info["hash"], new_hash, HEAD_DELETION_SUBJECT)
-    else:
-        report["skipped"].append({
-            "hash": info["hash"],
-            "subject": HEAD_DELETION_SUBJECT,
-            "group": 1,
-            "label": "head-deletions",
-            "reason": "no staged changes",
-        })
-        log_skip(1, info["hash"], HEAD_DELETION_SUBJECT)
+
+
+def is_result_file(path):
+    return path.endswith(".result")
+
+
+def is_result_only_commit(paths):
+    return bool(paths) and all(is_result_file(path) for path in paths)
+
+
+def strip_version_tags(subject):
+    stripped = VERSION_TAG_RE.sub(lambda m: m.group(1) or "", subject)
+    return stripped if stripped.strip() else subject
+
+
+def add_subject_prefix(subject, prefix, space_before_plain=False):
+    if subject.startswith(prefix):
+        return subject
+    separator = " " if space_before_plain and not subject.startswith("[") else ""
+    return f"{prefix}{separator}{subject}"
+
+
+def is_g5_promotable_commit(paths):
+    return bool(paths) and all(is_g5_promotable_path(path) for path in paths)
+
+
+def is_upstream_subject(subject):
+    return subject.startswith("[upstream]")
+
+
+def is_kernel_subject_or_path(subject, paths):
+    lowered = subject.lower()
+    if any(token in lowered for token in ("tokudb", "toku", "myr", "rocks", "rocksdb")):
+        return True
+    for path in paths:
+        lowered_path = path.lower()
+        if any(token in lowered_path for token in ("tokudb", "toku", "myr", "rocks", "rocksdb")):
+            return True
+    return False
+
+
+def matches_target_group(item, group):
+    subject = item["subject"]
+    paths = item["files"]
+
+    if group == 5:
+        return is_g5_promotable_commit(paths)
+    if group == 6:
+        return (
+            bool(paths) and
+            not is_code_changes(paths) and
+            not is_build_only_changes(paths)
+        )
+    if group == 7:
+        # The remainder of a commit whose MyRocks paths were split off into g4
+        # belongs with the kernel changes even when neither the subject nor any
+        # surviving path still carries a tokudb/rocksdb token -- g4 consumed
+        # every path that identified it. If the g7 promotion then conflicts it
+        # is moved to g10 like any other failed promotion, where emit_item()
+        # gives it the "[myrocks] " prefix.
+        return item.get("split_g4", False) or is_kernel_subject_or_path(subject, paths)
+    if group == 8:
+        return is_build_only_changes(paths)
+    if group == 9:
+        return is_upstream_subject(subject)
+    if group == 10:
+        return (
+            is_code_changes(paths) and
+            not matches_target_group(item, 5) and
+            not matches_target_group(item, 6) and
+            not matches_target_group(item, 7) and
+            not matches_target_group(item, 8) and
+            not matches_target_group(item, 9)
+        )
+    raise ValueError(f"invalid target group: {group}")
 
 
 def make_item(src, files, target_group, kind):
@@ -526,6 +760,7 @@ def make_item(src, files, target_group, kind):
     return {
         "source_hash": src["hash"],
         "source_pos": src["pos"],
+        "source_group": src["source_group"],
         "info": info,
         "subject": info["subject"],
         "body": info["body"],
@@ -535,120 +770,226 @@ def make_item(src, files, target_group, kind):
     }
 
 
-def foreign_path_count(files, group):
-    """Paths in files that do not classify to group by the path rules."""
-    return sum(1 for path in files if path_group(path) != group)
+def add_file_source_override(item, path, source_hash):
+    if path not in item["files"]:
+        item["files"].append(path)
+        item["files"].sort()
+    history = item.setdefault("source_history_by_file", {})
+    history.setdefault(path, [item["source_hash"]]).append(source_hash)
+    item.setdefault("source_by_file", {})[path] = source_hash
 
 
-def record_g1_paths(plan, src, g1_by_category):
-    for cat, paths in g1_by_category.items():
-        plan["g1_files"][cat].update(paths)
-        if cat not in plan["g1_first_info"]:
-            plan["g1_first_info"][cat] = src["info"]
-            plan["g1_first_pos"][cat] = src["pos"]
+def register_result_file_occurrences(item, result_file_last_item):
+    for path in item["files"]:
+        if is_result_file(path):
+            result_file_last_item[path] = item
 
 
-def plan_kept_commit(plan, src, group):
-    """Plan a commit found in the input g2-g4 sections.
-
-    The commit stays where it is and keeps every path it owns, plus any path
-    that belongs to a later group or to no group at all. Paths owned by an
-    earlier group are squashed into g1 or split into g2-g3, which is always
-    safe: extraction only ever moves a path to a section that is emitted
-    before this one, so the path's own section stays the last writer.
-    """
-    g1, g2, g3, g4, rest = split_paths(src["files"])
-    extracted = 0
-
-    if g1:
-        record_g1_paths(plan, src, g1)
-        extracted += sum(len(paths) for paths in g1.values())
-
-    stay = []
-    for earlier, paths in ((2, g2), (3, g3)):
-        if not paths:
+def squash_result_files_into_previous(paths, source_hash, result_file_last_item):
+    remaining = []
+    squashed = 0
+    for path in paths:
+        previous_item = result_file_last_item.get(path)
+        if previous_item is None:
+            remaining.append(path)
             continue
-        if earlier < group:
-            plan["buckets"][earlier].append(
-                make_item(src, paths, earlier, f"split-from-g{group}"))
-            extracted += len(paths)
+        add_file_source_override(previous_item, path, source_hash)
+        squashed += 1
+    return remaining, squashed
+
+
+def split_g1_paths(paths):
+    g1 = defaultdict(list)
+    rest = []
+    for path in paths:
+        cat = classify_g1(path)
+        if cat is None:
+            rest.append(path)
         else:
-            stay.extend(paths)
-    stay.extend(g4)
-    stay.extend(rest)
-
-    plan["extracted"][group] += extracted
-    if not stay:
-        plan["removed"].append({
-            "hash": src["hash"],
-            "subject": src["info"]["subject"],
-            "reason": f"all g{group} paths extracted into earlier groups",
-        })
-        return
-
-    plan["buckets"][group].append(make_item(src, stay, group, "kept-in-place"))
-    plan["kept_in_place"][group] += 1
-    plan["kept_foreign_paths"][group] += foreign_path_count(stay, group)
+            g1[cat].append(path)
+    return g1, rest
 
 
-def plan_commits(parsed, removed_markers, base_hash, input_hash,
-                 keep_in_place=True):
-    head_deletion_paths, head_deletion_info = plan_head_deletions(
-        base_hash, input_hash, parsed)
+def plan_commits(parsed, removed_markers, removed_paths, base_hash):
+    base_removed = set(removed_paths["base_removed"])
+    transient_removed = set(removed_paths["transient_removed"])
+    skipped_paths = base_removed.union(transient_removed)
     plan = {
-        "head_deletion_paths": head_deletion_paths,
-        "head_deletion_info": head_deletion_info,
         "g1_files": defaultdict(set),
         "g1_first_info": {},
         "g1_first_pos": {},
-        "buckets": {group: [] for group in (2, 3, 4, REST_GROUP)},
+        "buckets": {number: [] for number in range(2, 12)},
         "removed": list(removed_markers),
-        "kept_in_place": {group: 0 for group in KEEP_IN_PLACE_GROUPS},
-        "kept_foreign_paths": {group: 0 for group in KEEP_IN_PLACE_GROUPS},
-        "extracted": {group: 0 for group in KEEP_IN_PLACE_GROUPS},
+        "base_removed_files": sorted(base_removed),
+        "transient_removed_files": sorted(transient_removed),
+        "base_removal_info": removed_paths["base_removal_info"],
+        "base_removed_refs_skipped": 0,
+        "transient_removed_refs_skipped": 0,
+        "result_only_files_squashed": 0,
+        "result_only_commits_elided": 0,
+        "result_only_base_files_kept": 0,
+        "result_only_base_commits_kept": 0,
     }
 
+    result_file_last_item = {}
+
+    def append_bucket_item(group, item):
+        plan["buckets"][group].append(item)
+        register_result_file_occurrences(item, result_file_last_item)
+
+    def collect_g1(src, g1):
+        for cat, paths in g1.items():
+            plan["g1_files"][cat].update(paths)
+            if cat not in plan["g1_first_info"]:
+                plan["g1_first_info"][cat] = src["info"]
+                plan["g1_first_pos"][cat] = src["pos"]
+
     for src in parsed:
-        group = src["source_group"]
-        if keep_in_place and group in KEEP_IN_PLACE_GROUPS:
-            if not src["files"]:
+        files = src["files"]
+        if skipped_paths:
+            base_refs = sum(1 for path in files if path in base_removed)
+            transient_refs = sum(1 for path in files if path in transient_removed)
+            if base_refs or transient_refs:
+                plan["base_removed_refs_skipped"] += base_refs
+                plan["transient_removed_refs_skipped"] += transient_refs
+                files = [path for path in files if path not in skipped_paths]
+                if not files:
+                    details = []
+                    if base_refs:
+                        details.append(f"{base_refs} base_removed_files reference(s)")
+                    if transient_refs:
+                        details.append(
+                            f"{transient_refs} transient_removed_files reference(s)")
+                    plan["removed"].append({
+                        "hash": src["hash"],
+                        "subject": src["info"]["subject"],
+                        "reason": (
+                            "all changed paths were skipped because they are "
+                            f"absent from INPUT ({', '.join(details)})"
+                        ),
+                    })
+                    continue
+
+        source_group = src["source_group"]
+        if 2 <= source_group <= 10:
+            # An existing g2-g10 commit is authoritative: emit it intact in its
+            # own group. Splitting it by path would divert whatever does not
+            # match that group into g11, from where promotion can drop it into
+            # another group at its source position -- ahead of that group's own
+            # commits, and applied as a full file state that clobbers the file's
+            # later content. Only g11 commits are split and promoted. The one
+            # exception is g1: its squashes absorb their paths from every group,
+            # so each category is set once, to its INPUT state, and no later
+            # commit touches it again.
+            g1, files = split_g1_paths(files)
+            collect_g1(src, g1)
+            if not files:
                 plan["removed"].append({
                     "hash": src["hash"],
                     "subject": src["info"]["subject"],
-                    "reason": f"g{group} source commit has no changed paths",
+                    "reason": "all changed paths were squashed into g1",
                 })
                 continue
-            plan_kept_commit(plan, src, group)
+            append_bucket_item(
+                source_group, make_item(src, files, source_group, "source-group"))
             continue
 
-        g1, g2, g3, g4, rest = split_paths(src["files"])
+        g1, files = split_g1_paths(files)
+        collect_g1(src, g1)
 
-        record_g1_paths(plan, src, g1)
+        if source_group == 1:
+            # A g1 source commit is never replayed. The input's g1 region only
+            # ever holds this tool's own previous output -- the "[squash] ..."
+            # commits and "Remove files deleted by input branch" -- and all of
+            # that is regenerated from scratch on every run: squash categories
+            # from the loop above, deletions from base_removed_files. Replaying
+            # one emits a second copy of a synthetic commit, e.g. a stale
+            # "Remove files deleted by input branch" still advertising the path
+            # count of the previous run. Its paths have already been collected
+            # into the g1 categories; anything left over is dropped here.
+            reason = "g1 source commit; g1 content is regenerated from scratch"
+            if files:
+                reason += (
+                    f" ({len(files)} path(s) matched no g1 squash category "
+                    "and were dropped)"
+                )
+            plan["removed"].append({
+                "hash": src["hash"],
+                "subject": src["info"]["subject"],
+                "reason": reason,
+            })
+            continue
+
+        # Only g11 commits and commits ahead of the g1 marker reach here; drop
+        # their release-branch tags before any item takes the subject.
+        subject = strip_version_tags(src["info"]["subject"])
+        if subject != src["info"]["subject"]:
+            src = dict(src, info=dict(src["info"], subject=subject))
+
+        if is_result_only_commit(files):
+            result_files_before_squash = list(files)
+            files, squashed = squash_result_files_into_previous(
+                files, src["hash"], result_file_last_item)
+            plan["result_only_files_squashed"] += squashed
+
+            if not files:
+                plan["result_only_commits_elided"] += 1
+                plan["removed"].append({
+                    "hash": src["hash"],
+                    "subject": src["info"]["subject"],
+                    "reason": (
+                        f"all {len(result_files_before_squash)} .result path(s) "
+                        "were squashed into previous in-range commit(s)"
+                    ),
+                })
+                continue
+
+            base_result_files, files = split_present_absent(base_hash, files)
+            if base_result_files:
+                plan["result_only_base_files_kept"] += len(base_result_files)
+                plan["result_only_base_commits_kept"] += 1
+                item = make_item(src, base_result_files, 11, "result-only")
+                item["subject"] = add_subject_prefix(
+                    src["info"]["subject"], "[result-only]",
+                    space_before_plain=True)
+                item["result_only"] = True
+                append_bucket_item(11, item)
+
+            if not files:
+                continue
+
+        _g1_unused, g2, g3, g4, rest = split_paths(files)
 
         if g2:
-            plan["buckets"][2].append(make_item(src, g2, 2, "split"))
+            append_bucket_item(2, make_item(src, g2, 2, "split"))
         if g3:
-            plan["buckets"][3].append(make_item(src, g3, 3, "split"))
+            append_bucket_item(3, make_item(src, g3, 3, "split"))
         if g4:
-            plan["buckets"][4].append(make_item(src, g4, 4, "split"))
+            append_bucket_item(4, make_item(src, g4, 4, "split"))
 
-        if rest:
-            plan["buckets"][REST_GROUP].append(
-                make_item(src, rest, REST_GROUP, "kept"))
+        if not rest:
+            if g1 or g2 or g3 or g4:
+                plan["removed"].append({
+                    "hash": src["hash"],
+                    "subject": src["info"]["subject"],
+                    "reason": "all paths consumed by g1-g4 split/squash planning",
+                })
+            else:
+                plan["removed"].append({
+                    "hash": src["hash"],
+                    "subject": src["info"]["subject"],
+                    "reason": "source commit has no changed paths",
+                })
             continue
 
-        if g1 or g2 or g3 or g4:
-            plan["removed"].append({
-                "hash": src["hash"],
-                "subject": src["info"]["subject"],
-                "reason": "all paths consumed by g1-g4 split/squash planning",
-            })
-        else:
-            plan["removed"].append({
-                "hash": src["hash"],
-                "subject": src["info"]["subject"],
-                "reason": "source commit has no changed paths",
-            })
+        # Only g11 commits and commits ahead of the g1 marker reach here;
+        # g2-g10 commits were emitted intact above.
+        rest_item = make_item(src, rest, 11, "remaining")
+        if g4:
+            # The MyRocks paths of this commit were split off into g4; mark the
+            # remainder so it is recognizable if it ends up in g10.
+            rest_item["split_g4"] = True
+        append_bucket_item(11, rest_item)
 
     for bucket in plan["buckets"].values():
         bucket.sort(key=lambda item: item["source_pos"])
@@ -670,10 +1011,7 @@ def split_present_absent(treeish, paths):
         for line in r.stdout.splitlines():
             if "\t" in line:
                 present.add(line.split("\t", 1)[1])
-    return (
-        [path for path in paths if path in present],
-        [path for path in paths if path not in present],
-    )
+    return [path for path in paths if path in present], [path for path in paths if path not in present]
 
 
 def checkout_paths(treeish, paths):
@@ -687,20 +1025,129 @@ def remove_paths(paths):
                 check=False)
 
 
+def run_git_bytes(args, check=True):
+    r = subprocess.run(["git"] + list(args), capture_output=True)
+    if check and r.returncode != 0:
+        raise RuntimeError(
+            f"git {' '.join(args)} failed: "
+            f"{r.stderr.decode('utf-8', 'replace')[:400]}"
+        )
+    return r.stdout
+
+
+def item_patch_groups(item):
+    """[(source_hash, paths)] steps for the item, in application order.
+
+    A path squashed forward by add_file_source_override() carries a chain of
+    sources in source_history_by_file: the item's own source first, then every
+    override. Under snapshot emission only the last one mattered, because
+    checking it out reproduces the file's final state. A patch is not a state,
+    so every delta in the chain has to be applied and in order -- taking only
+    the last source drops the item's own contribution to that file, which is
+    how e.g. the PS-7019 block went missing from mysql-test/r/join.result and
+    had to be restored by the final reconciliation commit.
+    """
+    history = item.get("source_history_by_file") or {}
+    source_by_file = item.get("source_by_file") or {}
+    if not history and not source_by_file:
+        return [(item["source_hash"], sorted(set(item["files"])))]
+
+    chains = {}
+    for path in item["files"]:
+        chain = history.get(path)
+        if not chain:
+            chain = [source_by_file.get(path, item["source_hash"])]
+        chains[path] = chain
+
+    steps = []
+    depth = max((len(chain) for chain in chains.values()), default=0)
+    for index in range(depth):
+        groups = defaultdict(list)
+        for path, chain in chains.items():
+            if index < len(chain):
+                groups[chain[index]].append(path)
+        for source_hash in sorted(groups):
+            steps.append((source_hash, sorted(groups[source_hash])))
+    return steps
+
+
+def apply_item_patch(item):
+    """Apply the item's source delta for its paths with a 3-way merge.
+
+    Returns True when everything applied. On False the index/worktree may hold
+    a partial application and the caller must reset before doing anything else.
+    """
+    for source_hash, paths in item_patch_groups(item):
+        for batch in batched(paths):
+            patch = run_git_bytes([
+                "diff", "--full-index", "--binary", "--no-color", "--ignore-submodules=none",
+                f"{source_hash}^", source_hash, "--",
+            ] + batch)
+            if not patch.strip():
+                continue
+            r = subprocess.run(
+                ["git", "apply", "--3way", "--index", "--whitespace=nowarn"],
+                input=patch, capture_output=True)
+            if r.returncode != 0 or unmerged_paths():
+                return False
+    return True
+
+
+def reset_worktree_to_head():
+    run_git(["reset", "--hard", "HEAD"], check=False)
+
+
+def item_emission_mode(item):
+    if EMIT_CONFIG["patch_emit"] == "all":
+        return "patch"
+    if item.get("source_group") != item.get("target_group"):
+        return "patch"
+    return "state"
+
+
+def item_will_state_emit(item, bucket_group):
+    """Would this planned item overwrite whole files when it is emitted?"""
+    if EMIT_CONFIG["patch_emit"] == "all":
+        return False
+    if bucket_group == 11:
+        # Still unplaced: it may be promoted (patch) or stay (snapshot).
+        return True
+    return item.get("source_group") == bucket_group
+
+
 def apply_file_states(treeish, paths):
-    """Make the given paths match their state in treeish, staged for commit."""
     paths = sorted(set(paths))
     present, absent = split_present_absent(treeish, paths)
     checkout_paths(treeish, present)
     remove_paths(absent)
 
 
-def build_message(subject, body):
-    """Keep the source subject verbatim, however long it is."""
-    return subject + ("\n\n" + body if body.strip() else "")
+def apply_item_file_states(item):
+    source_by_file = item.get("source_by_file") or {}
+    if not source_by_file:
+        apply_file_states(item["source_hash"], item["files"])
+        return
+
+    paths_by_source = defaultdict(list)
+    for path in item["files"]:
+        paths_by_source[source_by_file.get(path, item["source_hash"])].append(path)
+    for source_hash, paths in paths_by_source.items():
+        apply_file_states(source_hash, paths)
 
 
-def commit_with_info(info, subject, body="", allow_empty=False):
+def build_message(subject, body, original_subject=None):
+    original = original_subject or subject
+    if len(subject) <= MAX_SUBJECT_LEN and original == subject:
+        return subject + ("\n\n" + body if body.strip() else "")
+    truncated = subject[:MAX_SUBJECT_LEN]
+    full_body = f"Original title:\n{original}"
+    if body.strip():
+        full_body += "\n\n" + body
+    return truncated + "\n\n" + full_body
+
+
+def commit_with_info(info, subject, body="", allow_empty=False,
+                     original_subject=None):
     env = os.environ.copy()
     env["GIT_AUTHOR_NAME"] = info["author_name"]
     env["GIT_AUTHOR_EMAIL"] = info["author_email"]
@@ -709,10 +1156,13 @@ def commit_with_info(info, subject, body="", allow_empty=False):
     env["GIT_COMMITTER_EMAIL"] = info["committer_email"]
     env["GIT_COMMITTER_DATE"] = info["committer_date"]
 
-    cmd = ["commit", "-m", build_message(subject, body)]
+    # Pass the message on stdin: a single argv entry is capped at 128 KiB
+    # (MAX_ARG_STRLEN), which squash-heavy commits can exceed.
+    cmd = ["commit", "-F", "-"]
     if allow_empty:
         cmd.append("--allow-empty")
-    r = run_git(cmd, check=False, env=env)
+    r = run_git(cmd, check=False, env=env,
+                input=build_message(subject, body, original_subject))
     if r.returncode == 0:
         return True
     combined = (r.stdout + r.stderr).lower()
@@ -729,15 +1179,35 @@ def emit_marker(group):
     log_marker(group, subject)
 
 
-def emit_item(item, report, allow_empty=False):
-    apply_file_states(item["source_hash"], item["files"])
+def emit_item(item, report, label):
+    if item.get("target_group") == 10 and item.get("split_g4"):
+        item["subject"] = add_myrocks_prefix(item["subject"])
+    if item_emission_mode(item) == "patch":
+        if apply_item_patch(item):
+            item["emitted_as"] = "patch"
+        else:
+            reset_worktree_to_head()
+            item["emitted_as"] = "patch-fallback-state"
+            report.setdefault("patch_fallbacks", []).append({
+                "hash": item["source_hash"],
+                "subject": item["subject"],
+                "group": item["target_group"],
+                "paths": len(item["files"]),
+            })
+            log_patch_fallback(item["target_group"], item["source_hash"],
+                               item["subject"])
+            apply_item_file_states(item)
+    else:
+        item["emitted_as"] = "state"
+        apply_item_file_states(item)
     ok = commit_with_info(item["info"], item["subject"], item["body"],
-                          allow_empty=allow_empty)
+                          original_subject=item.get("original_subject"))
     entry = {
         "hash": item["source_hash"],
         "subject": item["subject"],
         "group": item["target_group"],
-        "label": item["kind"],
+        "label": label,
+        "emitted_as": item["emitted_as"],
     }
     if ok:
         new_head = git_rev_parse("HEAD")
@@ -751,6 +1221,84 @@ def emit_item(item, report, allow_empty=False):
     report["skipped"].append(entry)
     log_skip(item["target_group"], item["source_hash"], item["subject"])
     return False
+
+
+def g5_extracted_path_matches(path, pattern):
+    if pattern.endswith("/"):
+        return path.startswith(pattern)
+    return path == pattern
+
+
+def split_g5_extracted_paths(item):
+    """Split G5_EXTRACTED_PATHS off a g5 promotion.
+
+    Returns (main_item, extracted_items); main_item is None when the item
+    touches nothing but extracted paths.
+    """
+    files = set(item["files"])
+    extracted = []
+    for pattern, tag in G5_EXTRACTED_PATHS:
+        matched = sorted(
+            path for path in files if g5_extracted_path_matches(path, pattern))
+        if matched:
+            extracted.append((pattern, tag, matched))
+    if not extracted:
+        return item, []
+
+    rest = sorted(files - {
+        path for _pattern, _tag, matched in extracted for path in matched})
+    main = None
+    if rest:
+        main = dict(item)
+        main["files"] = rest
+        main["body"] = split_note(
+            item["body"],
+            f"Split of {item['source_hash']}: "
+            f"{', '.join(pattern for pattern, _tag, _matched in extracted)} "
+            "extracted into separate commit(s).",
+        )
+
+    parts = []
+    for pattern, tag, matched in extracted:
+        part = dict(item)
+        part["files"] = matched
+        part["subject"] = add_subject_prefix(
+            item["subject"], tag, space_before_plain=True)
+        if rest or len(extracted) > 1:
+            part["body"] = split_note(
+                item["body"],
+                f"Split of {item['source_hash']}: {pattern} extracted from it.",
+            )
+        part["kind"] = f"{item['kind']}-extract"
+        part["extract_pattern"] = pattern
+        parts.append(part)
+    return main, parts
+
+
+def emit_g5_promotion(item, report, label):
+    """Emit a g5 promotion followed by its extracted-path commits.
+
+    Returns True when at least one commit was emitted.
+    """
+    main, parts = split_g5_extracted_paths(item)
+    emitted = False
+    if main is not None:
+        emitted = emit_item(main, report, label)
+    for part in parts:
+        if emit_item(part, report, part["kind"]):
+            emitted = True
+            report.setdefault("extracted", []).append({
+                "hash": item["source_hash"],
+                "subject": part["subject"],
+                "path": part["extract_pattern"],
+            })
+    return emitted
+
+
+def emit_promotion(item, report, label):
+    if item["target_group"] == 5:
+        return emit_g5_promotion(item, report, label)
+    return emit_item(item, report, label)
 
 
 def emit_squash(input_hash, cat, files, info, report):
@@ -780,54 +1328,586 @@ def emit_squash(input_hash, cat, files, info, report):
         log(f"{STYLE.yellow('skip')} {fmt_group(1)} {cat}: no staged changes")
 
 
-def emit_group(plan, group, report, allow_empty=False):
-    items = plan["buckets"][group]
-    if not items:
-        log(f"{fmt_group(group)}: {STYLE.dim('no items')}")
-    for item in items:
-        emit_item(item, report, allow_empty=allow_empty)
-
-
-def emit_grouped_path_fixup(input_hash, report):
-    """Repair g1-g4 paths left stale by a commit kept in place.
-
-    Every g1-g4 path is owned by a section that is fully emitted before the kept
-    commits start, so once g4 is done those paths must already match INPUT. A
-    commit kept in place can still carry a path owned by a *later* group - a
-    g2 commit touching a rocksdb path, say - and be its last writer even though
-    that later section is emitted afterwards. Restore INPUT state for such paths
-    here, so the kept commits start from the right tree and no snapshot commit
-    has to land on the branch tip.
-    """
-    stale = [path for path in remaining_diff_paths(input_hash, "HEAD")
-             if path_group(path) is not None]
-    if not stale:
-        log(f"{STYLE.dim('grouped-path fixup')}: none needed")
+def emit_base_removed_files(plan, report):
+    files = plan["base_removed_files"]
+    if not files:
+        log(f"{STYLE.dim('base_removed_files')}: none")
         return False
 
-    log(
-        f"{STYLE.yellow('grouped-path fixup')}: "
-        f"{STYLE.yellow(str(len(stale)))} path(s) left stale by kept commits"
-    )
-    for path in stale[:20]:
-        log(f"  {STYLE.dim(f'g{path_group(path)}')} {path}")
-    if len(stale) > 20:
-        log(f"  {STYLE.dim(f'... and {len(stale) - 20} more')}")
-
-    apply_file_states(input_hash, stale)
-    info = get_commit_info(input_hash)
+    info = plan["base_removal_info"]
+    remove_paths(files)
+    subject = "Remove files deleted by input branch"
     body = (
-        f"Restored {len(stale)} g1-g4 path(s) to their INPUT_BRANCH state. Each "
-        "one is owned by an already emitted group but was overwritten by a "
-        "commit that was kept in place in another group section."
+        f"Removed {len(files)} path(s) that existed in BASE_BRANCH and are "
+        "absent from INPUT_BRANCH."
     )
-    ok = commit_with_info(info, "Fixup: restore g1-g4 paths left stale by kept commits", body)
-    report["fixup"] = {"paths": len(stale), "emitted": bool(ok)}
+    ok = commit_with_info(info, subject, body)
+    entry = {
+        "paths": len(files),
+        "subject": subject,
+        "first_source": info["hash"],
+    }
+    if ok:
+        entry["new_hash"] = git_rev_parse("HEAD")
+        report["base_removed"].append(entry)
+        log(
+            f"{STYLE.red('remove')} {fmt_group(1)} "
+            f"{STYLE.yellow(str(len(files)))} base_removed_files"
+        )
+    else:
+        entry["reason"] = "base_removed_files removal produced no staged changes"
+        report["skipped"].append(entry)
+        log(f"{STYLE.yellow('skip')} {fmt_group(1)} base_removed_files")
     return ok
 
 
+def is_conflict_output(text):
+    lowered = text.lower()
+    return any(token in lowered for token in (
+        "conflict",
+        "would be overwritten",
+        "unmerged",
+        "needs merge",
+    ))
+
+
+def conflict_summary(output):
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    for line in lines:
+        lowered = line.lower()
+        if (
+            "conflict" in lowered or
+            "failed" in lowered or
+            "error" in lowered or
+            "would be overwritten" in lowered or
+            "needs merge" in lowered
+        ):
+            return line
+    return lines[0] if lines else "conflict"
+
+
+def is_empty_cherry_pick_output(text):
+    lowered = text.lower()
+    return any(token in lowered for token in (
+        "previous cherry-pick is now empty",
+        "cherry-pick is now empty",
+        "nothing to commit",
+        "the previous cherry-pick is now empty",
+        "is empty",
+    ))
+
+
+def failed_promotion_tag(group):
+    return FAILED_PROMOTION_TAGS.get(group, f"[g{group}]")
+
+
+def add_failed_promotion_prefix(subject, group):
+    prefix = f"{failed_promotion_tag(group)} "
+    if subject.startswith(prefix):
+        return subject
+    return f"{prefix}{subject}"
+
+
+def add_myrocks_prefix(subject):
+    if subject.startswith(MYROCKS_PREFIX):
+        return subject
+    return f"{MYROCKS_PREFIX}{subject}"
+
+
+def item_source_pos(item):
+    return item.get("source_pos", -1)
+
+
+HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+PATCH_HUNK_CACHE = {}
+
+
+def item_source_cache_key(item):
+    source_by_file = item.get("source_by_file") or {}
+    source_history_by_file = item.get("source_history_by_file") or {}
+    source_history_key = tuple(
+        (path, tuple(sources))
+        for path, sources in sorted(source_history_by_file.items())
+    )
+    return (
+        item["source_hash"],
+        tuple(sorted(item["files"])),
+        tuple(sorted(source_by_file.items())),
+        source_history_key,
+    )
+
+
+def range_with_min_width(start, count):
+    count = max(count, 1)
+    return start, start + count - 1
+
+
+def item_patch_hunks(item):
+    key = item_source_cache_key(item)
+    if key in PATCH_HUNK_CACHE:
+        return PATCH_HUNK_CACHE[key]
+
+    source_by_file = item.get("source_by_file") or {}
+    if source_by_file:
+        hunks = []
+        paths_by_source = defaultdict(list)
+        source_history_by_file = item.get("source_history_by_file") or {}
+        for path in item["files"]:
+            source_history = source_history_by_file.get(path)
+            if source_history:
+                for source_hash in source_history:
+                    paths_by_source[source_hash].append(path)
+            else:
+                paths_by_source[source_by_file.get(
+                    path, item["source_hash"])].append(path)
+        for source_hash, paths in paths_by_source.items():
+            hunks.extend(item_patch_hunks({
+                "source_hash": source_hash,
+                "files": paths,
+            }))
+        PATCH_HUNK_CACHE[key] = hunks
+        return hunks
+
+    parents = get_commit_parents(item["source_hash"])
+    if parents:
+        args = [
+            "diff", "--unified=0", "--no-renames", "--ignore-submodules=none",
+            parents[0], item["source_hash"], "--",
+        ] + list(item["files"])
+    else:
+        args = [
+            "show", "--format=", "--unified=0", "--no-renames", "--ignore-submodules=none",
+            item["source_hash"], "--",
+        ] + list(item["files"])
+    r = run_git(args, check=False)
+
+    hunks = []
+    old_path = None
+    new_path = None
+    current_path = None
+    for line in r.stdout.splitlines():
+        if line.startswith("diff --git "):
+            old_path = None
+            new_path = None
+            current_path = None
+            continue
+        if line.startswith("--- "):
+            raw = line[4:]
+            old_path = None if raw == "/dev/null" else raw[2:] if raw.startswith("a/") else raw
+            current_path = new_path or old_path
+            continue
+        if line.startswith("+++ "):
+            raw = line[4:]
+            new_path = None if raw == "/dev/null" else raw[2:] if raw.startswith("b/") else raw
+            current_path = new_path or old_path
+            continue
+
+        match = HUNK_RE.match(line)
+        if not match or current_path is None:
+            continue
+        old_start = int(match.group(1))
+        old_count = int(match.group(2) or "1")
+        new_start = int(match.group(3))
+        new_count = int(match.group(4) or "1")
+        hunks.append((
+            current_path,
+            range_with_min_width(old_start, old_count),
+            range_with_min_width(new_start, new_count),
+        ))
+
+    PATCH_HUNK_CACHE[key] = hunks
+    return hunks
+
+
+def ranges_overlap(left, right):
+    return max(left[0], right[0]) <= min(left[1], right[1])
+
+
+def patch_hunks_overlap(left, right):
+    return (
+        left[0] == right[0] and
+        (ranges_overlap(left[1], right[1]) or ranges_overlap(left[2], right[2]))
+    )
+
+
+def items_patch_overlap(left, right):
+    return any(
+        patch_hunks_overlap(left_hunk, right_hunk)
+        for left_hunk in item_patch_hunks(left)
+        for right_hunk in item_patch_hunks(right)
+    )
+
+
+def promotion_clobber_paths(item, group, plan, ignored_ids=None):
+    """Return the item paths that a later group could clobber, with a reason."""
+    item_pos = item_source_pos(item)
+    if item_pos < 0:
+        return set(), None
+    ignored_ids = ignored_ids or set()
+
+    protected = []
+    for protected_group in range(group + 1, 11):
+        protected.extend(
+            (protected_group, other) for other in plan["buckets"][protected_group])
+    protected.extend((11, other) for other in plan["buckets"][11])
+
+    item_paths = set(item["files"])
+    blocked = set()
+    reason = None
+    for other_group, other in protected:
+        if other is item:
+            continue
+        if id(other) in ignored_ids:
+            continue
+        if item_source_pos(other) >= item_pos:
+            continue
+        shared = item_paths.intersection(other["files"])
+        if not shared:
+            continue
+        if not item_will_state_emit(other, other_group):
+            # A patch-emitted later item contributes only its own hunks, so it
+            # cannot clobber us. Ordering interference between two patches is a
+            # merge question, and items_patch_overlap() cannot answer it: it
+            # compares line ranges taken from two different base trees, so two
+            # commits hundreds of apart in the source list "overlap" whenever
+            # their unrelated hunks happen to land on similar line numbers.
+            # Leave the verdict to probe_item_emission(), which performs the
+            # real 3-way apply.
+            continue
+        blocked |= shared
+        if items_patch_overlap(item, other):
+            reason = "unsafe hunk overlap with later group"
+        elif reason is None:
+            reason = "full-file-state clobber risk with earlier-source later item"
+    return blocked, reason
+
+
+def move_failed_promotion_to_g10(item, group, report, reason, emit_now=False):
+    moved = dict(item)
+    moved["kept_from_group"] = group
+    moved["subject"] = add_failed_promotion_prefix(item["subject"], group)
+    moved["target_group"] = 10
+    moved["kind"] = f"failed-g{group}-promotion-to-g10"
+    if emit_now:
+        emit_item(moved, report, moved["kind"])
+    report["kept"].append({
+        "hash": item["source_hash"],
+        "subject": moved["subject"],
+        "candidate_group": group,
+        "reason": reason,
+    })
+    return moved
+
+
+def restore_path(treeish, path):
+    """Put one path back to its `treeish` state, clearing any unmerged entry."""
+    exists = run_git(["cat-file", "-e", f"{treeish}:{path}"], check=False).returncode == 0
+    run_git(["reset", "--quiet", treeish, "--", path], check=False)
+    if exists:
+        run_git(["checkout", "--force", treeish, "--", path], check=False)
+    else:
+        run_git(["rm", "-f", "--quiet", "--ignore-unmatch", "--", path], check=False)
+
+
+def probe_item_emission(item):
+    """Probe exactly the paths this item will emit, one path at a time.
+
+    Returns (status, output, conflicted_paths) with status "clean", "empty" or
+    "conflict". Unlike probe_clean_cherry_pick() this never touches paths that
+    pass 1 split off into another group, so a commit whose storage/rocksdb half
+    was already emitted in g4 is not reported as conflicting on those paths.
+    """
+    before = git_rev_parse("HEAD")
+    conflicted = set()
+    changed = False
+    try:
+        for source_hash, paths in item_patch_groups(item):
+            for path in paths:
+                if path in conflicted:
+                    # An earlier link of this path's source chain already
+                    # failed; the rest of the chain has nothing to build on.
+                    continue
+                patch = run_git_bytes([
+                    "diff", "--full-index", "--binary", "--no-color", "--ignore-submodules=none",
+                    f"{source_hash}^", source_hash, "--", path,
+                ])
+                if not patch.strip():
+                    continue
+                r = subprocess.run(
+                    ["git", "apply", "--3way", "--index", "--whitespace=nowarn"],
+                    input=patch, capture_output=True)
+                if r.returncode != 0 or unmerged_paths():
+                    conflicted.add(path)
+                    restore_path(before, path)
+                else:
+                    changed = True
+    finally:
+        run_git(["reset", "--hard", before], check=False)
+
+    if conflicted:
+        summary = "CONFLICT (patch): " + ", ".join(sorted(conflicted))
+        return "conflict", summary, conflicted
+    return ("clean" if changed else "empty"), "", set()
+
+
+def abort_cherry_pick_if_needed():
+    run_git(["cherry-pick", "--abort"], check=False)
+
+
+def unmerged_paths():
+    r = run_git(["diff", "--name-only", "--diff-filter=U", "--no-renames",
+                 "--ignore-submodules=none"],
+                check=False)
+    return {line for line in r.stdout.splitlines() if line}
+
+
+def probe_clean_cherry_pick(source_hash):
+    """Probe a cherry-pick; return (status, output, conflicted_paths)."""
+    before = git_rev_parse("HEAD")
+    r = run_git(["cherry-pick", "--no-commit", source_hash], check=False)
+    combined = r.stdout + r.stderr
+
+    if r.returncode == 0:
+        run_git(["reset", "--hard", before])
+        return "clean", combined, set()
+
+    conflicted = unmerged_paths()
+    abort_cherry_pick_if_needed()
+    run_git(["reset", "--hard", before])
+
+    if is_empty_cherry_pick_output(combined):
+        return "empty", combined, set()
+    if is_conflict_output(combined):
+        return "conflict", combined, conflicted
+
+    raise RuntimeError(
+        f"unexpected cherry-pick probe failure for {source_hash}\n"
+        f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
+    )
+
+
+def split_note(body, note):
+    return (body + "\n\n" + note) if body.strip() else note
+
+
+def split_failed_promotion(item, group, plan, report, blocked_paths, reason):
+    """Emit the unblocked paths of a failed promotion in `group`.
+
+    The blocked paths are carried forward as a separate commit tagged with
+    failed_promotion_tag(group) at the tail, exactly as an unsplit failed
+    promotion would be.
+    Returns True when the split was performed.
+    """
+    item_paths = set(item["files"])
+    blocked = sorted(blocked_paths & item_paths)
+    clean = sorted(item_paths - set(blocked))
+    if not blocked or not clean:
+        return False
+
+    clean_item = dict(item)
+    clean_item["files"] = clean
+    clean_item["target_group"] = group
+    clean_item["kind"] = f"split-g11-to-g{group}"
+    clean_item["body"] = split_note(
+        item["body"],
+        f"Split of {item['source_hash']}: {len(clean)} path(s) promoted to "
+        f"group {group}; {len(blocked)} path(s) deferred ({reason}).",
+    )
+    if not emit_promotion(clean_item, report, clean_item["kind"]):
+        return False
+    report["promoted"].append({
+        "hash": item["source_hash"],
+        "subject": item["subject"],
+        "to_group": group,
+        "reason": f"split promotion: {len(clean)} conflict-free path(s)",
+    })
+
+    rest = dict(item)
+    rest["files"] = blocked
+    rest["body"] = split_note(
+        item["body"],
+        f"Split of {item['source_hash']}: {len(blocked)} path(s) held back "
+        f"from group {group} ({reason}); the remaining {len(clean)} path(s) "
+        f"were promoted to group {group}.",
+    )
+    moved = move_failed_promotion_to_g10(
+        rest, group, report,
+        f"split at g{group}: {len(blocked)} path(s) blocked ({reason})")
+    plan["buckets"][10].append(moved)
+
+    report.setdefault("splits", []).append({
+        "hash": item["source_hash"],
+        "subject": item["subject"],
+        "group": group,
+        "clean_paths": len(clean),
+        "blocked_paths": len(blocked),
+        "reason": reason,
+    })
+    log_split(group, item["source_hash"], len(clean), len(blocked), reason)
+    return True
+
+
+def promote_from_g11(plan, group, report):
+    remaining = []
+    promoted = 0
+    kept_conflict = 0
+    skipped_empty = 0
+    split_count = 0
+    resolved_same_pass_ids = set()
+    splittable = group in SPLIT_PROMOTION_GROUPS
+
+    for item in plan["buckets"][11]:
+        if item.get("kept_from_group") is not None:
+            remaining.append(item)
+            continue
+        if not matches_target_group(item, group):
+            remaining.append(item)
+            continue
+
+        if group < 10:
+            clobber_paths, clobber_reason = promotion_clobber_paths(
+                item, group, plan, resolved_same_pass_ids)
+        else:
+            clobber_paths, clobber_reason = set(), None
+        if clobber_reason:
+            if splittable:
+                # A clobber-guarded commit is never probed on its own, but the
+                # probe is what tells us which of the remaining paths could be
+                # promoted, so run it here purely to widen the blocked set.
+                status, _output, conflicted = probe_item_emission(item)
+                blocked = clobber_paths | conflicted
+                if status != "empty" and split_failed_promotion(
+                        item, group, plan, report, blocked, clobber_reason):
+                    resolved_same_pass_ids.add(id(item))
+                    split_count += 1
+                    continue
+            moved = move_failed_promotion_to_g10(
+                item, group, report,
+                f"overlap/clobber guard: {clobber_reason}; moved to g10")
+            plan["buckets"][10].append(moved)
+            kept_conflict += 1
+            log_move_to_g10(
+                item["source_hash"], group,
+                f"overlap/clobber guard: {clobber_reason}")
+            continue
+
+        status, output, conflicted = probe_item_emission(item)
+        if status == "clean":
+            moved = dict(item)
+            moved["target_group"] = group
+            moved["kind"] = f"promoted-g11-to-g{group}"
+            emit_promotion(moved, report, moved["kind"])
+            report["promoted"].append({
+                "hash": item["source_hash"],
+                "subject": item["subject"],
+                "to_group": group,
+                "reason": "clean patch probe",
+            })
+            resolved_same_pass_ids.add(id(item))
+            promoted += 1
+        elif status == "empty":
+            report["skipped"].append({
+                "hash": item["source_hash"],
+                "subject": item["subject"],
+                "group": group,
+                "label": f"g11-to-g{group}",
+                "reason": "patch probe was empty at target group",
+            })
+            skipped_empty += 1
+            log(
+                f"{STYLE.yellow('empty')} g11->{fmt_group(group)} "
+                f"{fmt_sha(item['source_hash'])} {item['subject']}"
+            )
+            resolved_same_pass_ids.add(id(item))
+        else:
+            if splittable and split_failed_promotion(
+                    item, group, plan, report, conflicted,
+                    "patch probe conflicted"):
+                resolved_same_pass_ids.add(id(item))
+                split_count += 1
+                continue
+            moved = move_failed_promotion_to_g10(
+                item, group, report,
+                "patch probe conflicted; moved to g10",
+                emit_now=(group == 10))
+            if group != 10:
+                plan["buckets"][10].append(moved)
+            kept_conflict += 1
+            log_move_to_g10(item["source_hash"], group, conflict_summary(output))
+
+    plan["buckets"][11] = remaining
+    log_summary(group, promoted, kept_conflict, skipped_empty, split_count)
+
+
+def feature_dir_tag(paths):
+    """"[components/<name>]", "[plugin/<name>]", "[storage/<name>]" or
+    "[router]" for the feature directory holding most of `paths` (ties: first
+    in path order), or None."""
+    counts = defaultdict(int)
+    for path in sorted(paths):
+        m = FEATURE_DIR_RE.match(path)
+        if m:
+            counts[m.group(1)] += 1
+    if not counts:
+        return None
+    return f"[{max(counts, key=counts.get)}]"
+
+
+def retag_g10_promotion(item):
+    """Tag the subject with its feature directory: replace a leading "[#NNNN]"
+    tag (keeping the original subject in the body), or prepend the tag
+    otherwise, also in front of any other leading tag."""
+    subject = item["subject"]
+    tag = feature_dir_tag(item["files"])
+    if tag is None or subject.startswith(tag):
+        return
+    m = PR_TAG_RE.match(subject)
+    if m:
+        item["original_subject"] = subject
+        subject = subject[m.end():]
+    item["subject"] = f"{tag} {subject}"
+
+
+def drain_g10_candidates(plan, report):
+    remaining = []
+    moved_count = 0
+    skipped_empty = 0
+
+    for item in plan["buckets"][11]:
+        if not matches_target_group(item, 10):
+            remaining.append(item)
+            continue
+
+        moved = dict(item)
+        moved["target_group"] = 10
+        moved["kind"] = "g10-code-placement"
+        retag_g10_promotion(moved)
+        plan["buckets"][10].append(moved)
+        report["promoted"].append({
+            "hash": item["source_hash"],
+            "subject": moved["subject"],
+            "to_group": 10,
+            "reason": "g10 source-order code placement",
+        })
+        moved_count += 1
+
+    plan["buckets"][11] = remaining
+    plan["buckets"][10].sort(key=lambda item: item["source_pos"])
+    log_summary(10, moved_count, 0, skipped_empty)
+
+
+def emit_existing_group(plan, group, report):
+    items = sorted(plan["buckets"][group], key=lambda item: item["source_pos"])
+    if not items:
+        log(f"{fmt_group(group)}: {STYLE.dim('no existing items')}")
+    for item in items:
+        item["target_group"] = group
+        emit_item(item, report, item["kind"])
+
+
 def remaining_diff_paths(input_hash, output_ref):
-    r = run_git(["diff", "--name-only", "--no-renames", output_ref, input_hash],
+    r = run_git(["diff", "--name-only", "--no-renames", "--ignore-submodules=none",
+                 output_ref, input_hash],
                 check=False)
     return [line for line in r.stdout.splitlines() if line]
 
@@ -878,22 +1958,29 @@ def build_output(args, input_hash, base_hash, plan, report):
 
     log_section("pass 1: emit g1-g4")
     emit_marker(1)
-    emit_head_deletions(plan["head_deletion_paths"], plan["head_deletion_info"],
-                        report)
+    emit_base_removed_files(plan, report)
     for cat in sorted(plan["g1_files"], key=lambda key: plan["g1_first_pos"][key]):
         emit_squash(input_hash, cat, plan["g1_files"][cat],
                     plan["g1_first_info"][cat], report)
 
     for group in (2, 3, 4):
         emit_marker(group)
-        emit_group(plan, group, report)
+        emit_existing_group(plan, group, report)
 
-    emit_grouped_path_fixup(input_hash, report)
+    log_section("pass 2: emit g5-g10 and promote from g11")
+    for group in (5, 6, 7, 8, 9):
+        emit_marker(group)
+        emit_existing_group(plan, group, report)
+        promote_from_g11(plan, group, report)
 
-    log_section("remaining commits kept in source order")
-    if not args.no_rest_marker:
-        emit_marker(REST_GROUP)
-    emit_group(plan, REST_GROUP, report, allow_empty=args.keep_empty)
+    emit_marker(10)
+    drain_g10_candidates(plan, report)
+    emit_existing_group(plan, 10, report)
+
+    emit_marker(11)
+    for item in sorted(plan["buckets"][11], key=lambda it: it["source_pos"]):
+        item["target_group"] = 11
+        emit_item(item, report, "remaining-g11")
 
     diff_paths = remaining_diff_paths(input_hash, args.output_branch)
     if diff_paths and args.no_reconcile:
@@ -903,8 +1990,14 @@ def build_output(args, input_hash, base_hash, plan, report):
         )
     if diff_paths:
         reconcile_to_input(input_hash, args.output_branch, report)
-    else:
-        log(f"{STYLE.green('final tree matches input')}")
+
+    marker = plan.get("identical_marker")
+    if marker is not None:
+        commit_with_info(marker, marker["subject"], marker["body"],
+                         allow_empty=True)
+        report["identical_marker"] = marker
+        log(f"{STYLE.cyan('marker')} {fmt_sha(marker['hash'])}: "
+            f"{STYLE.dim(marker['subject'])}")
 
 
 def log_entries(title, entries, formatter):
@@ -915,42 +2008,62 @@ def log_entries(title, entries, formatter):
         log(f"  {formatter(item)}")
 
 
-def print_final_report(args, base_hash, input_hash, parsed_count, plan, report):
+def print_final_report(args, base_hash, input_hash, parsed_count,
+                       had_markers, plan, report):
     log_section("final report")
     log(f"{STYLE.bold('base')}: {fmt_sha(base_hash)}")
     log(f"{STYLE.bold('input')}: {fmt_sha(input_hash)}")
     log(f"{STYLE.bold('output branch')}: {STYLE.cyan(args.output_branch)}")
     log(f"{STYLE.bold('source commits parsed')}: {parsed_count}")
+    marker_status = STYLE.green("yes") if had_markers else STYLE.yellow("no")
+    log(f"{STYLE.bold('recognized markers in input')}: {marker_status}")
     log(f"{STYLE.bold('emitted commits')}: {STYLE.green(str(len(report['emitted'])))}")
-    log(f"{STYLE.bold('g1 squashes')}: {STYLE.magenta(str(len(report['squashed'])))}")
-    for group in (2, 3, 4):
-        kept = plan["kept_in_place"][group]
-        total = len(plan["buckets"][group])
-        foreign = plan["kept_foreign_paths"][group]
-        extracted = plan["extracted"][group]
-        detail = (
-            f" ({kept} kept in place carrying {foreign} foreign path(s), "
-            f"{extracted} path(s) extracted to earlier groups, "
-            f"{total - kept} split in from other sections)"
-        ) if kept else ""
-        log(
-            f"{STYLE.bold(f'g{group} commits')}: "
-            f"{STYLE.cyan(str(total))}{STYLE.dim(detail)}"
-        )
+    modes = defaultdict(int)
+    for entry in report["emitted"]:
+        modes[entry.get("emitted_as", "state")] += 1
     log(
-        f"{STYLE.bold(f'g{REST_GROUP} commits kept in source order')}: "
-        f"{STYLE.cyan(str(len(plan['buckets'][REST_GROUP])))}"
+        f"{STYLE.bold('emission mode')}: {STYLE.cyan(args.patch_emit)} "
+        f"(patch={STYLE.green(str(modes['patch']))}, "
+        f"snapshot={STYLE.yellow(str(modes['state']))}, "
+        f"patch-fallback={STYLE.red(str(modes['patch-fallback-state']))})"
+    )
+    log(f"{STYLE.bold('promoted from g11')}: {STYLE.green(str(len(report['promoted'])))}")
+    log(
+        f"{STYLE.bold('split promotions')}: "
+        f"{STYLE.magenta(str(len(report.get('splits', []))))}"
+    )
+    log(
+        f"{STYLE.bold('g5 extracted-path commits')}: "
+        f"{STYLE.magenta(str(len(report.get('extracted', []))))}"
+    )
+    log(
+        f"{STYLE.bold('failed promotions moved to g10')}: "
+        f"{STYLE.red(str(len(report['kept'])))}"
     )
     log(f"{STYLE.bold('skipped output items')}: {STYLE.yellow(str(len(report['skipped'])))}")
-    log(f"{STYLE.bold('dropped source commits')}: {STYLE.yellow(str(len(plan['removed'])))}")
-
-    fixup = report.get("fixup")
-    if fixup:
-        log(
-            f"{STYLE.bold('grouped-path fixup')}: "
-            f"{STYLE.yellow(str(fixup['paths']))} path(s), "
-            f"commit emitted={str(fixup['emitted']).lower()}"
-        )
+    log(f"{STYLE.bold('g1 squashes')}: {STYLE.magenta(str(len(report['squashed'])))}")
+    log(
+        f"{STYLE.bold('base removed files')}: "
+        f"{STYLE.red(str(len(plan['base_removed_files'])))} "
+        f"({plan['base_removed_refs_skipped']} source reference(s) skipped)"
+    )
+    log(
+        f"{STYLE.bold('transient removed files')}: "
+        f"{STYLE.red(str(len(plan['transient_removed_files'])))} "
+        f"({plan['transient_removed_refs_skipped']} source reference(s) skipped)"
+    )
+    log(
+        f"{STYLE.bold('.result files squashed into previous commits')}: "
+        f"{STYLE.magenta(str(plan['result_only_files_squashed']))}"
+    )
+    log(
+        f"{STYLE.bold('.result-only commits elided')}: "
+        f"{STYLE.yellow(str(plan['result_only_commits_elided']))}"
+    )
+    log(
+        f"{STYLE.bold('[result-only] commits kept separate')}: "
+        f"{STYLE.yellow(str(plan['result_only_base_commits_kept']))}"
+    )
 
     rec = report.get("reconciliation")
     if rec:
@@ -960,12 +2073,50 @@ def print_final_report(args, base_hash, input_hash, parsed_count, plan, report):
             f"commit emitted={str(rec['emitted']).lower()}"
         )
 
+    marker = report.get("identical_marker")
+    if marker:
+        log(
+            f"{STYLE.bold('source-identical marker kept last')}: "
+            f"{fmt_sha(marker['hash'])} {marker['subject']}"
+        )
+
     log_entries(
-        "dropped source commits",
-        plan["removed"],
+        "base removed files",
+        report["base_removed"],
         lambda item: (
-            f"{fmt_sha(item['hash'])} "
-            f"{truncate_text(item['subject'], 60)} - {item['reason']}"
+            f"{fmt_sha(item['first_source'])} {item['subject']} - "
+            f"{item['paths']} path(s)"
+        ),
+    )
+    log_entries(
+        "promoted from g11",
+        report["promoted"],
+        lambda item: (
+            f"{fmt_sha(item['hash'])} -> {fmt_group(item['to_group'])}: "
+            f"{item['subject']}"
+        ),
+    )
+    log_entries(
+        "split promotions",
+        report.get("splits", []),
+        lambda item: (
+            f"{fmt_sha(item['hash'])} {fmt_group(item['group'])}: "
+            f"{item['clean_paths']} path(s) promoted, "
+            f"{item['blocked_paths']} path(s) deferred "
+            f"({item['reason']}): {item['subject']}"
+        ),
+    )
+    log_entries(
+        "g5 extracted-path commits",
+        report.get("extracted", []),
+        lambda item: f"{fmt_sha(item['hash'])} {item['path']}: {item['subject']}",
+    )
+    log_entries(
+        "failed promotions moved to g10",
+        report["kept"],
+        lambda item: (
+            f"{fmt_sha(item['hash'])} candidate {fmt_group(item['candidate_group'])}: "
+            f"{item['subject']} ({item['reason']})"
         ),
     )
     log_entries(
@@ -981,8 +2132,7 @@ def print_final_report(args, base_hash, input_hash, parsed_count, plan, report):
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(
-        description="Reorder a Percona Server branch: emit g1-g4 only, keep the "
-                    "rest of the commits intact in source order."
+        description="Reorder a Percona Server branch using the ps-reorder2 two-pass algorithm."
     )
     parser.add_argument("--input-branch", required=True,
                         help="input branch or commit to reorder")
@@ -996,15 +2146,13 @@ def parse_args(argv):
                         help="allow starting from a dirty worktree")
     parser.add_argument("--no-reconcile", action="store_true",
                         help="fail instead of creating a final reconciliation commit")
-    parser.add_argument("--no-rest-marker", action="store_true",
-                        help="do not emit the marker before the kept commits")
-    parser.add_argument("--reclassify-groups", action="store_true",
-                        help="classify every commit by path, including commits "
-                             "already found in the input g2-g4 sections "
-                             "(default: keep those commits intact)")
-    parser.add_argument("--keep-empty", action="store_true",
-                        help="keep kept commits that became empty after the "
-                             "g1-g4 paths were extracted")
+    parser.add_argument("--patch-emit", choices=PATCH_EMIT_CHOICES,
+                        default="all",
+                        help="which items are emitted as a 3-way patch instead "
+                             "of a whole-file snapshot: 'all' (default) "
+                             "patch-emits everything and reduces the promotion "
+                             "clobber guard to real hunk overlap; 'promoted' "
+                             "patch-emits relocated items only")
     parser.add_argument("--color", choices=("auto", "always", "never"),
                         default="auto",
                         help="colorize progress output (default: auto)")
@@ -1014,36 +2162,39 @@ def parse_args(argv):
 def main(argv=None):
     args = parse_args(argv or sys.argv[1:])
     configure_color(args.color)
+    EMIT_CONFIG["patch_emit"] = args.patch_emit
     if not args.allow_dirty:
         ensure_clean_worktree()
 
     base_hash = git_rev_parse(args.base_branch)
     input_hash = git_rev_parse(args.input_branch)
     commits = get_commit_list(base_hash, input_hash)
-    parsed, removed_markers, labels = parse_source_commits(commits)
+    parsed, removed_markers, had_markers, identical_marker = (
+        parse_source_commits(commits))
+    removed_paths = analyze_removed_paths(parsed, base_hash, input_hash)
+    plan = plan_commits(parsed, removed_markers, removed_paths, base_hash)
+    plan["identical_marker"] = identical_marker
+    report = {
+        "emitted": [],
+        "promoted": [],
+        "splits": [],
+        "extracted": [],
+        "kept": [],
+        "skipped": [],
+        "squashed": [],
+        "base_removed": [],
+    }
 
     log(
         f"{STYLE.bold('input commits')}: {len(commits)} total, "
         f"{len(parsed)} non-marker"
     )
-    log_source_groups(parsed, labels,
-                      keep_in_place=not args.reclassify_groups)
-    if labels and not args.reclassify_groups:
-        log(
-            f"  {STYLE.dim('g2-g4 commits keep their place; only paths owned by an')} "
-            f"{STYLE.dim('earlier group are extracted')}"
-        )
-
-    plan = plan_commits(parsed, removed_markers, base_hash, input_hash,
-                        keep_in_place=not args.reclassify_groups)
-    report = {
-        "emitted": [],
-        "skipped": [],
-        "squashed": [],
-    }
+    marker_status = STYLE.green("yes") if had_markers else STYLE.yellow("no")
+    log(f"{STYLE.bold('recognized markers')}: {marker_status}")
 
     build_output(args, input_hash, base_hash, plan, report)
-    print_final_report(args, base_hash, input_hash, len(parsed), plan, report)
+    print_final_report(args, base_hash, input_hash, len(parsed), had_markers,
+                       plan, report)
     return 0
 
 

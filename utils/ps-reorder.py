@@ -78,10 +78,15 @@ when it is planned, before any other subject tag is added, so they do not
 reach any group the commit or its split parts land in.
 
 An input commit whose subject starts with "===== MARKER: source code identical
-to <ref>@<sha>" is not replayed in place. The latest such commit is emitted,
+to" (normally followed by "<ref>@<sha>") is not replayed in place. The latest such commit is emitted,
 with its own metadata and message, as the very last output commit, after the
 final reconciliation commit, so it still marks a tree identical to the input;
-any earlier one is dropped.
+any earlier one is kept in place like any other empty "=====" commit.
+
+An empty input commit whose subject starts with "=====" (other than the
+regenerated GROUP markers and the latest source-identical marker) is kept: it
+is emitted, as an empty commit with its own metadata and message, in its
+source group at its source position, and it is never promoted.
 """
 
 import argparse
@@ -182,7 +187,11 @@ GROUP_NAME_TO_NUMBER = {name: number for number, name in GROUPS.items()}
 MARKER_RE = re.compile(r"^={3,} MARKER: GROUP \d+ — (.+?) ={3,}$")
 # "===== MARKER: source code identical to <ref>@<sha> ...": the latest one in
 # the input is re-emitted, with its own metadata, as the last output commit.
-IDENTICAL_MARKER_RE = re.compile(r"^={3,} MARKER: source code identical to \S")
+# The "<ref>@<sha>" part is optional, since a subject truncated right after
+# "identical to" still marks the input tree.
+IDENTICAL_MARKER_RE = re.compile(r"^={3,} MARKER: source code identical to(\s|$)")
+# Empty input commits whose subject starts with this are kept in place.
+KEPT_EMPTY_SUBJECT_PREFIX = "====="
 
 
 G1_DOC = "doc"
@@ -493,17 +502,17 @@ def parse_source_commits(commits):
     current = 11
     parsed = []
     removed_markers = []
+    identical_pos = max(
+        (pos for pos, commit in enumerate(commits)
+         if IDENTICAL_MARKER_RE.match(infos[commit]["subject"])),
+        default=None)
     identical_marker = None
 
     for pos, commit in enumerate(commits):
         info = infos[commit]
-        if IDENTICAL_MARKER_RE.match(info["subject"]):
-            if identical_marker is not None:
-                removed_markers.append({
-                    "hash": identical_marker["hash"],
-                    "subject": identical_marker["subject"],
-                    "reason": "source-identical marker superseded by a later one",
-                })
+        if pos == identical_pos:
+            # Earlier source-identical markers fall through and are kept in
+            # place like any other empty "=====" commit.
             identical_marker = info
             continue
         group = marker_group(info["subject"])
@@ -818,7 +827,9 @@ def plan_commits(parsed, removed_markers, removed_paths, base_hash):
         "g1_files": defaultdict(set),
         "g1_first_info": {},
         "g1_first_pos": {},
-        "buckets": {number: [] for number in range(2, 12)},
+        # Bucket 1 only holds kept empty "=====" commits; the g1 squashes are
+        # planned in g1_files.
+        "buckets": {number: [] for number in range(1, 12)},
         "removed": list(removed_markers),
         "base_removed_files": sorted(base_removed),
         "transient_removed_files": sorted(transient_removed),
@@ -846,6 +857,11 @@ def plan_commits(parsed, removed_markers, removed_paths, base_hash):
 
     for src in parsed:
         files = src["files"]
+        if not files and src["info"]["subject"].startswith(KEPT_EMPTY_SUBJECT_PREFIX):
+            item = make_item(src, [], src["source_group"], "kept-empty")
+            item["keep_empty"] = True
+            plan["buckets"][src["source_group"]].append(item)
+            continue
         if skipped_paths:
             base_refs = sum(1 for path in files if path in base_removed)
             transient_refs = sum(1 for path in files if path in transient_removed)
@@ -1182,7 +1198,9 @@ def emit_marker(group):
 def emit_item(item, report, label):
     if item.get("target_group") == 10 and item.get("split_g4"):
         item["subject"] = add_myrocks_prefix(item["subject"])
-    if item_emission_mode(item) == "patch":
+    if item.get("keep_empty"):
+        item["emitted_as"] = "empty"
+    elif item_emission_mode(item) == "patch":
         if apply_item_patch(item):
             item["emitted_as"] = "patch"
         else:
@@ -1201,6 +1219,7 @@ def emit_item(item, report, label):
         item["emitted_as"] = "state"
         apply_item_file_states(item)
     ok = commit_with_info(item["info"], item["subject"], item["body"],
+                          allow_empty=item.get("keep_empty", False),
                           original_subject=item.get("original_subject"))
     entry = {
         "hash": item["source_hash"],
@@ -1757,7 +1776,7 @@ def promote_from_g11(plan, group, report):
     splittable = group in SPLIT_PROMOTION_GROUPS
 
     for item in plan["buckets"][11]:
-        if item.get("kept_from_group") is not None:
+        if item.get("kept_from_group") is not None or item.get("keep_empty"):
             remaining.append(item)
             continue
         if not matches_target_group(item, group):
@@ -1874,7 +1893,7 @@ def drain_g10_candidates(plan, report):
     skipped_empty = 0
 
     for item in plan["buckets"][11]:
-        if not matches_target_group(item, 10):
+        if item.get("keep_empty") or not matches_target_group(item, 10):
             remaining.append(item)
             continue
 
@@ -1962,6 +1981,8 @@ def build_output(args, input_hash, base_hash, plan, report):
     for cat in sorted(plan["g1_files"], key=lambda key: plan["g1_first_pos"][key]):
         emit_squash(input_hash, cat, plan["g1_files"][cat],
                     plan["g1_first_info"][cat], report)
+    if plan["buckets"][1]:
+        emit_existing_group(plan, 1, report)
 
     for group in (2, 3, 4):
         emit_marker(group)
@@ -2025,6 +2046,7 @@ def print_final_report(args, base_hash, input_hash, parsed_count,
         f"{STYLE.bold('emission mode')}: {STYLE.cyan(args.patch_emit)} "
         f"(patch={STYLE.green(str(modes['patch']))}, "
         f"snapshot={STYLE.yellow(str(modes['state']))}, "
+        f"empty={STYLE.cyan(str(modes['empty']))}, "
         f"patch-fallback={STYLE.red(str(modes['patch-fallback-state']))})"
     )
     log(f"{STYLE.bold('promoted from g11')}: {STYLE.green(str(len(report['promoted'])))}")
